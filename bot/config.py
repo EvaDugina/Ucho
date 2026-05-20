@@ -29,3 +29,10 @@ DOMAINS = (
 )
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# Служебная папка внутри vault — наша «приватная» зона.
+# Юзер не должен в ней копаться в Obsidian; это manifest + лог + (на будущее)
+# migration-proposal.
+PSYCHO_META_DIR = VAULT_PATH / ".psycho"
+MANIFEST_PATH = PSYCHO_META_DIR / "manifest.json"
+LOG_PATH = PSYCHO_META_DIR / "log.md"

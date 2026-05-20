@@ -11,6 +11,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from . import vault
 from .config import (
     DOMAINS,
     OPENAI_API_KEY,
@@ -82,7 +83,13 @@ async def ask_next(
     if "question" not in data or "domain" not in data:
         raise ValueError(f"malformed ask payload: {data}")
     if data["domain"] not in DOMAINS:
-        log.warning("LLM returned unknown domain %r, falling back to 'everyday'", data["domain"])
+        bad = data["domain"]
+        log.warning("LLM returned unknown domain %r, falling back to 'everyday'", bad)
+        vault.append_log(
+            "warn",
+            "llm_domain_fallback",
+            f"ask: LLM returned domain={bad!r} → coerced to 'everyday'",
+        )
         data["domain"] = "everyday"
     return data
 

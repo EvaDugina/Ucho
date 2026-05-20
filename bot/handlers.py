@@ -12,10 +12,19 @@ from aiogram.types import (
     Message,
 )
 
-from . import graph, session, vault
+from . import graph, moc, session, vault
 from .config import DOMAINS, OPENAI_MODEL, OWNER_TELEGRAM_ID, VAULT_PATH
 from .graph import Concept, Evidence, RELATION_KINDS
 from .llm import ask_next, ping_llm, process_answer, review_query, summarize_session
+from .validation import (
+    MAX_USER_TEXT,
+    is_valid_telegram_command_arg,
+    safe_evidence_text,
+    safe_name,
+    safe_slug,
+    safe_summary,
+    safe_user_text,
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -74,6 +83,13 @@ def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
     Тело: <code>…</code> — inline-моноширинный шрифт. Telegram также даёт
     long-press «копировать» на <code>.
     Отправлять с parse_mode='HTML'.
+
+    Все динамические подстановки экранируются через ``html.escape`` —
+    защита от HTML-injection из ответа LLM (Telegram не должен интерпретировать
+    LLM-вывод как разметку).
+
+    ``question_text`` обрезается до ~3500 символов — Telegram режет по 4096
+    байт, нужен запас на head + теги ``<code>``.
     """
     label = USER_DOMAIN_LABEL if domain == USER_DOMAIN else domain
     parts = [f"Q{q_num}"]
@@ -81,13 +97,36 @@ def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
         parts.append(html.escape(mode))
     parts.append(f"<i>{html.escape(label)}</i>")
     head = " · ".join(parts)
-    body = html.escape(question_text)
+    safe_q = question_text or ""
+    if len(safe_q) > 3500:
+        safe_q = safe_q[:3500].rstrip() + "…"
+    body = html.escape(safe_q)
     return f"{head}\n\n<code>{body}</code>"
 
 
 def _real_domain(d: str | None) -> str | None:
     """Возвращает d только если это валидный концептный домен. Иначе None."""
     return d if d in DOMAINS else None
+
+
+async def _accept_user_text(message: Message, raw: str) -> str | None:
+    """Принять текст пользователя для записи/обработки.
+
+    * Применяет ``safe_user_text`` (нормализация переводов строк, отсечение
+      control-символов, обрезка по ``MAX_USER_TEXT``).
+    * Если был обрезан — отвечает пользователю предупреждением и логирует.
+    * Возвращает очищенный текст или None если он пустой после санитизации.
+    """
+    text, truncated = safe_user_text(raw)
+    if not text:
+        await message.answer("Пустой ответ. Напиши хоть что-то или /end.")
+        return None
+    if truncated:
+        vault.append_log("warn", "user_text_truncated", f"len(raw)={len(raw)} > {MAX_USER_TEXT}")
+        await message.answer(
+            f"⚠ Ответ был длиннее {MAX_USER_TEXT} символов — обрезал, чтобы влезло в контекст."
+        )
+    return text
 
 
 # ---------- thinking / spinner ----------
@@ -192,9 +231,27 @@ def _apply_processed(
     original_question: str,
     original_answer: str,
 ) -> None:
-    """Записать в raw и применить изменения к графу."""
+    """Записать в raw и применить изменения к графу. Транзакция через git_wrap."""
+    with vault.git_wrap(f"apply_processed Q{q_num}"):
+        _apply_processed_inner(result, q_num, asked_at, original_question, original_answer)
+
+
+def _apply_processed_inner(
+    result: dict,
+    q_num: int,
+    asked_at: datetime,
+    original_question: str,
+    original_answer: str,
+) -> None:
     raw_entry = result.get("raw_entry") or {}
     raw_domain = raw_entry.get("domain") or "everyday"
+    if raw_domain not in DOMAINS:
+        vault.append_log(
+            "warn",
+            "llm_domain_fallback",
+            f"process: LLM raw_entry.domain={raw_domain!r} → coerced to 'everyday'",
+        )
+        raw_domain = "everyday"
     raw_fragment = raw_entry.get("fragment") or original_answer[:200]
 
     vault.append_raw(
@@ -211,22 +268,72 @@ def _apply_processed(
         raw_time=asked_at.strftime("%H:%M"),
     )
 
-    raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}|Q{q_num}]]"
+    # Obsidian-native: ссылка на конкретный Q-блок (block-ref ^Q<n>) вместо
+    # просто на день. Клик в концепте → точное место в raw.
+    raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}#^Q{q_num}]]"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    session_marker = f"chat · {now_str}"
 
-    # 1. Создать новые концепты (со связями)
+    # Домены, в которых что-то поменялось — для последующего rebuild MOC.
+    touched_domains: set[str] = set()
+
+    # 1. Создать новые концепты (со связями). Сначала через resolve_slug + Jaccard
+    # проверяем — не дубликат ли это под другим именем; если да, переводим в
+    # update вместо create.
     for c_data in result.get("concepts_to_create", []):
         try:
+            raw_slug = c_data.get("slug") or ""
+            target_domain = c_data.get("domain", raw_domain) if c_data.get("domain") in DOMAINS else raw_domain
+            existing = graph.resolve_slug(raw_slug, domain=target_domain) if raw_slug else None
+
+            # Если по slug/alias не нашли — пробуем по summary через Jaccard.
+            if not existing:
+                summary_text = c_data.get("summary") or ""
+                similar = graph.find_similar_concept(summary_text, target_domain)
+                if similar is not None:
+                    existing = similar.slug
+                    vault.append_log(
+                        "info",
+                        "dedup_jaccard",
+                        f"LLM proposed new {raw_slug!r}, but summary overlaps {similar.slug!r} ≥0.7 → update",
+                    )
+
+            if existing:
+                # уже есть концепт с этим slug или alias — добавим evidence и
+                # alias (если новая формулировка отличается от существующих)
+                vault.append_log(
+                    "info",
+                    "concept_alias_resolved",
+                    f"LLM proposed {raw_slug!r} → existing {existing!r}",
+                )
+                graph.append_evidence(
+                    existing,
+                    Evidence(
+                        when=now_str,
+                        text=c_data.get("evidence", original_answer[:200]),
+                        raw_ref=raw_ref,
+                    ),
+                )
+                # Если LLM прислала отличающееся имя — сохраним как alias.
+                proposed_name = (c_data.get("name") or raw_slug).strip()
+                if proposed_name and proposed_name != existing:
+                    graph.add_alias(existing, proposed_name)
+                touched_domains.add(target_domain)
+                continue
+
             concept = Concept(
-                slug=c_data["slug"],
-                name=c_data.get("name", c_data["slug"]),
+                slug=raw_slug,
+                name=c_data.get("name", raw_slug),
                 type=c_data.get("type", "claim"),
-                domain=c_data.get("domain", raw_domain),
+                domain=target_domain,
                 summary=c_data.get("summary", ""),
                 status="tentative",
+                aliases=[a for a in (c_data.get("aliases") or []) if isinstance(a, str)],
                 evidence=[Evidence(when=now_str, text=c_data.get("evidence", original_answer[:200]), raw_ref=raw_ref)],
+                source_session=session_marker,
             )
             graph.save_concept(concept)
+            touched_domains.add(target_domain)
             for rel in c_data.get("relations") or []:
                 kind = rel.get("kind", "related")
                 to_slug = rel.get("to")
@@ -235,11 +342,13 @@ def _apply_processed(
         except Exception:
             log.exception("failed to create concept from %r", c_data)
 
-    # 2. Обновить существующие
+    # 2. Обновить существующие. slug проходит через resolve_slug — если LLM
+    # назвала концепт его алиасом, попадаем в нужный файл.
     for u in result.get("concepts_to_update", []):
-        slug = u.get("slug")
-        if not slug:
+        raw_slug = u.get("slug") or ""
+        if not raw_slug:
             continue
+        slug = graph.resolve_slug(raw_slug) or raw_slug
         try:
             ev_text = u.get("append_evidence")
             if ev_text:
@@ -247,6 +356,10 @@ def _apply_processed(
             summary_patch = u.get("summary_patch")
             if summary_patch:
                 graph.patch_summary(slug, summary_patch)
+            # узнаём домен задним числом — нужен для MOC rebuild
+            c_loaded = graph.load_concept(slug)
+            if c_loaded:
+                touched_domains.add(c_loaded.domain)
         except Exception:
             log.exception("failed to update concept %s", slug)
 
@@ -254,20 +367,41 @@ def _apply_processed(
     for r in result.get("relations_to_add", []):
         try:
             graph.add_relation(r["from"], r["to"], r["kind"], note=r.get("note"))
+            for endpoint in (r.get("from"), r.get("to")):
+                if not endpoint:
+                    continue
+                c_loaded = graph.load_concept(endpoint)
+                if c_loaded:
+                    touched_domains.add(c_loaded.domain)
         except Exception:
             log.exception("failed to add relation %r", r)
 
-    # 4. Конфликты: записать пробинг в оба концепта
+    # 4. Конфликты: связь contradicts + контр-callout `[!contradiction]` в оба
+    # концепта (Obsidian-native — виден как цветной блок в Reader-режиме).
     for conf in result.get("conflicts", []):
-        a, b, probe = conf.get("concept_a"), conf.get("concept_b"), conf.get("probe")
-        if not (a and b and probe):
+        a_raw, b_raw, probe = conf.get("concept_a"), conf.get("concept_b"), conf.get("probe")
+        if not (a_raw and b_raw and probe):
             continue
+        a = graph.resolve_slug(a_raw) or a_raw
+        b = graph.resolve_slug(b_raw) or b_raw
         try:
             graph.add_relation(a, b, "contradicts")
-            graph.append_open_question(a, f"vs [[{b}]]: {probe}")
-            graph.append_open_question(b, f"vs [[{a}]]: {probe}")
+            graph.add_contradiction_note(a, b, probe)
+            graph.add_contradiction_note(b, a, probe)
+            for endpoint in (a, b):
+                c_loaded = graph.load_concept(endpoint)
+                if c_loaded:
+                    touched_domains.add(c_loaded.domain)
         except Exception:
             log.exception("failed to record conflict %s/%s", a, b)
+
+    # 5. Пересобрать MOC для каждого затронутого домена (атомарно, внутри
+    # текущей git_wrap транзакции).
+    for d in touched_domains:
+        try:
+            moc.rebuild_domain_moc(d)
+        except Exception:
+            log.exception("failed to rebuild MOC for domain %s", d)
 
 
 # ---------- commands ----------
@@ -311,6 +445,9 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
     if not _is_owner(message):
         return
     domain = (command.args or "").strip().lower() or None
+    if domain and not is_valid_telegram_command_arg(domain, max_len=50):
+        await message.answer("Аргумент не валиден.")
+        return
     if domain and domain not in DOMAINS:
         await message.answer(f"Не знаю домен «{domain}». Доступны: {', '.join(DOMAINS)}.")
         return
@@ -327,10 +464,11 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         await callback.answer()
         return
     payload = (callback.data or "").split(":", 1)[1]
-    domain = None if payload == "any" else payload
-    if domain is not None and domain not in DOMAINS:
+    # Whitelist: только 'any' или конкретный домен из закрытого списка.
+    if payload != "any" and payload not in DOMAINS:
         await callback.answer("Неизвестный домен", show_alert=True)
         return
+    domain = None if payload == "any" else payload
     if callback.message:
         try:
             label = _DOMAIN_LABELS.get(domain or "", "🎲 на выбор бота")
@@ -352,10 +490,16 @@ async def cmd_discuss(message: Message, command: CommandObject) -> None:
     target_slug = None
     target_domain = None
     if arg:
+        if not is_valid_telegram_command_arg(arg):
+            await message.answer("Аргумент не валиден. Используй имя домена или slug концепта.")
+            return
         if arg in DOMAINS:
             target_domain = arg
         else:
-            target_slug = arg
+            target_slug = safe_slug(arg)
+            if not target_slug:
+                await message.answer(f"«{arg}» не похоже на slug. Доступные домены: {', '.join(DOMAINS)}.")
+                return
             c = graph.load_concept(target_slug)
             if c is None:
                 await message.answer(f"Концепт `{target_slug}` не найден. Доступные домены: {', '.join(DOMAINS)}.")
@@ -413,6 +557,9 @@ async def cmd_retry(message: Message, command: CommandObject) -> None:
     except ValueError:
         await message.answer("Использование: /retry <номер>. Список: /history.")
         return
+    if n <= 0 or n > 10**9:
+        await message.answer("Номер вне разумного диапазона.")
+        return
     entry = vault.find_question(n)
     if entry is None:
         await message.answer(f"Q{n} не найден. /history покажет доступные.")
@@ -439,10 +586,16 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
     """Пользователь сам задаёт вопрос. Бот дублирует его как Q под меткой «пользовательский»."""
     if not _is_owner(message):
         return
-    text = (command.args or "").strip()
-    if not text:
+    raw = (command.args or "").strip()
+    if not raw:
         await message.answer("Использование: /requestion <текст твоего вопроса>")
         return
+    text, truncated = safe_user_text(raw, limit=2000)
+    if not text:
+        await message.answer("Пустой вопрос после очистки. Попробуй ещё раз.")
+        return
+    if truncated:
+        await message.answer("⚠ Вопрос был слишком длинным — обрезал.")
 
     new_n = vault.next_q_num()
     session.start(mode="probe", domain=None)
@@ -514,10 +667,16 @@ async def cmd_answer(message: Message, command: CommandObject) -> None:
     except ValueError:
         await message.answer("Первый аргумент — номер вопроса. Пример: /answer 7 мой ответ.")
         return
+    if n <= 0 or n > 10**9:
+        await message.answer("Номер вне разумного диапазона.")
+        return
     if len(parts) < 2 or not parts[1].strip():
         await message.answer("После номера нужен текст ответа. Пример: /answer 7 мой ответ.")
         return
-    answer_text = parts[1].strip()
+    clean = await _accept_user_text(message, parts[1])
+    if clean is None:
+        return
+    answer_text = clean
 
     s = session.get()
 
@@ -571,7 +730,8 @@ async def cmd_answer(message: Message, command: CommandObject) -> None:
     debate = (result.get("debate_message") or "").strip()
     head = f"Записал как Q{new_n} (доп. ответ на Q{n} · {domain})."
     if debate:
-        await message.answer(f"{head}\n\n{debate}")
+        for chunk in _split_for_telegram(f"{head}\n\n{debate}"):
+            await message.answer(chunk)
     else:
         await message.answer(head)
 
@@ -616,6 +776,10 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
     s = session.get()
     if s is None:
         return
+    clean = await _accept_user_text(message, text)
+    if clean is None:
+        return
+    text = clean
     if s.current_q_num is None:
         log.warning("session has no current_q_num; assigning fresh")
         s.current_q_num = vault.next_q_num()
@@ -671,14 +835,16 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
             comment = "Сессия закрыта."
         await _stop_thinking(thinking2)
         if comment:
-            await message.answer(comment)
+            for chunk in _split_for_telegram(comment):
+                await message.answer(chunk)
         session.clear()
         return
 
     if close:
         # discuss-ветка с close=False сюда не попадает; этот блок для будущей совместимости.
         if debate:
-            await message.answer(debate)
+            for chunk in _split_for_telegram(debate):
+                await message.answer(chunk)
         await message.answer("Закрыл сессию.")
         session.clear()
         return
@@ -689,7 +855,8 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
     # Новый поясняющий вопрос — счётчик +1
     new_n = vault.next_q_num()
     s.record_assistant(debate)
-    next_domain = (result.get("raw_entry") or {}).get("domain") or s.last_domain or "everyday"
+    raw_next = (result.get("raw_entry") or {}).get("domain")
+    next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
     session.set_question(debate, next_domain, q_num=new_n)
     if s.mode == "probe":
         s.clarifier_count += 1
@@ -701,6 +868,10 @@ async def _handle_review(message: Message, text: str) -> None:
     s = session.get()
     if s is None:
         return
+    clean = await _accept_user_text(message, text)
+    if clean is None:
+        return
+    text = clean
     s.record_user(text)
     thinking = await _start_thinking(message)
     try:
@@ -737,21 +908,36 @@ async def _commit_review_additions(message: Message) -> None:
     raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}|review]]"
     now_str = asked_at.strftime("%Y-%m-%d %H:%M")
     added = 0
-    for a in s.pending_review_additions:
-        try:
-            concept = Concept(
-                slug=a["slug"],
-                name=a.get("name", a["slug"]),
-                type=a.get("type", "claim"),
-                domain=a.get("domain", "everyday"),
-                summary=a.get("summary", ""),
-                status="tentative",
-                evidence=[Evidence(when=now_str, text=a.get("evidence", ""), raw_ref=raw_ref)],
-            )
-            graph.save_concept(concept)
-            added += 1
-        except Exception:
-            log.exception("failed to add concept from review: %r", a)
+    additions = list(s.pending_review_additions)
+    touched: set[str] = set()
+    try:
+        with vault.git_wrap("review_additions"):
+            for a in additions:
+                try:
+                    target_domain = a.get("domain", "everyday")
+                    if target_domain not in DOMAINS:
+                        target_domain = "everyday"
+                    concept = Concept(
+                        slug=a["slug"],
+                        name=a.get("name", a["slug"]),
+                        type=a.get("type", "claim"),
+                        domain=target_domain,
+                        summary=a.get("summary", ""),
+                        status="tentative",
+                        evidence=[Evidence(when=now_str, text=a.get("evidence", ""), raw_ref=raw_ref)],
+                    )
+                    if graph.save_concept(concept) is not None:
+                        added += 1
+                        touched.add(target_domain)
+                except Exception:
+                    log.exception("failed to add concept from review: %r", a)
+            for d in touched:
+                try:
+                    moc.rebuild_domain_moc(d)
+                except Exception:
+                    log.exception("failed to rebuild MOC for domain %s", d)
+    except Exception:
+        log.exception("review_additions transaction failed")
     s.pending_review_additions = []
     session.persist()
     await message.answer(f"Записал {added} концептов.")

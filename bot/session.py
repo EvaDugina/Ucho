@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Literal, Optional
 
+from .atomic import atomic_write_json
 from .config import VAULT_PATH
 
 log = logging.getLogger(__name__)
@@ -74,11 +75,7 @@ def _persist() -> None:
             if SESSION_FILE.exists():
                 SESSION_FILE.unlink()
             return
-        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SESSION_FILE.write_text(
-            json.dumps(_active.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_json(SESSION_FILE, _active.to_dict())
     except Exception:
         log.exception("failed to persist session")
 
