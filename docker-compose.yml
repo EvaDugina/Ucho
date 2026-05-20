@@ -22,9 +22,10 @@ services:
     env_file:
       - .env
     volumes:
-      # Папка Psycho внутри Obsidian-вольта → /vault в контейнере. Только её и трогаем.
-      # Путь берётся из VAULT_HOST_PATH в .env (см. .env.example).
-      - "${VAULT_HOST_PATH:-C:/Users/eva/YandexDisk/Obsidian/Psycho}:/vault"
+      # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
+      # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,
+      # чтобы путь не дублировался в двух местах.
+      - "${VAULT_HOST_PATH:?set VAULT_HOST_PATH in .env (see .env.example)}:/vault"
     depends_on:
       - ollama
 
