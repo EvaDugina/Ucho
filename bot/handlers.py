@@ -42,7 +42,7 @@ USER_DOMAIN = "user"
 USER_DOMAIN_LABEL = "пользовательский"
 
 # В режиме probe — главный вопрос плюс не более N поясняющих, затем закрывающий комментарий.
-MAX_CLARIFIERS = 2
+MAX_CLARIFIERS = 1
 
 
 def _ask_keyboard() -> InlineKeyboardMarkup:
@@ -100,20 +100,28 @@ def _thinking_token() -> str:
 
 
 async def _start_thinking(message: Message, text: str | None = None) -> Message | None:
-    """Послать placeholder-сообщение. Возвращает Message для последующего удаления.
+    """Послать индикатор «думаю».
 
-    Без аргумента — рандомный кубик/дартс/слот-эмодзи, ротация на каждый вызов.
+    Гибрид: dice-стикер (анимация, Telegram запрещает его удалять) + текстовый
+    placeholder «…» (его удалим, когда ответ готов). Возвращает Message текстового
+    placeholder для последующего удаления — dice остаётся в чате как маркер
+    «здесь был ход размышления».
     """
-    if text is None:
-        text = _thinking_token()
+    emoji = text if text in _THINKING_EMOJIS else _thinking_token()
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")
     except Exception:
         pass
+    # 1. Анимированный dice — sendDice. Удалить нельзя, но анимация играет.
     try:
-        return await message.answer(text)
+        await message.answer_dice(emoji=emoji)
     except Exception:
-        log.exception("failed to send thinking message")
+        log.exception("failed to send dice indicator")
+    # 2. Удаляемый текстовый placeholder.
+    try:
+        return await message.answer("Думаю.")
+    except Exception:
+        log.exception("failed to send thinking placeholder")
         return None
 
 
@@ -783,7 +791,11 @@ async def _send_next_question(
         pass
     thinking = None
     try:
-        thinking = await bot.send_message(chat_id, _thinking_token())
+        try:
+            await bot.send_dice(chat_id, emoji=_thinking_token())
+        except Exception:
+            log.exception("failed to send dice in _send_next_question")
+        thinking = await bot.send_message(chat_id, "Думаю.")
     except Exception:
         log.exception("failed to send thinking message")
 
