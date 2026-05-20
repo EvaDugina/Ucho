@@ -8,47 +8,54 @@
 
 **Приватность:** LLM работает **локально** через Ollama. Данные не уходят в OpenAI/Anthropic. Бот молчит со всеми, кроме владельца (whitelist по `OWNER_TELEGRAM_ID`).
 
-Стадия: **PoC B**. Граф пишется в `C:\Users\eva\YandexDisk\Obsidian\Psycho`.
+Стадия: **PoC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH` (по умолчанию `C:\Users\eva\YandexDisk\Obsidian\Psycho`).
 
 ## Что появляется в вольте
 
 ```
 Psycho/
-├─ raw/2026-05-18.md              # сырые Q&A за день
+├─ raw/2026-05-18.md              # сырые Q&A дня, каждая запись с Q-номером
 ├─ concepts/
-│   ├─ ethics/
-│   │   ├─ chestnost.md           # узел графа со связями во frontmatter
-│   │   └─ ...
+│   ├─ ethics/                    # узлы графа со связями во frontmatter
 │   ├─ aesthetics/
 │   ├─ politics/
-│   └─ everyday/
-├─ profile/                        # короткие сводки по доменам
-└─ _index.md
+│   ├─ everyday/
+│   ├─ relationships/
+│   ├─ identity/
+│   ├─ mortality/
+│   ├─ nationality/
+│   ├─ knowledge/
+│   └─ work/
+├─ profile/                        # короткие сводки по доменам (10 файлов)
+├─ _index.md                       # навигация
+├─ _state.json                     # счётчик Q-номеров
+└─ _session.json                   # активная сессия (создаётся при /ask)
 ```
 
 Чтобы увидеть граф: **Obsidian → Graph View → фильтр `path:concepts/`**.
 
 ## Установка
 
-### 1. Подготовь среду
+### 1. Среда
 
-- Установи Docker Desktop с включённым **WSL 2 based engine**.
-- Драйвер NVIDIA — актуальный (581.x+).
-- Желательно — [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#installation) для проброса GPU в Docker. Без него Ollama пойдёт на CPU и 14B-модель будет недопустимо медленной.
+- Docker Desktop с **WSL 2 based engine**.
+- Драйвер NVIDIA 581.x+ для GPU-проброса.
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#installation) — без него Qwen 14B будет на CPU и недопустимо медленной.
 
-### 2. Получи токены
+### 2. Токены
 
-- Telegram: [@BotFather](https://t.me/BotFather) → `/newbot` → скопируй токен.
+- Telegram: [@BotFather](https://t.me/BotFather) → `/newbot` → токен.
 - Свой Telegram user_id: [@userinfobot](https://t.me/userinfobot) → `/start`.
-- В @BotFather также выполни:
-  - `/setjoingroups` → выбери бота → **Disable** (чтобы не добавляли в группы).
-  - `/setprivacy` → **Enable** (бот не видит чужие сообщения).
+- В @BotFather: `/setjoingroups` → Disable; `/setprivacy` → Enable.
 
 ### 3. Конфиг
 
 ```powershell
 cp .env.example .env
-# заполни TELEGRAM_BOT_TOKEN и OWNER_TELEGRAM_ID
+# обязательно заполни:
+#   TELEGRAM_BOT_TOKEN
+#   OWNER_TELEGRAM_ID
+#   VAULT_HOST_PATH  (если хранишь вольт не по дефолтному пути)
 ```
 
 ### 4. Запуск
@@ -58,42 +65,63 @@ docker compose up -d
 docker compose logs -f bot
 ```
 
-### 5. Скачай модель (первый раз, ~9 GB)
+### 5. Скачать модель (первый раз, ~9 GB)
 
 ```powershell
 docker exec -it psycho-ollama ollama pull qwen2.5:14b-instruct
+docker exec -it psycho-ollama nvidia-smi   # проверка GPU-проброса
 ```
 
-Проверь, что Ollama видит GPU:
-```powershell
-docker exec -it psycho-ollama nvidia-smi
-```
-Если выводит таблицу с RTX 3060 — всё ок. Если нет — Ollama пойдёт на CPU; см. секцию ниже.
-
-### 6. Проверка
-
-В Telegram напиши боту `/start`. Должно прийти приветствие. Дальше:
+## Команды бота
 
 | Команда | Что делает |
 |---|---|
-| `/ask` | Открытый вопрос, бот выберет домен сам |
-| `/ask ethics` | Вопрос в конкретном домене (`ethics` / `aesthetics` / `politics` / `everyday`) |
-| `/discuss` | Бот возьмёт самый «жирный» концепт и будет оппонировать |
-| `/discuss chestnost` | Оппонировать по конкретному концепту (slug, как имя файла) |
-| `/review` | Поговорить про базу. Можно подтверждать добавление новых концептов |
-| `/end` | Закрыть текущую сессию |
+| `/ask` | Главный вопрос. Без аргумента → inline-кнопки выбора домена + случайный домен |
+| `/ask <domain>` | Главный вопрос в конкретном домене |
+| `/requestion <текст>` | Твой собственный вопрос как главный (категория «пользовательский») |
+| `/discuss [slug \| domain]` | Оппонировать по концепту или в домене. Без лимитов, закрывается только `/end` |
+| `/review` | Разговор о базе знаний. Может предлагать добавления с подтверждением |
+| `/history` | Все вопросы и ответы со сквозными номерами |
+| `/retry <N>` | Задать заново вопрос Q\<N\> — с новым номером, как свежий главный |
+| `/answer <N> <текст>` | Ответить на Q\<N\> минуя сессию (для случая «бот рестартовал», «хочу дополнить старый ответ») |
+| `/ping` | Проверка живости бота и round-trip LLM |
+| `/end` / `/skip` | Закрыть текущую сессию |
+| `/start` | Подсказка по командам |
 
-После каждого ответа бот:
-1. Пишет сырое Q&A в `raw/YYYY-MM-DD.md`.
-2. Создаёт/расширяет концепты в `concepts/<domain>/<slug>.md`.
-3. Если нашёл противоречие — записывает в обе ноты в `## Открытые вопросы` и задаёт probe в чате.
-4. Шлёт острый follow-up, пока сессия не закрыта.
+Подсказки команд при наборе `/` показываются **только владельцу** (`BotCommandScopeChat`).
+
+## Иерархия вопросов
+
+В режиме `probe` (это `/ask`, `/requestion`, `/retry`, daily-таймер):
+
+```
+главный  →  ответ  →  поясняющий 1  →  ответ  →  поясняющий 2  →  ответ  →  комментарий + закрытие
+```
+
+- **Не больше 2 поясняющих** на одного главного. Лимит в `bot/handlers.py::MAX_CLARIFIERS`.
+- После последнего поясняющего бот делает отдельный LLM-вызов `summarize_session` (см. `prompts/summarize.md`) — 3–5 предложений plain text без вопросов, выделяет смысл/противоречие/линию.
+- `/discuss` живёт по другому закону: без лимита, закрывается только `/end`.
+
+## Как бот обрабатывает ответ
+
+1. Пишет сырое Q&A в `raw/YYYY-MM-DD.md` с заголовком `## Q42 · 14:32 · ethics`.
+2. LLM возвращает структуру: `concepts_to_create`, `concepts_to_update`, `relations_to_add`, `conflicts`, `debate_message`.
+3. Бот создаёт/расширяет концепт-ноты в `concepts/<domain>/<slug>.md` и обновляет frontmatter-связи (симметрично для `supports`/`contradicts`/`related`).
+4. На каждый conflict добавляет probe в `## Открытые вопросы` обеих сторон.
+5. Если есть `debate_message` и не достигнут лимит — это становится следующим поясняющим вопросом.
+
+## Персистентная сессия
+
+`<vault>/_session.json` сохраняется на каждое изменение (новый вопрос, ответ пользователя, изменение pending-добавлений). На старте бот её восстанавливает — рестарт контейнера не теряет контекст. `/end` файл удаляет.
+
+`<vault>/_state.json` — сквозной счётчик `last_q_num`. Тоже переживает рестарт.
 
 ## Если GPU не подцепилась
 
-Закомментируй блок `deploy.resources` в `docker-compose.yml` для сервиса `ollama` и переключи модель на 7B в `.env`:
+Закомментируй блок `deploy.resources` в `docker-compose.yml` для сервиса `ollama` и переключи модель на 7B:
 
-```
+```powershell
+# в .env
 OPENAI_MODEL=qwen2.5:7b-instruct
 ```
 
@@ -107,14 +135,16 @@ docker exec -it psycho-ollama ollama pull qwen2.5:7b-instruct
 ## Управление контейнерами
 
 ```powershell
-docker compose down                  # остановить
-docker compose up -d --build         # пересобрать bot после правок
+docker compose down                          # остановить
+docker compose up -d --build bot             # пересобрать только bot после правок
 docker compose logs --tail=200 bot
-docker exec -it psycho-ollama ollama list  # установленные модели
+docker exec -it psycho-ollama ollama list    # установленные модели
 ```
 
 ## Замечания
 
 - `.env` в `.gitignore`. Не коммить токены.
-- Все правки концептов в Obsidian сохраняются — бот при перезаписи читает текущее состояние из frontmatter и тела. **Не меняй имена slug-ов** в frontmatter, иначе ссылки сломаются — переименовывай только содержание.
+- Все правки концептов в Obsidian сохраняются — бот при перезаписи читает текущее состояние из frontmatter и тела. **Не меняй `slug` в frontmatter** — иначе ссылки сломаются. Переименовывай только содержание / заголовок.
 - Бот никогда не удаляет файлы. Чистить руками в Obsidian, если что-то лишнее.
+- Категория домена в сообщении бота выводится **курсивом**, текст вопроса — **моноширинным** (long-press для копирования).
+- Спиннер 🎰/🎲/🎯 во время LLM-вызовов автоматически удаляется по готовности ответа.
