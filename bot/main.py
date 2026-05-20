@@ -4,7 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeChat
 
-from . import session, vault
+from . import handlers, session, vault
 from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
 from .handlers import router
 from .scheduler import start_scheduler
@@ -55,6 +55,12 @@ async def main() -> None:
             restored.mode,
             restored.current_q_num,
         )
+        if restored.pending_answer:
+            log.info(
+                "pending_answer detected (Q%s, %d chars) — recovery will run after startup",
+                restored.current_q_num,
+                len(restored.pending_answer),
+            )
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
@@ -62,6 +68,13 @@ async def main() -> None:
 
     await _setup_commands(bot)
     scheduler = start_scheduler(bot)
+
+    # Recovery несработавшего LLM-цикла (двухфазный коммит pending_answer).
+    # Запускаем в фоне до start_polling — bot.send_message работает без активного polling,
+    # и пользователь увидит уведомление сразу, не дожидаясь следующего входящего сообщения.
+    if restored is not None and restored.pending_answer:
+        asyncio.create_task(handlers.process_pending_on_startup(bot))
+
     log.info("bot starting polling…")
     try:
         await dp.start_polling(bot)

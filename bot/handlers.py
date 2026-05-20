@@ -784,6 +784,11 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
         log.warning("session has no current_q_num; assigning fresh")
         s.current_q_num = vault.next_q_num()
         session.persist()
+    # Двухфазный коммит: сначала помечаем «есть необработанный ответ» на диске,
+    # потом запускаем LLM-цепочку. Если бот упадёт посреди — на следующем
+    # старте process_pending_on_startup дожмёт обработку.
+    s.pending_answer = text
+    session.persist()
     s.record_user(text)
     real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
     context_concepts = _context_for_domain(real_hint)
@@ -809,6 +814,11 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
         _apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text)
     except Exception:
         log.exception("apply_processed failed")
+
+    # Ответ обработан (или провалился частично) — снимаем pending. Recovery
+    # больше не должен пытаться повторить эту реплику, иначе задвоит граф.
+    s.pending_answer = None
+    session.persist()
 
     debate = (result.get("debate_message") or "").strip()
     close = bool(result.get("close_session"))
@@ -862,6 +872,144 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
         s.clarifier_count += 1
         session.persist()
     await message.answer(_format_q(new_n, s.mode, next_domain, debate), parse_mode="HTML")
+
+
+async def process_pending_on_startup(bot: Bot) -> None:
+    """Дожать висящий ответ после рестарта (двухфазный recovery).
+
+    Вызывается из main.py если session.restore() поднял сессию с
+    непустым pending_answer. Использует тот же pipeline что
+    _handle_probe_or_discuss, но без объекта Message — все ответы шлёт
+    через bot.send_message(OWNER_TELEGRAM_ID, ...). Нет dice-спиннера
+    (нечего привязывать), но typing-индикатор шлём.
+
+    На любую ошибку — лог в .psycho/log.md, pending_answer сохраняется
+    нетронутым (следующий рестарт попробует снова) ЕСЛИ apply_processed
+    не дошёл; если уже частично применили — сбрасываем, чтоб не задвоить.
+    """
+    s = session.get()
+    if s is None or not s.pending_answer:
+        return
+    if s.mode == "review":
+        # Recovery review-сценария не делаем — сбрасываем pending тихо.
+        vault.append_log("warn", "pending_answer_review_dropped", f"len={len(s.pending_answer)}")
+        s.pending_answer = None
+        session.persist()
+        return
+
+    text = s.pending_answer
+    q_num = s.current_q_num or vault.next_q_num()
+    question = s.last_question or s.main_question or ""
+
+    vault.append_log(
+        "warn",
+        "pending_answer_recovered",
+        f"Q{q_num} mode={s.mode} len={len(text)}",
+    )
+
+    try:
+        await bot.send_message(
+            OWNER_TELEGRAM_ID,
+            f"Дожимаю твой ответ на Q{q_num} — обработка прервалась при рестарте.",
+        )
+        await bot.send_chat_action(OWNER_TELEGRAM_ID, "typing")
+    except Exception:
+        log.exception("recovery: failed to notify owner")
+
+    real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
+    context_concepts = _context_for_domain(real_hint)
+
+    try:
+        result = await process_answer(
+            question=question,
+            answer=text,
+            domain_hint=real_hint,
+            context_concepts=context_concepts,
+            history=s.history[:-1] if s.history else None,
+            mode=s.mode,
+        )
+    except Exception:
+        log.exception("recovery: process_answer failed")
+        vault.append_log("error", "pending_answer_recovery_failed", f"Q{q_num} process_answer raised")
+        try:
+            await bot.send_message(
+                OWNER_TELEGRAM_ID,
+                "Не вышло прогнать через LLM. Pending-ответ оставлен на следующий рестарт. "
+                "Если не хочешь ждать — /end закроет сессию.",
+            )
+        except Exception:
+            pass
+        return  # pending_answer сохранён — повторим в следующий раз.
+
+    try:
+        _apply_processed(result, q_num, s.asked_at, question, text)
+    except Exception:
+        log.exception("recovery: apply_processed failed")
+        vault.append_log("error", "pending_answer_apply_failed", f"Q{q_num} apply_processed raised")
+
+    # Графа коснулись (даже частично) — снимаем pending, чтоб не задвоить.
+    s.pending_answer = None
+    session.persist()
+
+    debate = (result.get("debate_message") or "").strip()
+    close = bool(result.get("close_session"))
+    if s.mode == "discuss":
+        close = False
+    force_close_with_summary = (
+        s.mode == "probe" and s.clarifier_count >= MAX_CLARIFIERS
+    )
+
+    if force_close_with_summary or (s.mode == "probe" and close):
+        try:
+            comment = await summarize_session(
+                main_question=s.main_question or question,
+                exchanges=list(s.history),
+            )
+        except Exception:
+            log.exception("recovery: summarize_session failed")
+            comment = "Сессия закрыта."
+        if comment:
+            for chunk in _split_for_telegram(comment):
+                try:
+                    await bot.send_message(OWNER_TELEGRAM_ID, chunk)
+                except Exception:
+                    log.exception("recovery: failed to send summary chunk")
+        session.clear()
+        return
+
+    if close:
+        if debate:
+            for chunk in _split_for_telegram(debate):
+                try:
+                    await bot.send_message(OWNER_TELEGRAM_ID, chunk)
+                except Exception:
+                    log.exception("recovery: failed to send debate chunk")
+        try:
+            await bot.send_message(OWNER_TELEGRAM_ID, "Закрыл сессию.")
+        except Exception:
+            pass
+        session.clear()
+        return
+
+    if not debate:
+        debate = "Понял, продолжим — что скажешь дальше?"
+
+    new_n = vault.next_q_num()
+    s.record_assistant(debate)
+    raw_next = (result.get("raw_entry") or {}).get("domain")
+    next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
+    session.set_question(debate, next_domain, q_num=new_n)
+    if s.mode == "probe":
+        s.clarifier_count += 1
+        session.persist()
+    try:
+        await bot.send_message(
+            OWNER_TELEGRAM_ID,
+            _format_q(new_n, s.mode, next_domain, debate),
+            parse_mode="HTML",
+        )
+    except Exception:
+        log.exception("recovery: failed to send next question")
 
 
 async def _handle_review(message: Message, text: str) -> None:

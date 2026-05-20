@@ -34,6 +34,10 @@ class Session:
     main_question: str = ""
     main_q_num: Optional[int] = None
     clarifier_count: int = 0
+    # Двухфазный коммит ответа: записывается ДО process_answer, чистится ПОСЛЕ
+    # успешного завершения всех шагов. Если бот падает между этими точками —
+    # после рестарта recovery дожимает обработку.
+    pending_answer: Optional[str] = None
 
     def record_assistant(self, text: str) -> None:
         if not text:
@@ -60,7 +64,10 @@ class Session:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Session":
-        d = dict(d)
+        # Не-известные поля (например, после downgrade схемы) тихо отбрасываем;
+        # старые JSON без новых полей подхватят дефолты.
+        valid = {f for f in cls.__dataclass_fields__}
+        d = {k: v for k, v in d.items() if k in valid}
         ts = d.get("asked_at")
         d["asked_at"] = datetime.fromisoformat(ts) if ts else datetime.now()
         return cls(**d)
