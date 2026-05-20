@@ -1,0 +1,32 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: psycho-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    # GPU-проброс RTX 3060 (Windows + WSL2 + NVIDIA Container Toolkit).
+    # Если GPU не определяется — закомментируй блок deploy: контейнер пойдёт на CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  bot:
+    build: .
+    container_name: psycho-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Папка Psycho внутри Obsidian-вольта → /vault в контейнере. Только её и трогаем.
+      # Путь берётся из VAULT_HOST_PATH в .env (см. .env.example).
+      - "${VAULT_HOST_PATH:-C:/Users/eva/YandexDisk/Obsidian/Psycho}:/vault"
+    depends_on:
+      - ollama
+
+volumes:
+  ollama-data:

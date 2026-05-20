@@ -1,0 +1,5 @@
+aiogram==3.13.1
+openai==1.59.5
+APScheduler==3.10.4
+python-dotenv==1.0.1
+PyYAML==6.0.2
