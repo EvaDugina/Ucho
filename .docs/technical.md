@@ -22,7 +22,8 @@
 | Переменная | Назначение | Пример |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | токен от @BotFather | `123:abc…` |
-| `OWNER_TELEGRAM_ID` | единственный разрешённый user_id | `123456789` |
+| `OWNER_TELEGRAM_ID` | владелец/админ (всегда разрешён) | `123456789` |
+| `ALLOWED_TELEGRAM_IDS` | доп. доверенные id через запятую (начальный список; рантайм — в `.psycho/users.json`) | `111,222` |
 | `VAULT_HOST_PATH` | абсолютный путь к Obsidian-vault на хосте; пробрасывается в контейнер как `/vault` | `C:/Users/eva/YandexDisk/Obsidian/Psycho` |
 | `VAULT_PATH` | путь внутри контейнера (можно переопределить для тестов) | `/vault` |
 | `OPENAI_BASE_URL` | URL Ollama | `http://ollama:11434/v1` |
@@ -44,6 +45,7 @@
   - Ollama — локальный LLM-сервер, GPU-проброс через NVIDIA Container Toolkit.
   - Obsidian-vault на хосте — хранилище графа и raw-логов, синхронизируется через YandexDisk-клиент.
 - **Разделение труда (capture-first):** локальная Qwen (live) только захватывает — диалог, `raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенный граф строит сильная модель (Claude) раз в неделю через скилл `.claude/skills/weekly-review/` (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC.
+- **Multi-user изоляция:** бот обслуживает несколько доверенных пользователей; у каждого — своя база в `<vault>/users/<user_id>/` (concepts/raw/profile/notes/digests/_index/_state/_session). `.psycho/` (manifest, log, startup-check, users.json) и `.git/` — глобальные на корне (один safety net, ключи манифеста — относительные пути). Текущий пользователь — request-scoped через `userctx` (contextvar, async-безопасно): aiogram-middleware ставит его на каждый update; data-слой (vault/graph/moc) маршрутизирует пути по `userctx.user_root()`. Whitelist + роли — `bot/users.py` (`OWNER_TELEGRAM_ID` = админ, гости — env + `.psycho/users.json`). Гостю при первом обращении — disclaimer о приватности.
 - **Потоки данных:**
   - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON (`concepts_to_create` как draft + `concepts_to_update` evidence; связи/конфликты НЕ обрабатываются) → атомарная запись в vault через `git_wrap` → MOC rebuild.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа.
@@ -63,10 +65,13 @@
 - `bot/atomic.py` — `atomic_write_text` / `atomic_write_json` (tmp + fsync + os.replace).
 - `bot/manifest.py` — `record(path)` / `check_drift(path)` через `.psycho/manifest.json`.
 - `bot/moc.py` — `rebuild_domain_moc(domain)` пересборка `_moc.md` с группировкой по type.
-- `bot/selfcheck.py` — механический self-check при старте (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
+- `bot/selfcheck.py` — механический self-check при старте по всем пользователям (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
+- `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
+- `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
 - `bot/validation.py` — `safe_slug` / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
 - `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
+- `scripts/migrate_to_multiuser.py` — одноразовый перенос корня владельца → `users/<owner>/` (dry-run + `--apply` под git_wrap, с post-верификацией). Выполнен; можно удалить.
 
 **Данные и контракты:**
 
@@ -216,18 +221,19 @@ docker compose logs -f bot
 - Один способ запуска локально (`docker compose up -d`).
 - `.gitignore` под Python + Docker + IDE-мусор + `.env`.
 - Базовое логирование (stderr контейнера + `.psycho/log.md`).
-- Whitelist одного пользователя + валидация ввода.
+- Whitelist (владелец + доверенные) + роли + валидация ввода.
+- **Multi-user изоляция данных** (`users/<id>/`, userctx, per-user сессии) — взято «**сверх POC B**» (multi-user формально MVP A; берём только изоляцию + whitelist для пары доверенных, без полного MVP-A hardening).
 - Atomic writes + drift detection + git_wrap транзакция в vault.
 - Smoke-проверки этапов 1-3 (30 шт, гоняются вручную через docker).
 
 **Intentionally deferred (что НЕ делаем до следующей стадии):**
 
-- `deploy.sh` для shared-сервера — single-user проект, разворачивается на собственной машине через docker compose.
-- Полноценные бэкапы по cron с ротацией — обязательство MVP A.
+- MVP-A hardening поверх multi-user: rate limiting на пользователя, структурные JSON-логи, бэкапы по cron с ротацией и тестом восстановления, мини-дашборд «кто сколько пользуется». Берём только если станет реальной альфой.
+- `deploy.sh` для shared-сервера — разворачивается на собственной машине через docker compose.
 - `tests/smoke/` как формальный набор pytest-сценариев — есть e2e-скрипты, но не оформлены (тех. долг).
 - Reverse-proxy (Caddy/nginx) — бот ходит в Telegram наружу, входящих HTTP нет.
 - Healthcheck-endpoint, Sentry, Grafana, мониторинг — MVP B.
-- MFA, аудит действий, многопользовательский режим — никогда (см. product.md → out of scope).
+- 152-ФЗ-режим, открытый доступ для произвольных пользователей — MVP B (сейчас только доверенные по whitelist).
 - E2E через эмулятор Telegram, нагрузочное — MVP B.
 - DEBUG-флаг для разделения dev/prod — пока нет prod-окружения.
 
@@ -250,6 +256,19 @@ PoC B техчасть считается принятой, когда:
 ## notes
 
 ### Active plans
+
+**Реализовано 2026-05-21 (multi-user изоляция, «сверх POC B»):**
+
+- `users/<id>/` раскладка: владелец перенесён скриптом `migrate_to_multiuser.py`
+  (выполнен, верификация PASS: 5 концептов, find_concepts ок). `.psycho/`+git глобальные.
+- `bot/userctx.py` (contextvar) + aiogram-middleware `AccessMiddleware` (whitelist-гейт +
+  set_user + consent). Пути `vault`/`graph`/`moc` — функции от `user_root()`.
+- `bot/users.py` реестр + роли; админ-команды `/adduser`/`/removeuser`/`/users`.
+- `session.py` → `dict[uid → Session]`; `restore_all()`; per-user `_state.json`/`_session.json`.
+- `selfcheck`/scheduler/recovery — циклы по пользователям.
+- `weekly-review` SKILL.md — работа в `users/<id>/`.
+- План: `MULTIUSER_PLAN.md` (рабочий, сложить сюда и удалить после стабилизации).
+- Deferred (см. stage constraints): MVP-A hardening (rate limiting, бэкапы, дашборд, структурные логи), embedding-дедуп.
 
 **Реализовано 2026-05-21 (capture-first разделение труда):**
 
