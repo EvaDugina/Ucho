@@ -58,7 +58,8 @@
 
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
-- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review.
+- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review. Хелпер `_send_question()` — единая точка отправки любого вопроса (главный/кларифер/`/echo`/`/requestion`/recovery): шлёт сообщение, ловит `message_id`, пишет в `qmap`. Ответ на выбранный вопрос: ветка `reply` в `on_text` + `cmd_answer` (`/answer N <текст>`) резолвят вопрос из `qmap` и через `_open_anchored_session` открывают probe, заякоренную на него (исходный q_num если не отвечен, новый — если отвечен → Q-повтор).
+- `bot/qmap.py` — персистентная карта `message_id→вопрос` (`users/<uid>/_qmap.json`, кольцо на 50). Источник правды по заданным вопросам, **включая неотвеченные** (в `raw/` их нет — блок пишется только при ответе). API: `append` / `find_by_message_id` / `find_by_q_num` / `mark_answered` (вызывается из `_apply_processed_inner` после записи raw). `message_id` стабилен между рестартами → reply резолвится надёжно.
 - `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
@@ -84,6 +85,7 @@
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
 - **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history`, `pending_answer` (двухфазный коммит).
+- **QMap** (`_qmap.json`): список последних ≤50 заданных вопросов — `[{message_id, q_num, text, domain, answered, ts}]`. Кольцо (старое вытесняется). Резолвит reply (`find_by_message_id`) и `/answer N` (`find_by_q_num`); `answered` решает «исходный q_num vs Q-повтор».
 - **Контракт LLM `process`-режима (LLM только анализ — запись в БД делает код):**
   ```json
   {
@@ -259,6 +261,15 @@ PoC B техчасть считается принятой, когда:
 
 ### Active plans
 
+**Реализовано 2026-05-21 (ответ на конкретный вопрос — reply / `/answer N`):**
+
+- `bot/qmap.py` — карта `message_id→вопрос` (`_qmap.json`, кольцо 50), источник правды по заданным, в т.ч. неотвеченным вопросам (в `raw/` их нет).
+- `_send_question()` в `handlers.py` — единая отправка вопроса с записью в карту; подключена во все 5 точек (главный, кларифер, `/echo`, `/requestion`, recovery).
+- Ветка `reply` в `on_text` + `cmd_answer`: резолв вопроса → `_open_anchored_session` (probe, заякоренная на вопрос; исходный q_num если не отвечен, новый — если отвечен) → обычный `_handle_probe`. `mark_answered(q_num)` в `_apply_processed_inner`.
+- Развилки: `/answer` только инлайн; клариферы отвечаемы через reply; смена вопроса молча закрывает сессию; reply на текущий = обычный ответ; вытеснен из карты → мягкий отказ.
+- Меню `/`-команд: владельцу добавлены админ-команды (`/adduser`/`/removeuser`/`/users`) + `/answer` (`main.py::ADMIN_COMMANDS`).
+- Образ пересобран, бот перезапущен; старт чистый (сессия восстановлена, polling идёт).
+
 **Реализовано 2026-05-21 (LLM-только-анализ + персона Иуды + теги графа):**
 
 - `process` переведён на `observations`: LLM отдаёт только анализ + вопрос; запись/идентичность — в коде (`_apply_processed_inner`): raw дословно + домен сессии, `slug` через `validation.slugify` (транслит), create-vs-update через дедуп, `quote` валидируется как подстрока ответа. Меньше нагрузка/ошибки JSON у Qwen.
@@ -386,6 +397,6 @@ PoC B техчасть считается принятой, когда:
 ## telegram_bot
 
 - **Токен:** в `.env` (`TELEGRAM_BOT_TOKEN`). Никогда в коде, в `.gitignore` весь `.env`.
-- **Whitelist админских команд:** один user_id из env (`OWNER_TELEGRAM_ID`). Все хэндлеры начинают с `_is_owner(message)`. Команд-меню (через `BotCommandScopeChat`) видно только владельцу.
+- **Whitelist админских команд:** один user_id из env (`OWNER_TELEGRAM_ID`). Все админ-хэндлеры начинают с `_is_owner(message)` (доверенный-не-владелец получает молчаливый `return`). Меню `/`-команд (через `BotCommandScopeChat`) выдаётся только доверенным; владельцу — расширенный набор (база + `/answer` + админ-блок `/adduser`/`/removeuser`/`/users`), остальным доверенным — базовый. Меню — лишь UX-подсказка; реальную защиту даёт `_is_owner` в хэндлере, а не видимость в меню.
 - **Валидация входящих:** см. `## quality → ### Безопасность` выше — `safe_user_text` (10k char + control-байты), `escape_raw_block` (newline-injection), `is_valid_telegram_command_arg` (path/shell-символы), `safe_slug` (path traversal в файловые имена).
 - **Обработка ошибок:** все exceptions перехвачены — в чат уходит нейтральная фраза («Не получилось разобрать ответ. Сформулируй ещё раз или /end.»). Stacktrace пишется в stderr контейнера и `.psycho/log.md`.
