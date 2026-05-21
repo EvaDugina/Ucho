@@ -3,7 +3,7 @@
 ## brunelleschi_stage
 
 - **Стадия:** POC B
-- **Последнее обновление:** 2026-05-20
+- **Последнее обновление:** 2026-05-21
 
 ---
 
@@ -46,6 +46,7 @@
 - **Потоки данных:**
   - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON-ответа → атомарная запись в vault через `git_wrap` транзакцию → MOC rebuild.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа.
+  - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore()` + (при `pending_answer`) `process_pending_on_startup`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
 - **Внешние зависимости:** только Telegram Bot API. Никаких внешних AI-провайдеров.
 
 **Модули и ответственность:**
@@ -53,16 +54,17 @@
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → концепты → conflicts → MOC).
-- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` / `summarize`, фолбэк-логирование.
+- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование.
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
-- `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `iter_history`.
+- `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/text` в `notes/`), `iter_history`.
 - `bot/session.py` — активная сессия, `_session.json` через atomic write, `from_dict` отбрасывает неизвестные поля.
 - `bot/scheduler.py` — APScheduler с cron-триггером.
 - `bot/atomic.py` — `atomic_write_text` / `atomic_write_json` (tmp + fsync + os.replace).
 - `bot/manifest.py` — `record(path)` / `check_drift(path)` через `.psycho/manifest.json`.
 - `bot/moc.py` — `rebuild_domain_moc(domain)` пересборка `_moc.md` с группировкой по type.
+- `bot/selfcheck.py` — механический self-check при старте (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
 - `bot/validation.py` — `safe_slug` / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
-- `prompts/system.md` + `prompts/discuss.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под четыре режима.
+- `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
 
 **Данные и контракты:**
@@ -104,8 +106,9 @@ Psycho/
 │   ├── atomic.py           atomic_write_text/json
 │   ├── manifest.py         mtime drift detection
 │   ├── moc.py              per-domain MOC rebuild
+│   ├── selfcheck.py        механический self-check при старте
 │   └── validation.py       safe_slug/user_text/etc.
-├── prompts/                промпты под 4 режима (system/discuss/review/summarize) + seeds
+├── prompts/                промпты (system/review/summarize) + seeds
 ├── scripts/
 │   └── migrate_domains.py  одноразовая миграция 4→10
 ├── docker-compose.yml      bot + ollama (GPU-проброс)
@@ -115,7 +118,7 @@ Psycho/
 └── README.md
 ```
 
-В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `_index.md`, `_state.json`.
+В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `notes/` (свободные заметки `/text`), `_index.md`, `_state.json`. При каждом старте — `.psycho/startup-check.md`.
 
 ---
 
@@ -171,7 +174,7 @@ docker compose logs -f bot
 - **Ручные:** 
   - `/ask <domain>` для каждого из 10 доменов → концепт создаётся.
   - Ручная правка `.md` в Obsidian → следующий `/ask` не теряет правку.
-  - `/discuss <slug>` → возникает контраргумент.
+  - `/text <заметка>` → заметка в `notes/` + концепты в граф.
   - `/review` → бот отвечает по существующей базе.
   - Граф View в Obsidian → видны узлы и связи.
 
@@ -183,7 +186,7 @@ docker compose logs -f bot
   - Git внутри vault — каждый `_apply_processed` оставляет два коммита (`psycho: before <op>` / `psycho: <op>`).
 - **Формат:** в `log.md` — `[YYYY-MM-DD HH:MM] LEVEL op — details`. В stderr — стандартный python logging.
 - **Ротация:** нет. На PoC B не критично — лог растёт медленно (десятки строк в неделю). С MVP A добавим ротацию по объёму.
-- **Healthcheck:** `/ping` команда в Telegram — round-trip к Ollama + статус сессии. Внешнего healthcheck-endpoint нет.
+- **Healthcheck:** `/pebble` команда в Telegram — мгновенный «буль.» (liveness самого бота, без LLM-вызова). Внешнего healthcheck-endpoint нет.
 
 ### Безопасность
 
@@ -247,6 +250,15 @@ PoC B техчасть считается принятой, когда:
 
 ### Active plans
 
+**Реализовано 2026-05-21 (ревизия команд + startup self-check):**
+
+- Команды: убраны `/discuss`, `/answer`, `/end`; `/requestion`(старый)→`/echo`, `/retry`→`/requestion` («повторить вопрос»), `/ping`→`/pebble` («буль.»); добавлены `/text` (заметка в `notes/` + разбор в граф), `/help`. `/start` — «кнопка смыва»: закрывает активную сессию (данные целы), заменяет собой `/end`.
+- `bot/selfcheck.py` — механический self-check при старте контейнера (MOC rebuild всех доменов + валидация связей + дубли/сироты → `.psycho/startup-check.md`). Вызывается из `main.py` до polling. Без LLM.
+- `bot/vault.py::append_note` + `notes/<date>.md`.
+- `find_concepts`/`all_slugs` теперь пропускают `_*.md` (баг: `_moc.md` парсился как концепт-сирота).
+- Режим `discuss` удалён из `session.Mode` и `llm._system`; `prompts/discuss.md` удалён.
+- Глубокий смысловой реиндекс вынесен в отдельный скилл `weekly-review` (`.claude/skills/weekly-review/`), запускается вручную из сильного агента (Claude), не из контейнера — Qwen 14B для реструктуризации слаба. Stage-решение, не drift.
+
 **Реализовано (этапы 1-3 плана `vast-inventing-raccoon.md`, коммит `29c00c8`):**
 
 - Этап 1 — Safety net: atomic writes, git_wrap, manifest+mtime drift, wikilink validation, slug sanitization, `.psycho/log.md`, валидация ввода (`bot/validation.py`), escape_raw_block против newline-injection в raw, html.escape с лимитами в Telegram-выводе.
@@ -289,7 +301,7 @@ PoC B техчасть считается принятой, когда:
 - **Restart-safety:**
   - Предусловия: активная сессия (Q открыт, ответа не было).
   - Шаги: `docker compose restart bot`.
-  - Ожидаемый результат: после старта `/ping` показывает, что сессия восстановлена с тем же `current_q_num`. `_session.json` валидный JSON.
+  - Ожидаемый результат: после старта `/start` показывает «активная сессия Q<N>». `_session.json` валидный JSON, недоработанный ответ дожимается сам.
 
 ### Технические решения
 
@@ -316,7 +328,7 @@ PoC B техчасть считается принятой, когда:
 ## ai_pipeline
 
 - **Модели по задачам:**
-  - Все четыре режима (`ask`, `process`, `review`, `summarize`) → `qwen2.5:14b-instruct` (GPU) или `qwen2.5:7b-instruct` (CPU-fallback).
+  - Все режимы (`ask`, `process`, `review`, `summarize`) → `qwen2.5:14b-instruct` (GPU) или `qwen2.5:7b-instruct` (CPU-fallback). Режим `discuss` убран 2026-05-21.
   - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → та же модель, temperature=0.
   - Embeddings → не используются (поиск делается через slug+alias+Jaccard на summary, не векторно).
 - **Провайдер:** локальный Ollama, openai-совместимый API через `OPENAI_BASE_URL=http://ollama:11434/v1`.
