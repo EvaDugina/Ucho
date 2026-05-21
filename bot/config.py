@@ -11,6 +11,16 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "ollama") or "ollama"
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://ollama:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen2.5:14b-instruct")
 
+# Таймаут одного LLM-вызова (сек). Без него openai-sdk ждёт ~600 c — при
+# зависшей/упавшей Ollama бот висел бы минутами. По истечении — APITimeoutError,
+# хэндлер ловит и отвечает общим сообщением. Подобран с запасом под локальную
+# 14B на RTX 3060 (генерация JSON концептов).
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "90"))
+# Анти-DoS на общий GPU: минимальный интервал (сек) между LLM-операциями одного
+# пользователя. Вместе с single-flight (1 активный вызов на пользователя) не даёт
+# одному гостю спамом вопросов занять видеокарту и заблокировать остальных.
+LLM_COOLDOWN_SEC = float(os.getenv("LLM_COOLDOWN_SEC", "4"))
+
 OWNER_TELEGRAM_ID = int(os.environ["OWNER_TELEGRAM_ID"])
 
 # Дополнительные доверенные пользователи (multi-user). Через запятую, например

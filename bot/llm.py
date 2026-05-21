@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 from . import vault
 from .config import (
     DOMAINS,
+    LLM_TIMEOUT,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     OPENAI_MODEL,
@@ -22,7 +23,15 @@ from .config import (
 
 log = logging.getLogger(__name__)
 
-_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+# timeout — чтобы зависшая/упавшая Ollama не держала бота ~600 c (дефолт sdk).
+# max_retries=1 — один повтор на транзиентный сбой, без многократного умножения
+# ожидания (worst case ≈ 2 × LLM_TIMEOUT, а не 600 c).
+_client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=OPENAI_BASE_URL,
+    timeout=LLM_TIMEOUT,
+    max_retries=1,
+)
 
 _system_prompt = (PROMPTS_DIR / "system.md").read_text(encoding="utf-8")
 _review_addendum = (PROMPTS_DIR / "review.md").read_text(encoding="utf-8")

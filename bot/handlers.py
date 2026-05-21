@@ -13,7 +13,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from . import graph, moc, session, userctx, users, vault
+from . import graph, moc, ratelimit, session, userctx, users, vault
 from .config import DOMAINS
 from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
@@ -538,8 +538,15 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
     if domain is None:
         await message.answer("Выбери тему:", reply_markup=_ask_keyboard())
         return
-    session.start(mode="probe", domain=domain)
-    await _send_next_question(message.bot, message.chat.id, domain=domain)
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        session.start(mode="probe", domain=domain)
+        await _send_next_question(message.bot, message.chat.id, domain=domain)
+    finally:
+        ratelimit.release(uid)
 
 
 @router.callback_query(F.data.startswith("ask:"))
@@ -561,9 +568,16 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         except Exception:
             log.exception("failed to clear ask keyboard")
     await callback.answer()
-    session.start(mode="probe", domain=domain)
     chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-    await _send_next_question(callback.bot, chat_id, domain=domain)
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await callback.bot.send_message(chat_id, ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        session.start(mode="probe", domain=domain)
+        await _send_next_question(callback.bot, chat_id, domain=domain)
+    finally:
+        ratelimit.release(uid)
 
 
 @router.message(Command("review"))
@@ -692,47 +706,56 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
     if clean is None:
         return
 
-    # 1. Verbatim в notes/ (человеческий скрэтчпад).
-    when = datetime.now()
-    try:
-        vault.append_note(when, clean)
-    except Exception:
-        log.exception("failed to append note")
-
-    # 2. Прогон через LLM process. Синтетический «вопрос» — заметка свободная,
-    #    домен выберет LLM. Концепты привязываются к raw-блоку (для evidence).
-    q_num = vault.next_q_num()
-    note_question = "(свободная заметка)"
-    context_concepts = _context_for_domain(None)
-    thinking = await _start_thinking(message)
-    try:
-        result = await process_answer(
-            question=note_question,
-            answer=clean,
-            domain_hint=None,
-            context_concepts=context_concepts,
-            history=None,
-            mode="probe",
-        )
-    except Exception:
-        log.exception("process_answer failed in /ucho")
-        await _stop_thinking(thinking)
-        await message.answer("Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
+    # Per-user single-flight + cooldown: отклоняем до записи, чтобы /ucho был
+    # атомарным (на busy — ничего не сохранено, пользователь повторяет целиком).
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
         return
-    await _stop_thinking(thinking)
-
     try:
-        _apply_processed(result, q_num, when, note_question, clean)
-    except Exception:
-        log.exception("apply_processed failed in /ucho")
+        # 1. Verbatim в notes/ (человеческий скрэтчпад).
+        when = datetime.now()
+        try:
+            vault.append_note(when, clean)
+        except Exception:
+            log.exception("failed to append note")
 
-    created = len(result.get("concepts_to_create", []) or [])
-    updated = len(result.get("concepts_to_update", []) or [])
-    vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
-    await message.answer(
-        f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
-        f"В граф: +{created} новых, ~{updated} обновлено."
-    )
+        # 2. Прогон через LLM process. Синтетический «вопрос» — заметка свободная,
+        #    домен выберет LLM. Концепты привязываются к raw-блоку (для evidence).
+        q_num = vault.next_q_num()
+        note_question = "(свободная заметка)"
+        context_concepts = _context_for_domain(None)
+        thinking = await _start_thinking(message)
+        try:
+            result = await process_answer(
+                question=note_question,
+                answer=clean,
+                domain_hint=None,
+                context_concepts=context_concepts,
+                history=None,
+                mode="probe",
+            )
+        except Exception:
+            log.exception("process_answer failed in /ucho")
+            await _stop_thinking(thinking)
+            await message.answer("Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
+            return
+        await _stop_thinking(thinking)
+
+        try:
+            _apply_processed(result, q_num, when, note_question, clean)
+        except Exception:
+            log.exception("apply_processed failed in /ucho")
+
+        created = len(result.get("concepts_to_create", []) or [])
+        updated = len(result.get("concepts_to_update", []) or [])
+        vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
+        await message.answer(
+            f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
+            f"В граф: +{created} новых, ~{updated} обновлено."
+        )
+    finally:
+        ratelimit.release(uid)
 
 
 # ---------- text messages ----------
@@ -760,7 +783,14 @@ async def on_text(message: Message) -> None:
         return
 
     if s.mode == "review":
-        await _handle_review(message, text)
+        uid = userctx.current_uid()
+        if not ratelimit.try_acquire(uid):
+            await message.answer(ratelimit.BUSY_MESSAGE)
+            return
+        try:
+            await _handle_review(message, text)
+        finally:
+            ratelimit.release(uid)
         return
 
     # probe
@@ -768,10 +798,18 @@ async def on_text(message: Message) -> None:
         await message.answer("Сначала вопрос. Напиши /ask.")
         return
 
-    await _handle_probe(message, text)
-    # Явная фиксация после каждого ответа пользователя (захватывает финальное
-    # состояние сессии поверх коммитов git_wrap внутри _apply_processed).
-    vault.commit_all("answer")
+    # Per-user single-flight + cooldown: один LLM-вызов на пользователя за раз.
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        await _handle_probe(message, text)
+        # Явная фиксация после каждого ответа пользователя (захватывает финальное
+        # состояние сессии поверх коммитов git_wrap внутри _apply_processed).
+        vault.commit_all("answer")
+    finally:
+        ratelimit.release(uid)
 
 
 async def _handle_probe(message: Message, text: str) -> None:
