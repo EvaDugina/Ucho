@@ -70,7 +70,7 @@
 
 **Данные и контракты:**
 
-- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases`, тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, без связей) → `stable` (выверен Claude в weekly-review); промежуточные `tentative`/`contested`.
+- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases`, тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, ascii-slug, без связей) → `stable` (выверен Claude в weekly-review). Промежуточные `tentative`/`contested`. У `stable` `slug` = имя файла = **русский заголовок** (наглядные узлы графа), все ссылки ведут по русскому имени; старый ascii-slug — в `aliases` (якорь дедупа).
 - **Raw-блок** (`raw/YYYY-MM-DD.md`): `## Q<N> · HH:MM · <domain>`, `**Q:** …`, `**A:** …`, `^Q<N>` block-id на отдельной строке.
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
@@ -255,8 +255,14 @@ PoC B техчасть считается принятой, когда:
 
 - Бот переведён в режим «только захват»: `process` создаёт черновые концепты `status: draft`, БЕЗ `relations`/`conflicts`. `_apply_processed_inner` больше не строит связи и контр-callouts; `concepts_to_update` только дописывает evidence (не патчит summary). `CONCEPT_STATUSES` += `draft`.
 - `prompts/system.md` `mode: process` переписан под capture-first (без связей/конфликтов, draft, debate=вопрос).
-- Скилл `weekly-review` апгрейжен до v2: теперь это **сборщик графа** (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC, digest. Claude правит `concepts/`/`profile/`/MOC напрямую; `raw/` и служебное бота не трогает; drift-detection защищает его правки от перезаписи ботом.
+- Скилл `weekly-review` апгрейжен до v2: теперь это **сборщик графа** (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC, digest. Claude правит `concepts/`/`profile/`/MOC напрямую; `raw/` и служебное бота не трогает.
 - Отложено до MVP A: локальная embedding-модель (`nomic-embed-text` в Ollama) для дедупа/поиска.
+
+**Реализовано 2026-05-21 (русские узлы графа в weekly-review):**
+
+- Выверенные (`stable`) концепты теперь имеют **русский `slug` = имя файла = заголовок**; все ссылки (`related`, тело, profile, MOC, digest) ведут по русскому имени (kepano-принцип «ссылка по имени, а не по id») → граф Obsidian полностью на русском, без ascii-ghost-нод. Старый ascii-slug уходит в `aliases` — якорь, по которому `resolve_slug` бота находит концепт и не плодит дубль.
+- **Write-barrier:** `safe_slug` бота принимает только ASCII, поэтому `append_evidence`/`add_alias`/`save_concept` по русскому slug возвращают `None` — `stable`-концепты защищены от перезаписи ботом. (Прежнее обещание про drift-detection для этого не годится: manifest ключуется по пути, переименованный русский файл ему неизвестен → `check_drift` = `False`.) Следствие: новые цитаты к `stable` доносит weekly-review из `raw/`, не бот. Изменений в коде бота не потребовалось.
+- Из praxis добавлены: Фаза 3 LINT (битые ссылки, инвариант русских имён, симметрия `contradicts`, draft-остатки, todo-в-stable) и закрытая схема callout-ов. Первая строка `[!summary]` — законченное предложение (её берёт MOC).
 
 **Реализовано 2026-05-21 (ревизия команд + startup self-check):**
 
