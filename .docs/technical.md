@@ -73,13 +73,13 @@
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
 - `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
-- `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`.
+- `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`. Несут **персону «Иуда из Кариота»** (характер — в формулировках вопросов/комментариев; JSON-контракт строгий, механика не меняется).
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
 - `scripts/migrate_to_multiuser.py` — одноразовый перенос корня владельца → `users/<owner>/` (dry-run + `--apply` под git_wrap, с post-верификацией). Выполнен; можно удалить.
 
 **Данные и контракты:**
 
-- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases`, тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, ascii-slug, без связей) → `stable` (выверен Claude в weekly-review). Промежуточные `tentative`/`contested`. У `stable` `slug` = имя файла = **русский заголовок** (наглядные узлы графа), все ссылки ведут по русскому имени; старый ascii-slug — в `aliases` (якорь дедупа).
+- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases` (+ `tags` у выверенных), тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, ascii-slug, без связей) → `stable` (выверен Claude в weekly-review). Промежуточные `tentative`/`contested`. У `stable` `slug` = имя файла = **русский заголовок** (наглядные узлы графа), все ссылки ведут по русскому имени; старый ascii-slug — в `aliases` (якорь дедупа). `tags` (ставит weekly-review, бот их не трогает): доменный `<DOMAIN>` CAPS + сквозные русские темы из реестра `<base>/_tags.md` — второе измерение графа.
 - **Raw-блок** (`raw/YYYY-MM-DD.md`): `## Q<N> · HH:MM · <domain>`, `**Q:** …`, `**A:** …`, `^Q<N>` block-id на отдельной строке.
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
@@ -258,6 +258,13 @@ PoC B техчасть считается принятой, когда:
 ## notes
 
 ### Active plans
+
+**Реализовано 2026-05-21 (LLM-только-анализ + персона Иуды + теги графа):**
+
+- `process` переведён на `observations`: LLM отдаёт только анализ + вопрос; запись/идентичность — в коде (`_apply_processed_inner`): raw дословно + домен сессии, `slug` через `validation.slugify` (транслит), create-vs-update через дедуп, `quote` валидируется как подстрока ответа. Меньше нагрузка/ошибки JSON у Qwen.
+- Промпты (`system/review/summarize/seeds`) — персона **«Иуда из Кариота»**; механика и JSON-контракт не тронуты.
+- Граф (через `weekly-review`): русские имена `stable`-концептов + теги (доменный `<DOMAIN>` CAPS + сквозные русские из `_tags.md`) + цвет по домену + серые теги + скрытие MOC-файлов. Шаблон настроек графа — `bot/assets/graph.json`, сидится новому юзеру в `ensure_layout`.
+- Образ пересобран, бот перезапущен; живой прогон против Qwen подтвердил новый контракт.
 
 **Реализовано 2026-05-21 (multi-user изоляция, «сверх POC B»):**
 
