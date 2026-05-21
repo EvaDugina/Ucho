@@ -13,7 +13,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from . import graph, moc, ratelimit, session, userctx, users, vault
+from . import graph, moc, qmap, ratelimit, session, userctx, users, vault
 from .config import DOMAINS
 from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
@@ -140,6 +140,60 @@ def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
 def _real_domain(d: str | None) -> str | None:
     """Возвращает d только если это валидный концептный домен. Иначе None."""
     return d if d in DOMAINS else None
+
+
+async def _send_question(
+    bot: Bot,
+    chat_id: int,
+    *,
+    q_num: int,
+    mode: str,
+    domain: str,
+    text: str,
+    suffix: str = "",
+) -> Message | None:
+    """Отправить вопрос И записать его в qmap (message_id→вопрос).
+
+    Единая точка отправки вопроса: гарантирует, что КАЖДЫЙ заданный вопрос
+    (главный, кларифер, /echo, /requestion, recovery) попадает в карту и потому
+    отвечаем через reply / `/answer N` — даже если останется без ответа (raw
+    тогда пуст, карта — единственный его след). См. [[qmap]].
+    """
+    body = _format_q(q_num, mode, domain, text)
+    if suffix:
+        body += suffix
+    sent = await bot.send_message(chat_id, body, parse_mode="HTML")
+    try:
+        qmap.append(sent.message_id, q_num, text, domain)
+    except Exception:
+        log.exception("failed to record question in qmap (q_num=%s)", q_num)
+    return sent
+
+
+def _open_anchored_session(entry: dict) -> None:
+    """Открыть probe-сессию, заякоренную на вопрос из qmap.
+
+    Текущая сессия (если была) молча закрывается — `session.start` затирает
+    слот. `clarifier_count` сбрасывается в 0.
+
+    Q-номер: исходный, если вопрос ещё НЕ отвечен (первый ответ пишется под
+    его собственным номером); новый `next_q_num()`, если уже отвечен — тогда
+    это Q-повтор, отдельный raw-блок, старый ответ цел.
+    """
+    text = entry["text"]
+    domain = entry["domain"]
+    q_num = vault.next_q_num() if entry.get("answered") else int(entry["q_num"])
+    start_domain = domain if domain in DOMAINS else None
+    session.start(mode="probe", domain=start_domain)
+    s = session.get()
+    if s is None:
+        return
+    session.set_question(text, domain, q_num=q_num)
+    s.main_question = text
+    s.main_q_num = q_num
+    s.clarifier_count = 0
+    session.persist()
+    s.record_assistant(text)
 
 
 async def _accept_user_text(message: Message, raw: str) -> str | None:
@@ -393,6 +447,13 @@ def _apply_processed_inner(
         except Exception:
             log.exception("failed to rebuild MOC for domain %s", d)
 
+    # Вопрос отвечен — пометим в карте. Повторный reply/answer на него теперь
+    # пойдёт как Q-повтор (новый q_num). No-op для q_num не из карты (/ucho).
+    try:
+        qmap.mark_answered(q_num)
+    except Exception:
+        log.exception("failed to mark q_num=%s answered in qmap", q_num)
+
     return created, updated
 
 
@@ -408,6 +469,7 @@ _HELP_BODY = (
     "<b>/ask</b> <i>[тема]</i> — вопрос; без темы покажу кнопки\n"
     "<b>/echo</b> <i>&lt;вопрос&gt;</i> — твой собственный вопрос\n"
     "<b>/requestion</b> <i>N</i> — повторить вопрос №N\n"
+    "<b>/answer</b> <i>N &lt;текст&gt;</i> — ответить на вопрос №N (или reply на него)\n"
     "\n"
     "<b>Заметки и база</b>\n"
     "<b>/ucho</b> <i>&lt;текст&gt;</i> — свободная заметка → в граф\n"
@@ -641,9 +703,54 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
     s.clarifier_count = 0
     session.persist()
     s.record_assistant(entry["question"])
-    msg = _format_q(new_n, "probe", entry["domain"], entry["question"])
-    msg += f"\n<i>(повтор Q{n})</i>"
-    await message.answer(msg, parse_mode="HTML")
+    await _send_question(
+        message.bot, message.chat.id,
+        q_num=new_n, mode="probe", domain=entry["domain"], text=entry["question"],
+        suffix=f"\n<i>(повтор Q{n})</i>",
+    )
+
+
+@router.message(Command("answer"))
+async def cmd_answer(message: Message, command: CommandObject) -> None:
+    """Ответить на ранее заданный вопрос Q<N> прямо в команде: `/answer N текст`.
+
+    Резолв N — по карте qmap (она держит и неотвеченные вопросы, которых нет в
+    raw). Открывает probe-сессию, заякоренную на Q<N>, и сразу прогоняет текст
+    как ответ. Только инлайн: без текста — подсказка.
+    """
+    if not _is_allowed(message):
+        return
+    arg = (command.args or "").strip()
+    parts = arg.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer("Использование: /answer N <текст ответа>. Номер — из /history.")
+        return
+    try:
+        n = int(parts[0])
+    except ValueError:
+        await message.answer("Использование: /answer N <текст ответа>. Номер — из /history.")
+        return
+    if n <= 0 or n > 10**9:
+        await message.answer("Номер вне разумного диапазона.")
+        return
+    answer_text = parts[1].strip()
+    entry = qmap.find_by_q_num(n)
+    if entry is None:
+        await message.answer(
+            f"Q{n} не помню (вытеснен из недавних или не задавался). "
+            "/history покажет доступные, /requestion N задаст его заново."
+        )
+        return
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        _open_anchored_session(entry)
+        await _handle_probe(message, answer_text)
+        vault.commit_all("answer")
+    finally:
+        ratelimit.release(uid)
 
 
 @router.message(Command("echo"))
@@ -673,7 +780,10 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
     s.clarifier_count = 0
     session.persist()
     s.record_assistant(text)
-    await message.answer(_format_q(new_n, "probe", USER_DOMAIN, text), parse_mode="HTML")
+    await _send_question(
+        message.bot, message.chat.id,
+        q_num=new_n, mode="probe", domain=USER_DOMAIN, text=text,
+    )
 
 
 @router.message(Command("pebble"))
@@ -759,6 +869,26 @@ async def on_text(message: Message) -> None:
         return
     s = session.get()
     text = (message.text or "").strip()
+
+    # reply на сообщение-вопрос → ответить именно на него (возможно — на прошлый,
+    # оставшийся без ответа). Резолвим по карте message_id→вопрос.
+    if message.reply_to_message is not None:
+        entry = qmap.find_by_message_id(message.reply_to_message.message_id)
+        if entry is None:
+            await message.answer(
+                "Здесь не на что отвечать — сделай reply на сообщение с вопросом (Q…), "
+                "либо ответь обычным сообщением на текущий."
+            )
+            return
+        # Цель == текущий активный неотвеченный вопрос → это обычный ответ,
+        # сессию зря не пересоздаём.
+        is_current = (
+            s is not None and s.mode == "probe"
+            and s.current_q_num == entry["q_num"] and not entry.get("answered")
+        )
+        if not is_current:
+            _open_anchored_session(entry)
+            s = session.get()
 
     if s is None:
         await message.answer("Сейчас сессии нет. /ask чтобы начать, /review чтобы поговорить о базе.")
@@ -886,7 +1016,10 @@ async def _handle_probe(message: Message, text: str) -> None:
     session.set_question(debate, next_domain, q_num=new_n)
     s.clarifier_count += 1
     session.persist()
-    await message.answer(_format_q(new_n, s.mode, next_domain, debate), parse_mode="HTML")
+    await _send_question(
+        message.bot, message.chat.id,
+        q_num=new_n, mode=s.mode, domain=next_domain, text=debate,
+    )
 
 
 async def process_pending_on_startup(bot: Bot, uid: int) -> None:
@@ -992,10 +1125,9 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     s.clarifier_count += 1
     session.persist()
     try:
-        await bot.send_message(
-            uid,
-            _format_q(new_n, s.mode, next_domain, debate),
-            parse_mode="HTML",
+        await _send_question(
+            bot, uid,
+            q_num=new_n, mode=s.mode, domain=next_domain, text=debate,
         )
     except Exception:
         log.exception("recovery: failed to send next question")
@@ -1149,10 +1281,9 @@ async def _send_next_question(
     s.clarifier_count = 0
     session.persist()
     s.record_assistant(result["question"])
-    await bot.send_message(
-        chat_id,
-        _format_q(q_num, s.mode, result["domain"], result["question"]),
-        parse_mode="HTML",
+    await _send_question(
+        bot, chat_id,
+        q_num=q_num, mode=s.mode, domain=result["domain"], text=result["question"],
     )
 
 

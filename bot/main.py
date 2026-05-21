@@ -24,20 +24,30 @@ BOT_COMMANDS = [
     BotCommand(command="review", description="Поговорить о своей базе знаний"),
     BotCommand(command="history", description="История всех вопросов и ответов"),
     BotCommand(command="requestion", description="Повторить вопрос"),
+    BotCommand(command="answer", description="Ответить на вопрос: /answer N <текст>"),
     BotCommand(command="pebble", description="Бросить камушек"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Кнопка смыва"),
 ]
 
+# Админ-команды — только владельцу, добавляются к базовому набору в его меню.
+ADMIN_COMMANDS = [
+    BotCommand(command="adduser", description="Добавить пользователя: /adduser <id>"),
+    BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
+    BotCommand(command="users", description="Список доверенных"),
+]
+
 
 async def _setup_commands(bot: Bot) -> None:
-    """Команды видны только доверенным (per-chat scope). Глобально — пусто."""
+    """Команды видны только доверенным (per-chat scope). Глобально — пусто.
+    Владельцу дополнительно показываем админ-команды."""
     try:
         await bot.delete_my_commands()  # для всех остальных — пусто
         for uid in users.allowed_ids():
+            cmds = BOT_COMMANDS + ADMIN_COMMANDS if users.is_owner(uid) else BOT_COMMANDS
             try:
                 await bot.set_my_commands(
-                    commands=BOT_COMMANDS,
+                    commands=cmds,
                     scope=BotCommandScopeChat(chat_id=uid),
                 )
             except Exception:
