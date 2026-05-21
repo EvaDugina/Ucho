@@ -49,7 +49,7 @@
 - **Разделение труда (capture-first):** локальная Qwen (live) только захватывает — диалог, `raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенный граф строит сильная модель (Claude) раз в неделю через скилл `.claude/skills/weekly-review/` (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC.
 - **Multi-user изоляция:** бот обслуживает несколько доверенных пользователей; у каждого — своя база в `<vault>/users/<user_id>/` (concepts/raw/profile/notes/digests/_index/_state/_session). `.psycho/` (manifest, log, startup-check, users.json) и `.git/` — глобальные на корне (один safety net, ключи манифеста — относительные пути). Текущий пользователь — request-scoped через `userctx` (contextvar, async-безопасно): aiogram-middleware ставит его на каждый update; data-слой (vault/graph/moc) маршрутизирует пути по `userctx.user_root()`. Whitelist + роли — `bot/users.py` (`OWNER_TELEGRAM_ID` = админ, гости — env + `.psycho/users.json`). Гостю при первом обращении — disclaimer о приватности.
 - **Потоки данных:**
-  - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON (`concepts_to_create` как draft + `concepts_to_update` evidence; связи/конфликты НЕ обрабатываются) → атомарная запись в vault через `git_wrap` → MOC rebuild.
+  - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON (`observations` — только анализ) → код пишет в vault: raw дословно, slug из имени, дедуп решает create/update → атомарная запись через `git_wrap` → MOC rebuild.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа.
   - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore()` + (при `pending_answer`) `process_pending_on_startup`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
 - **Внешние зависимости:** только Telegram Bot API. Никаких внешних AI-провайдеров.
@@ -58,7 +58,7 @@
 
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
-- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → черновые концепты `draft` + evidence → MOC). Связи/конфликты в live НЕ строит — это weekly-review.
+- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review.
 - `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
@@ -72,7 +72,7 @@
 - `bot/selfcheck.py` — механический self-check при старте по всем пользователям (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
-- `bot/validation.py` — `safe_slug` / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
+- `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
 - `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
 - `scripts/migrate_to_multiuser.py` — одноразовый перенос корня владельца → `users/<owner>/` (dry-run + `--apply` под git_wrap, с post-верификацией). Выполнен; можно удалить.
@@ -84,19 +84,17 @@
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
 - **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history`, `pending_answer` (двухфазный коммит).
-- **Контракт LLM `process`-режима (capture-first — без связей/конфликтов):**
+- **Контракт LLM `process`-режима (LLM только анализ — запись в БД делает код):**
   ```json
   {
     "type": "processed",
-    "raw_entry": {"domain": "ethics", "fragment": "..."},
-    "concepts_to_create": [{"slug": "...", "name": "...", "type": "...", "domain": "...", "summary": "...", "evidence": "..."}],
-    "concepts_to_update": [{"slug": "...", "append_evidence": "..."}],
+    "observations": [{"domain": "ethics", "type": "principle", "name": "Нарушение слова", "summary": "...", "quote": "дословный фрагмент ответа"}],
     "debate_message": "...",
     "question_type": "concrete|hypothetical|comparison|emotional_anchor|challenge",
     "close_session": false
   }
   ```
-  Поля `relations`, `relations_to_add`, `conflicts`, `summary_patch` бот игнорирует (граф строит weekly-review).
+  LLM **не присылает** `slug`, `raw_entry`, `concepts_to_create/update`, связи — код их игнорирует. Идентичность/запись на коде: slug выводит `validation.slugify` из `name`, домен raw — из сессии, create-vs-update решает дедуп (`resolve_slug` по имени/slug + Jaccard), `quote` валидируется как дословная подстрока ответа. Граф (связи/конфликты) строит weekly-review.
 
 ---
 
