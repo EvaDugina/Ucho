@@ -32,7 +32,10 @@ CONCEPTS_DIR = VAULT_PATH / "concepts"
 
 RELATION_KINDS = ("supports", "contradicts", "derived_from", "related")
 CONCEPT_TYPES = ("principle", "value", "preference", "belief", "claim")
-CONCEPT_STATUSES = ("stable", "tentative", "contested")
+# draft  — создан ботом (Qwen) live, без связей/конфликтов, ждёт промоушна Claude.
+# stable — выверен Claude в недельном weekly-review.
+# tentative / contested — промежуточные пометки Claude.
+CONCEPT_STATUSES = ("draft", "stable", "tentative", "contested")
 
 # Если save_concept обнаруживает, что target изменён извне (Obsidian / YandexDisk
 # pull / ручная правка), он по умолчанию НЕ перезаписывает — ручная правка

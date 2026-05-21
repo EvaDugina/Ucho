@@ -14,7 +14,7 @@ from aiogram.types import (
 
 from . import graph, moc, session, vault
 from .config import DOMAINS, OWNER_TELEGRAM_ID
-from .graph import Concept, Evidence, RELATION_KINDS
+from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
 from .validation import (
     MAX_USER_TEXT,
@@ -317,29 +317,27 @@ def _apply_processed_inner(
                 touched_domains.add(target_domain)
                 continue
 
+            # capture-first: Qwen создаёт ЧЕРНОВИК. Без связей и без конфликтов —
+            # их строит Claude в недельном weekly-review. status=draft.
             concept = Concept(
                 slug=raw_slug,
                 name=c_data.get("name", raw_slug),
                 type=c_data.get("type", "claim"),
                 domain=target_domain,
                 summary=c_data.get("summary", ""),
-                status="tentative",
+                status="draft",
                 aliases=[a for a in (c_data.get("aliases") or []) if isinstance(a, str)],
                 evidence=[Evidence(when=now_str, text=c_data.get("evidence", original_answer[:200]), raw_ref=raw_ref)],
                 source_session=session_marker,
             )
             graph.save_concept(concept)
             touched_domains.add(target_domain)
-            for rel in c_data.get("relations") or []:
-                kind = rel.get("kind", "related")
-                to_slug = rel.get("to")
-                if kind in RELATION_KINDS and to_slug:
-                    graph.add_relation(concept.slug, to_slug, kind)
         except Exception:
             log.exception("failed to create concept from %r", c_data)
 
-    # 2. Обновить существующие. slug проходит через resolve_slug — если LLM
-    # назвала концепт его алиасом, попадаем в нужный файл.
+    # 2. Дописать evidence к существующим концептам (включая выверенные Claude).
+    # Qwen НЕ переписывает summary и НЕ строит связи — только добавляет цитату.
+    # slug проходит через resolve_slug (если LLM назвала концепт его алиасом).
     for u in result.get("concepts_to_update", []):
         raw_slug = u.get("slug") or ""
         if not raw_slug:
@@ -349,49 +347,17 @@ def _apply_processed_inner(
             ev_text = u.get("append_evidence")
             if ev_text:
                 graph.append_evidence(slug, Evidence(when=now_str, text=ev_text, raw_ref=raw_ref))
-            summary_patch = u.get("summary_patch")
-            if summary_patch:
-                graph.patch_summary(slug, summary_patch)
-            # узнаём домен задним числом — нужен для MOC rebuild
             c_loaded = graph.load_concept(slug)
             if c_loaded:
                 touched_domains.add(c_loaded.domain)
         except Exception:
             log.exception("failed to update concept %s", slug)
 
-    # 3. Дополнительные связи
-    for r in result.get("relations_to_add", []):
-        try:
-            graph.add_relation(r["from"], r["to"], r["kind"], note=r.get("note"))
-            for endpoint in (r.get("from"), r.get("to")):
-                if not endpoint:
-                    continue
-                c_loaded = graph.load_concept(endpoint)
-                if c_loaded:
-                    touched_domains.add(c_loaded.domain)
-        except Exception:
-            log.exception("failed to add relation %r", r)
+    # Связи (relations_to_add) и конфликты (conflicts) В LIVE НЕ СТРОЯТСЯ.
+    # capture-first: Qwen слаба в графовом рассуждении и плодит ложные связи/
+    # конфликты. Их строит Claude в недельном weekly-review (см. SKILL.md).
 
-    # 4. Конфликты: связь contradicts + контр-callout `[!contradiction]` в оба
-    # концепта (Obsidian-native — виден как цветной блок в Reader-режиме).
-    for conf in result.get("conflicts", []):
-        a_raw, b_raw, probe = conf.get("concept_a"), conf.get("concept_b"), conf.get("probe")
-        if not (a_raw and b_raw and probe):
-            continue
-        a = graph.resolve_slug(a_raw) or a_raw
-        b = graph.resolve_slug(b_raw) or b_raw
-        try:
-            graph.add_relation(a, b, "contradicts")
-            graph.add_contradiction_note(a, b, probe)
-            graph.add_contradiction_note(b, a, probe)
-            for endpoint in (a, b):
-                c_loaded = graph.load_concept(endpoint)
-                if c_loaded:
-                    touched_domains.add(c_loaded.domain)
-        except Exception:
-            log.exception("failed to record conflict %s/%s", a, b)
-
-    # 5. Пересобрать MOC для каждого затронутого домена (атомарно, внутри
+    # 3. Пересобрать MOC для каждого затронутого домена (атомарно, внутри
     # текущей git_wrap транзакции).
     for d in touched_domains:
         try:
@@ -404,18 +370,26 @@ def _apply_processed_inner(
 
 
 _HELP_TEXT = (
-    "Команды:\n\n"
-    "• /ask [domain] — задам вопрос, разберу ответ остро и углублю.\n"
-    "• /echo <текст> — твой собственный вопрос, обработаю как обычный.\n"
-    "• /text <заметка> — свободная заметка: сохраню и разберу в граф.\n"
-    "• /review — поговорим про твою базу знаний, найду противоречия.\n"
-    "• /history — история всех вопросов и ответов.\n"
-    "• /requestion N — повторить вопрос с номером N.\n"
-    "• /pebble — проверка, что бот жив.\n"
-    "• /start — смыв: закрыть текущую сессию (данные целы).\n"
-    "• /help — этот список.\n\n"
-    f"Доступные домены: {', '.join(DOMAINS)}.\n"
-    "Раз в день сам пришлю вопрос. Граф концептов растёт в Obsidian → Graph View, фильтр `path:concepts/`."
+    "<b>Ухо</b> — карта узоров, которые я слышу.\n"
+    "\n"
+    "<b>Спросить себя</b>\n"
+    "<b>/ask</b> <i>[домен]</i> — вопрос; без домена покажу кнопки\n"
+    "<b>/echo</b> <i>&lt;текст&gt;</i> — твой собственный вопрос\n"
+    "<b>/requestion</b> <i>N</i> — повторить вопрос №N\n"
+    "\n"
+    "<b>Заметки и база</b>\n"
+    "<b>/text</b> <i>&lt;заметка&gt;</i> — свободная заметка → в граф\n"
+    "<b>/review</b> — разговор о своей базе знаний\n"
+    "<b>/history</b> — вся история вопросов и ответов\n"
+    "\n"
+    "<b>Сервис</b>\n"
+    "<b>/pebble</b> — бот жив? → «буль.»\n"
+    "<b>/start</b> — смыв: закрыть сессию (данные целы)\n"
+    "<b>/help</b> — этот список\n"
+    "\n"
+    f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
+    "Раз в день пришлю вопрос сам.\nГраф растёт в Obsidian → Graph View, "
+    "фильтр <code>path:concepts/</code>."
 )
 
 
@@ -438,7 +412,7 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     if not _is_owner(message):
         return
-    await message.answer(_HELP_TEXT)
+    await message.answer(_HELP_TEXT, parse_mode="HTML")
 
 
 @router.message(Command("ask"))
