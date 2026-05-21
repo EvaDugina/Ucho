@@ -373,12 +373,12 @@ _HELP_TEXT = (
     "<b>Ухо</b> — карта узоров, которые я слышу.\n"
     "\n"
     "<b>Спросить себя</b>\n"
-    "<b>/ask</b> <i>[домен]</i> — вопрос; без домена покажу кнопки\n"
-    "<b>/echo</b> <i>&lt;текст&gt;</i> — твой собственный вопрос\n"
+    "<b>/ask</b> <i>[тема]</i> — вопрос; без темы покажу кнопки\n"
+    "<b>/echo</b> <i>&lt;вопрос&gt;</i> — твой собственный вопрос\n"
     "<b>/requestion</b> <i>N</i> — повторить вопрос №N\n"
     "\n"
     "<b>Заметки и база</b>\n"
-    "<b>/text</b> <i>&lt;заметка&gt;</i> — свободная заметка → в граф\n"
+    "<b>/ucho</b> <i>&lt;текст&gt;</i> — свободная заметка → в граф\n"
     "<b>/review</b> — разговор о своей базе знаний\n"
     "<b>/history</b> — вся история вопросов и ответов\n"
     "\n"
@@ -424,10 +424,10 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
         await message.answer("Аргумент не валиден.")
         return
     if domain and domain not in DOMAINS:
-        await message.answer(f"Не знаю домен «{domain}». Доступны: {', '.join(DOMAINS)}.")
+        await message.answer(f"Не знаю тему «{domain}». Доступны: {', '.join(DOMAINS)}.")
         return
     if domain is None:
-        await message.answer("Выбери домен:", reply_markup=_ask_keyboard())
+        await message.answer("Выбери тему:", reply_markup=_ask_keyboard())
         return
     session.start(mode="probe", domain=domain)
     await _send_next_question(message.bot, message.chat.id, domain=domain)
@@ -441,7 +441,7 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
     payload = (callback.data or "").split(":", 1)[1]
     # Whitelist: только 'any' или конкретный домен из закрытого списка.
     if payload != "any" and payload not in DOMAINS:
-        await callback.answer("Неизвестный домен", show_alert=True)
+        await callback.answer("Неизвестная тема", show_alert=True)
         return
     domain = None if payload == "any" else payload
     if callback.message:
@@ -566,17 +566,17 @@ async def cmd_pebble(message: Message) -> None:
     await message.answer("буль.")
 
 
-@router.message(Command("text"))
-async def cmd_text(message: Message, command: CommandObject) -> None:
+@router.message(Command("ucho"))
+async def cmd_ucho(message: Message, command: CommandObject) -> None:
     """Свободная заметка. Сохраняем verbatim в notes/<дата>.md и прогоняем через
-    LLM process — концепты/связи попадают в граф. Заметка работает как ответ
-    без заданного вопроса.
+    LLM process — концепты попадают в граф как черновики. Заметка работает как
+    ответ без заданного вопроса.
     """
     if not _is_owner(message):
         return
     raw = (command.args or "").strip()
     if not raw:
-        await message.answer("Использование: /text <текст заметки>")
+        await message.answer("Использование: /ucho <текст заметки>")
         return
     clean = await _accept_user_text(message, raw)
     if clean is None:
@@ -605,7 +605,7 @@ async def cmd_text(message: Message, command: CommandObject) -> None:
             mode="probe",
         )
     except Exception:
-        log.exception("process_answer failed in /text")
+        log.exception("process_answer failed in /ucho")
         await _stop_thinking(thinking)
         await message.answer("Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
         return
@@ -614,7 +614,7 @@ async def cmd_text(message: Message, command: CommandObject) -> None:
     try:
         _apply_processed(result, q_num, when, note_question, clean)
     except Exception:
-        log.exception("apply_processed failed in /text")
+        log.exception("apply_processed failed in /ucho")
 
     created = len(result.get("concepts_to_create", []) or [])
     updated = len(result.get("concepts_to_update", []) or [])

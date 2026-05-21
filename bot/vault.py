@@ -281,7 +281,7 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
 
 
 def append_note(when: datetime, text: str) -> Path:
-    """Append свободную заметку (/text) в `notes/YYYY-MM-DD.md` verbatim.
+    """Append свободную заметку (/ucho) в `notes/YYYY-MM-DD.md` verbatim.
 
     Человеческий скрэтчпад — отдельно от raw (машинный Q&A-лог). Текст
     санитизируется так же, как ответ пользователя (control-байты, лимит),

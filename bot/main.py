@@ -19,9 +19,9 @@ log = logging.getLogger("psycho.main")
 # Команды, которые видны при наборе «/» в Telegram.
 # Описание ≤ 256 символов; ставим коротко и понятно.
 BOT_COMMANDS = [
-    BotCommand(command="ask", description="Задать вопрос"),
-    BotCommand(command="echo", description="Вернуть пользовательский вопрос: /echo <текст>"),
-    BotCommand(command="text", description="Свободная заметка: /text <текст>"),
+    BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
+    BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
+    BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
     BotCommand(command="review", description="Поговорить о своей базе знаний"),
     BotCommand(command="history", description="История всех вопросов и ответов"),
     BotCommand(command="requestion", description="Повторить вопрос"),

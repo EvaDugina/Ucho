@@ -57,7 +57,7 @@
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → черновые концепты `draft` + evidence → MOC). Связи/конфликты в live НЕ строит — это weekly-review.
 - `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование.
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
-- `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/text` в `notes/`), `iter_history`.
+- `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/ucho` в `notes/`), `iter_history`.
 - `bot/session.py` — активная сессия, `_session.json` через atomic write, `from_dict` отбрасывает неизвестные поля.
 - `bot/scheduler.py` — APScheduler с cron-триггером.
 - `bot/atomic.py` — `atomic_write_text` / `atomic_write_json` (tmp + fsync + os.replace).
@@ -119,7 +119,7 @@ Psycho/
 └── README.md
 ```
 
-В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `notes/` (свободные заметки `/text`), `_index.md`, `_state.json`. При каждом старте — `.psycho/startup-check.md`.
+В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `notes/` (свободные заметки `/ucho`), `_index.md`, `_state.json`. При каждом старте — `.psycho/startup-check.md`.
 
 ---
 
@@ -175,7 +175,7 @@ docker compose logs -f bot
 - **Ручные:** 
   - `/ask <domain>` для каждого из 10 доменов → концепт создаётся.
   - Ручная правка `.md` в Obsidian → следующий `/ask` не теряет правку.
-  - `/text <заметка>` → заметка в `notes/` + концепты в граф.
+  - `/ucho <заметка>` → заметка в `notes/` + концепты в граф.
   - `/review` → бот отвечает по существующей базе.
   - Граф View в Obsidian → видны узлы и связи.
 
@@ -260,7 +260,7 @@ PoC B техчасть считается принятой, когда:
 
 **Реализовано 2026-05-21 (ревизия команд + startup self-check):**
 
-- Команды: убраны `/discuss`, `/answer`, `/end`; `/requestion`(старый)→`/echo`, `/retry`→`/requestion` («повторить вопрос»), `/ping`→`/pebble` («буль.»); добавлены `/text` (заметка в `notes/` + разбор в граф), `/help`. `/start` — «кнопка смыва»: закрывает активную сессию (данные целы), заменяет собой `/end`.
+- Команды: убраны `/discuss`, `/answer`, `/end`; `/requestion`(старый)→`/echo`, `/retry`→`/requestion` («повторить вопрос»), `/ping`→`/pebble` («буль.»); добавлены `/ucho` (заметка в `notes/` + разбор в граф), `/help`. `/start` — «кнопка смыва»: закрывает активную сессию (данные целы), заменяет собой `/end`.
 - `bot/selfcheck.py` — механический self-check при старте контейнера (MOC rebuild всех доменов + валидация связей + дубли/сироты → `.psycho/startup-check.md`). Вызывается из `main.py` до polling. Без LLM.
 - `bot/vault.py::append_note` + `notes/<date>.md`.
 - `find_concepts`/`all_slugs` теперь пропускают `_*.md` (баг: `_moc.md` парсился как концепт-сирота).
