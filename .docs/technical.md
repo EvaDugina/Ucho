@@ -64,7 +64,7 @@
 - `bot/scheduler.py` — APScheduler с cron-триггером.
 - `bot/atomic.py` — `atomic_write_text` / `atomic_write_json` (tmp + fsync + os.replace).
 - `bot/manifest.py` — `record(path)` / `check_drift(path)` через `.psycho/manifest.json`.
-- `bot/moc.py` — `rebuild_domain_moc(domain)` пересборка `_moc.md` с группировкой по type.
+- `bot/moc.py` — `rebuild_domain_moc(domain)` пересборка MOC-ноды `<DOMAIN>.md` (имя = тема заглавными → узел графа = категория) с группировкой по type; удаляет легаси `_moc.md`.
 - `bot/selfcheck.py` — механический self-check при старте по всем пользователям (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
@@ -189,7 +189,7 @@ docker compose logs -f bot
 - **Куда пишем:**
   - Stderr контейнера (через стандартный `logging`) — `docker compose logs -f bot`.
   - `<vault>/.psycho/log.md` (append-only) — операционный журнал (drift skip, dedup, sanitize, llm-фолбэки).
-  - Git внутри vault — каждый `_apply_processed` оставляет два коммита (`psycho: before <op>` / `psycho: <op>`).
+  - Git внутри vault — каждый `_apply_processed` оставляет два коммита (`psycho(<uid>): before <op>` / `psycho(<uid>): <op>`). Коммит затрагивает только поддерево пользователя `users/<uid>/` — данные разных пользователей не смешиваются; `.psycho/` выведена из-под git (в `.gitignore`).
 - **Формат:** в `log.md` — `[YYYY-MM-DD HH:MM] LEVEL op — details`. В stderr — стандартный python logging.
 - **Ротация:** нет. На PoC B не критично — лог растёт медленно (десятки строк в неделю). С MVP A добавим ротацию по объёму.
 - **Healthcheck:** `/pebble` команда в Telegram — мгновенный «буль.» (liveness самого бота, без LLM-вызова). Внешнего healthcheck-endpoint нет.
@@ -247,7 +247,7 @@ PoC B техчасть считается принятой, когда:
 - 30 e2e-проверок проходят (`docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot python <<...`).
 - Бот работает неделю без падений на реальном vault владельца.
 - `.psycho/log.md` создан, наполняется, читаемый глазами.
-- `git log` внутри vault показывает регулярные пары `psycho: before <op>` / `psycho: <op>`.
+- `git log` внутри vault показывает регулярные пары `psycho(<uid>): before <op>` / `psycho(<uid>): <op>`, каждая ограничена поддеревом `users/<uid>/`.
 - Ручная правка концепта в Obsidian → следующий ответ не перетёр правку (drift detection сработал).
 - Open Graph View в Obsidian с фильтром `path:concepts/` показывает узлы 10 доменов + связи.
 
