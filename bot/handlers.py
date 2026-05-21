@@ -405,7 +405,9 @@ def _apply_processed_inner(
 # ---------- commands ----------
 
 
-_HELP_TEXT = (
+# Тело help собирается в cmd_help: основные секции → [Админ, если владелец] →
+# футер. Так блок «Админ» оказывается сразу после «Сервис», перед футером.
+_HELP_BODY = (
     "<b>Ухо</b> — карта узоров, которые я слышу.\n"
     "\n"
     "<b>Спросить себя</b>\n"
@@ -421,11 +423,19 @@ _HELP_TEXT = (
     "<b>Сервис</b>\n"
     "<b>/pebble</b> — бот жив? → «буль.»\n"
     "<b>/start</b> — смыв: закрыть сессию (данные целы)\n"
-    "<b>/help</b> — этот список\n"
-    "\n"
+    "<b>/help</b> — этот список"
+)
+
+_HELP_ADMIN = (
+    "<b>Админ</b>\n"
+    "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
+    "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
+    "<b>/users</b> — список доверенных"
+)
+
+_HELP_FOOTER = (
     f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
-    "Раз в день пришлю вопрос сам.\nГраф растёт в Obsidian → Graph View, "
-    "фильтр <code>path:concepts/</code>."
+    "Раз в день пришлю вопрос сам."
 )
 
 
@@ -448,15 +458,11 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     if not _is_allowed(message):
         return
-    text = _HELP_TEXT
+    parts = [_HELP_BODY]
     if _is_owner(message):
-        text += (
-            "\n\n<b>Админ</b>\n"
-            "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
-            "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
-            "<b>/users</b> — список доверенных"
-        )
-    await message.answer(text, parse_mode="HTML")
+        parts.append(_HELP_ADMIN)  # сразу после «Сервис», перед футером
+    parts.append(_HELP_FOOTER)
+    await message.answer("\n\n".join(parts), parse_mode="HTML")
 
 
 # ---------- админ-команды (только владелец) ----------
@@ -722,6 +728,7 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
 
     created = len(result.get("concepts_to_create", []) or [])
     updated = len(result.get("concepts_to_update", []) or [])
+    vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
     await message.answer(
         f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
         f"В граф: +{created} новых, ~{updated} обновлено."
@@ -762,6 +769,9 @@ async def on_text(message: Message) -> None:
         return
 
     await _handle_probe(message, text)
+    # Явная фиксация после каждого ответа пользователя (захватывает финальное
+    # состояние сессии поверх коммитов git_wrap внутри _apply_processed).
+    vault.commit_all("answer")
 
 
 async def _handle_probe(message: Message, text: str) -> None:
@@ -1061,8 +1071,6 @@ async def _send_next_question(
         domain = random.choice(DOMAINS)
         log.info("random domain selected for main question: %s", domain)
 
-    context_concepts = _context_for_domain(domain)
-
     try:
         await bot.send_chat_action(chat_id, "typing")
     except Exception:
@@ -1078,10 +1086,14 @@ async def _send_next_question(
         log.exception("failed to send thinking message")
 
     try:
+        # Главный вопрос (/ask, дневной) генерим НЕ опираясь на текущую базу:
+        # без context_concepts и recent_raw — свежий, «случайный» вопрос по теме,
+        # а не вытекающий из уже зафиксированного. Так разговор не зацикливается
+        # на накопленном графе.
         result = await ask_next(
             domain=_real_domain(domain),
-            context_concepts=context_concepts,
-            recent_raw=_recent_raw_text(),
+            context_concepts="",
+            recent_raw="",
             mode=s.mode,
         )
     except Exception:

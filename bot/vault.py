@@ -48,13 +48,20 @@ _ENTRY_RE = re.compile(
     re.DOTALL,
 )
 
-# .gitignore по умолчанию для vault — НЕ синкаем obsidian-кеш и trash, но
-# .psycho/ и concepts/ — наши, синкаем обязательно.
+# .gitignore по умолчанию для vault. НЕ синкаем obsidian-кеш и trash.
+# .psycho/ — ГЛОБАЛЬНАЯ метаинформация (manifest, log, users.json,
+# startup-check), общая для всех пользователей. Её НЕ версионируем: иначе её
+# постоянные изменения примешивались бы в пер-юзерные коммиты и нарушали
+# изоляцию (один коммит = данные одного пользователя). Содержимое
+# `users/<id>/` версионируется.
 _DEFAULT_GITIGNORE = """\
 # Obsidian local state
 .obsidian/workspace*.json
 .obsidian/cache
 .trash/
+
+# Psycho global metadata (not per-user; kept out of per-user commits)
+.psycho/
 
 # OS junk
 .DS_Store
@@ -109,36 +116,118 @@ def ensure_git_repo() -> None:
     if not _git_available():
         log.warning("git not available — safety net disabled; install git in the container")
         return
-    if _is_git_repo():
-        return
-    log.info("initializing git repo in vault: %s", VAULT_PATH)
-    _git("init", "-b", "main", check=False)
-    # local identity на случай, если в контейнере не настроен глобальный
-    _git("config", "user.email", "psycho-bot@local", check=False)
-    _git("config", "user.name", "Psycho Bot", check=False)
+    fresh = not _is_git_repo()
+    if fresh:
+        log.info("initializing git repo in vault: %s", VAULT_PATH)
+        _git("init", "-b", "main", check=False)
+        # local identity на случай, если в контейнере не настроен глобальный
+        _git("config", "user.email", "psycho-bot@local", check=False)
+        _git("config", "user.name", "Psycho Bot", check=False)
+    # Гарантируем, что .gitignore существует И содержит правило `.psycho/`.
+    # Если файл уже был (типичный случай существующего вольта) — дописываем
+    # недостающее правило, иначе глобальная метаинформация осталась бы
+    # трекаемой и `git add -A` ниже снова её бы добавил.
     gitignore = VAULT_PATH / ".gitignore"
     if not gitignore.exists():
         atomic_write_text(gitignore, _DEFAULT_GITIGNORE)
-    _git("add", "-A", check=False)
-    # --allow-empty: если vault только что инициализирован и пуст
-    _git("commit", "-m", "psycho: init", "--allow-empty", check=False)
+    else:
+        current = gitignore.read_text(encoding="utf-8")
+        if ".psycho/" not in current:
+            block = "\n# Psycho global metadata (not per-user; kept out of per-user commits)\n.psycho/\n"
+            atomic_write_text(gitignore, current.rstrip("\n") + "\n" + block)
+    # .psycho/ — глобальная метаинформация; снимаем с учёта (идемпотентно,
+    # --ignore-unmatch → no-op если уже не трекается), чтобы она не
+    # примешивалась в пер-юзерные коммиты. Теперь, когда правило в .gitignore
+    # есть, последующий `git add -A` её обратно не добавит.
+    rm = _git("rm", "-r", "--cached", "--ignore-unmatch", ".psycho", check=False)
+    if fresh:
+        _git("add", "-A", check=False)
+        # --allow-empty: если vault только что инициализирован и пуст
+        _git("commit", "-m", "psycho(all): init", "--allow-empty", check=False)
+    elif (rm.stdout or "").strip():
+        # реально сняли .psycho/ с учёта на уже существующем репо — зафиксируем
+        # разово (включая обновлённый .gitignore)
+        _git("add", "-A", check=False)
+        _git("commit", "-m", "psycho(all): untrack .psycho", check=False)
 
 
-def _git_commit(message: str, allow_empty: bool = True) -> Optional[str]:
-    """Коммит всего вольта. Возвращает sha или None если git недоступен/ничего не коммитнулось."""
+def _scope() -> tuple[Optional[str], str]:
+    """Текущий scope коммита: ``(pathspec, label)``.
+
+    Изоляция пользователей: коммит затрагивает ТОЛЬКО поддерево текущего
+    пользователя ``users/<uid>/``, а ``label`` (id пользователя) попадает в
+    сообщение коммита. Если пользователь не выставлен (миграции, разовые
+    глобальные операции) — ``(None, "all")`` → коммитим весь вольт.
+    """
+    uid = userctx.current_uid()
+    if uid is None:
+        return None, "all"
+    return f"users/{uid}", str(uid)
+
+
+def _git_head() -> Optional[str]:
     if not _git_available() or not _is_git_repo():
         return None
     try:
-        _git("add", "-A")
+        return _git("rev-parse", "HEAD").stdout.strip() or None
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _git_commit(
+    message: str, scope: Optional[str] = None, allow_empty: bool = False
+) -> Optional[str]:
+    """Коммит. При ``scope`` затрагивает только это поддерево (``users/<uid>/``),
+    иначе — весь вольт. Возвращает sha или None если git недоступен/нечего коммитить.
+    """
+    if not _git_available() or not _is_git_repo():
+        return None
+    try:
+        _git("add", scope if scope else "-A")
         args = ["commit", "-m", message]
         if allow_empty:
             args.append("--allow-empty")
+        if scope:
+            # pathspec на самом commit — гарантия, что в коммит попадёт ТОЛЬКО
+            # поддерево этого пользователя, даже если что-то ещё оказалось в индексе.
+            args += ["--", scope]
         _git(*args)
         result = _git("rev-parse", "HEAD")
         return result.stdout.strip() or None
     except subprocess.CalledProcessError as exc:
         log.warning("git commit failed (%s): %s", message, exc.stderr.strip())
         return None
+
+
+def commit_all(message: str, allow_empty: bool = False) -> Optional[str]:
+    """Зафиксировать данные ТЕКУЩЕГО пользователя. Публичный хук «закоммитить сейчас».
+
+    Коммит затрагивает только ``users/<uid>/`` (см. ``_scope``); id пользователя
+    указывается в сообщении (``psycho(<uid>): <message>``). Данные разных
+    пользователей НИКОГДА не смешиваются в одном коммите.
+
+    По умолчанию не плодит пустые коммиты (`allow_empty=False`). Используется как
+    явная фиксация после каждого ответа (захватывает в т.ч. `_session.json`).
+    """
+    scope, label = _scope()
+    return _git_commit(f"psycho({label}): {message}", scope=scope, allow_empty=allow_empty)
+
+
+def _restore_scope(sha: str, scope: Optional[str]) -> bool:
+    """Откат: при ``scope`` восстановить только поддерево пользователя из ``sha``,
+    иначе — жёсткий reset всего вольта."""
+    if not scope:
+        return _git_reset_hard(sha)
+    if not _git_available() or not _is_git_repo() or not sha:
+        return False
+    try:
+        _git("checkout", sha, "--", scope)
+        # подчистим untracked-файлы пользователя, появившиеся в провалившейся операции
+        _git("clean", "-fd", scope, check=False)
+        return True
+    except subprocess.CalledProcessError as exc:
+        log.error("git restore %s -- %s failed: %s", sha, scope, exc.stderr.strip())
+        return False
 
 
 def _git_reset_hard(sha: str) -> bool:
@@ -195,18 +284,20 @@ def git_wrap(op_name: str) -> Iterator[None]:
         yield
         return
 
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    pre_sha = _git_commit(f"psycho: before {op_name} {ts}", allow_empty=True)
+    scope, label = _scope()
+    # Снимок-точка для отката: фиксируем поддерево пользователя; если фиксировать
+    # нечего — точка отката = текущий HEAD.
+    pre_sha = _git_commit(f"psycho({label}): before {op_name}", scope=scope) or _git_head()
     try:
         yield
     except Exception as exc:
         append_log("error", op_name, f"failed: {exc!r} — attempting rollback")
         if pre_sha:
-            ok = _git_reset_hard(pre_sha)
+            ok = _restore_scope(pre_sha, scope)
             append_log("error", op_name, f"rollback {'ok' if ok else 'FAILED'} to {pre_sha[:8]}")
         raise
     else:
-        _git_commit(f"psycho: {op_name} {ts}", allow_empty=True)
+        _git_commit(f"psycho({label}): {op_name}", scope=scope)
 
 
 # ---------- layout / init ----------
