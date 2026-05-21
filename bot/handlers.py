@@ -13,16 +13,12 @@ from aiogram.types import (
 )
 
 from . import graph, moc, session, vault
-from .config import DOMAINS, OPENAI_MODEL, OWNER_TELEGRAM_ID, VAULT_PATH
+from .config import DOMAINS, OWNER_TELEGRAM_ID
 from .graph import Concept, Evidence, RELATION_KINDS
-from .llm import ask_next, ping_llm, process_answer, review_query, summarize_session
+from .llm import ask_next, process_answer, review_query, summarize_session
 from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
-    safe_evidence_text,
-    safe_name,
-    safe_slug,
-    safe_summary,
     safe_user_text,
 )
 
@@ -119,7 +115,7 @@ async def _accept_user_text(message: Message, raw: str) -> str | None:
     """
     text, truncated = safe_user_text(raw)
     if not text:
-        await message.answer("Пустой ответ. Напиши хоть что-то или /end.")
+        await message.answer("Пустой ответ. Напиши хоть что-то или /start (смыв).")
         return None
     if truncated:
         vault.append_log("warn", "user_text_truncated", f"len(raw)={len(raw)} > {MAX_USER_TEXT}")
@@ -407,37 +403,42 @@ def _apply_processed_inner(
 # ---------- commands ----------
 
 
+_HELP_TEXT = (
+    "Команды:\n\n"
+    "• /ask [domain] — задам вопрос, разберу ответ остро и углублю.\n"
+    "• /echo <текст> — твой собственный вопрос, обработаю как обычный.\n"
+    "• /text <заметка> — свободная заметка: сохраню и разберу в граф.\n"
+    "• /review — поговорим про твою базу знаний, найду противоречия.\n"
+    "• /history — история всех вопросов и ответов.\n"
+    "• /requestion N — повторить вопрос с номером N.\n"
+    "• /pebble — проверка, что бот жив.\n"
+    "• /start — смыв: закрыть текущую сессию (данные целы).\n"
+    "• /help — этот список.\n\n"
+    f"Доступные домены: {', '.join(DOMAINS)}.\n"
+    "Раз в день сам пришлю вопрос. Граф концептов растёт в Obsidian → Graph View, фильтр `path:concepts/`."
+)
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    """Кнопка смыва: закрывает текущую сессию. Данные (граф/raw) не трогает."""
     if not _is_owner(message):
         log.info("ignored /start from non-owner user_id=%s", message.from_user.id if message.from_user else None)
         return
     vault.ensure_layout()
-    await message.answer(
-        "Привет. Я твой собеседник для портрета.\n\n"
-        "• /ask [domain] — задам вопрос, разберу ответ остро и углублю.\n"
-        "• /requestion <текст> — твой собственный вопрос, обработаю как обычный.\n"
-        "• /discuss [concept|domain] — выступлю оппонентом по существующей позиции.\n"
-        "• /review — поговорим про твою базу знаний, найду противоречия.\n"
-        "• /history — все вопросы и ответы.\n"
-        "• /retry N — задать заново вопрос с номером N.\n"
-        "• /answer N <текст> — ответить прямо на Q<N>, минуя сессию.\n"
-        "• /ping — проверка, что бот и LLM живы.\n"
-        "• /end — закрыть текущую сессию.\n\n"
-        f"Доступные домены: {', '.join(DOMAINS)}.\n"
-        "Раз в день сам пришлю вопрос. Граф концептов растёт в Obsidian → Graph View, фильтр `path:concepts/`."
-    )
+    had_session = session.get() is not None
+    session.clear()
+    if had_session:
+        await message.answer("Смыто — сессия закрыта. Данные целы.\nСписок команд — /help.")
+    else:
+        await message.answer("Активной сессии не было. Данные целы.\nСписок команд — /help.")
 
 
-@router.message(Command("end", "skip"))
-async def cmd_end(message: Message) -> None:
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
     if not _is_owner(message):
         return
-    if session.get() is None:
-        await message.answer("Сейчас сессии нет — нечего закрывать.")
-        return
-    session.clear()
-    await message.answer("Ок, закрыл сессию.")
+    await message.answer(_HELP_TEXT)
 
 
 @router.message(Command("ask"))
@@ -481,35 +482,6 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
     await _send_next_question(callback.bot, chat_id, domain=domain)
 
 
-@router.message(Command("discuss"))
-async def cmd_discuss(message: Message, command: CommandObject) -> None:
-    if not _is_owner(message):
-        return
-    arg = (command.args or "").strip().lower() or None
-
-    target_slug = None
-    target_domain = None
-    if arg:
-        if not is_valid_telegram_command_arg(arg):
-            await message.answer("Аргумент не валиден. Используй имя домена или slug концепта.")
-            return
-        if arg in DOMAINS:
-            target_domain = arg
-        else:
-            target_slug = safe_slug(arg)
-            if not target_slug:
-                await message.answer(f"«{arg}» не похоже на slug. Доступные домены: {', '.join(DOMAINS)}.")
-                return
-            c = graph.load_concept(target_slug)
-            if c is None:
-                await message.answer(f"Концепт `{target_slug}` не найден. Доступные домены: {', '.join(DOMAINS)}.")
-                return
-            target_domain = c.domain
-
-    session.start(mode="discuss", domain=target_domain)
-    await _send_next_question(message.bot, message.chat.id, domain=target_domain, slug_hint=target_slug)
-
-
 @router.message(Command("review"))
 async def cmd_review(message: Message) -> None:
     if not _is_owner(message):
@@ -517,7 +489,7 @@ async def cmd_review(message: Message) -> None:
     session.start(mode="review")
     await message.answer(
         "Режим /review. Спрашивай по своей базе — найду концепты, обсудим связи и противоречия.\n"
-        "Закрыть: /end."
+        "Закрыть: /start (смыв)."
     )
 
 
@@ -541,21 +513,22 @@ async def cmd_history(message: Message) -> None:
         lines.append(f"❓ {q}")
         lines.append(f"💬 {a}")
         lines.append("")
-    lines.append("Перепрожить вопрос: /retry N")
+    lines.append("Повторить вопрос: /requestion N")
     text = "\n".join(lines)
     for chunk in _split_for_telegram(text):
         await message.answer(chunk)
 
 
-@router.message(Command("retry"))
-async def cmd_retry(message: Message, command: CommandObject) -> None:
+@router.message(Command("requestion"))
+async def cmd_requestion(message: Message, command: CommandObject) -> None:
+    """Повторить вопрос Q<N> — задаёт его заново как новый главный."""
     if not _is_owner(message):
         return
     arg = (command.args or "").strip()
     try:
         n = int(arg)
     except ValueError:
-        await message.answer("Использование: /retry <номер>. Список: /history.")
+        await message.answer("Использование: /requestion <номер>. Список: /history.")
         return
     if n <= 0 or n > 10**9:
         await message.answer("Номер вне разумного диапазона.")
@@ -581,14 +554,14 @@ async def cmd_retry(message: Message, command: CommandObject) -> None:
     await message.answer(msg, parse_mode="HTML")
 
 
-@router.message(Command("requestion"))
-async def cmd_requestion(message: Message, command: CommandObject) -> None:
-    """Пользователь сам задаёт вопрос. Бот дублирует его как Q под меткой «пользовательский»."""
+@router.message(Command("echo"))
+async def cmd_echo(message: Message, command: CommandObject) -> None:
+    """Пользователь сам задаёт вопрос. Бот возвращает его как Q под меткой «пользовательский»."""
     if not _is_owner(message):
         return
     raw = (command.args or "").strip()
     if not raw:
-        await message.answer("Использование: /requestion <текст твоего вопроса>")
+        await message.answer("Использование: /echo <текст твоего вопроса>")
         return
     text, truncated = safe_user_text(raw, limit=2000)
     if not text:
@@ -611,129 +584,70 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
     await message.answer(_format_q(new_n, "probe", USER_DOMAIN, text), parse_mode="HTML")
 
 
-@router.message(Command("ping"))
-async def cmd_ping(message: Message) -> None:
-    """Проверка живости бота + LLM round-trip + статус сессии."""
+@router.message(Command("pebble"))
+async def cmd_pebble(message: Message) -> None:
+    """Бросить камушек: если бот жив — отвечает «буль.». Никакого LLM-вызова."""
     if not _is_owner(message):
         return
-    thinking = await _start_thinking(message)
-    ok, latency, err = await ping_llm()
-    await _stop_thinking(thinking)
-
-    s = session.get()
-    if s is None:
-        session_info = "нет"
-    else:
-        session_info = f"{s.mode}"
-        if s.current_q_num is not None:
-            session_info += f" · Q{s.current_q_num}"
-        if s.last_domain:
-            label = USER_DOMAIN_LABEL if s.last_domain == USER_DOMAIN else s.last_domain
-            session_info += f" · {label}"
-
-    llm_line = f"LLM: {'✅' if ok else '❌'} {OPENAI_MODEL}"
-    if latency is not None:
-        llm_line += f" · {latency:.1f}s"
-    if err:
-        llm_line += f"\n  └ {err[:200]}"
-
-    lines = [
-        "🟢 pong",
-        "",
-        llm_line,
-        f"session: {session_info}",
-        f"vault: {VAULT_PATH}",
-    ]
-    await message.answer("\n".join(lines))
+    await message.answer("буль.")
 
 
-@router.message(Command("answer"))
-async def cmd_answer(message: Message, command: CommandObject) -> None:
-    """Ответить прямо на Q<N>, минуя активную сессию.
-
-    /answer 7 мой текст ответа — найдёт Q7 (в активной сессии или в истории) и
-    обработает текст как ответ на этот вопрос. Полезно, если бот рестартовал, а
-    ответ хочется дать ровно на тот вопрос.
+@router.message(Command("text"))
+async def cmd_text(message: Message, command: CommandObject) -> None:
+    """Свободная заметка. Сохраняем verbatim в notes/<дата>.md и прогоняем через
+    LLM process — концепты/связи попадают в граф. Заметка работает как ответ
+    без заданного вопроса.
     """
     if not _is_owner(message):
         return
-    arg = (command.args or "").strip()
-    if not arg:
-        await message.answer("Использование: /answer N <текст ответа>. Список вопросов: /history.")
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer("Использование: /text <текст заметки>")
         return
-    parts = arg.split(maxsplit=1)
-    try:
-        n = int(parts[0])
-    except ValueError:
-        await message.answer("Первый аргумент — номер вопроса. Пример: /answer 7 мой ответ.")
-        return
-    if n <= 0 or n > 10**9:
-        await message.answer("Номер вне разумного диапазона.")
-        return
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("После номера нужен текст ответа. Пример: /answer 7 мой ответ.")
-        return
-    clean = await _accept_user_text(message, parts[1])
+    clean = await _accept_user_text(message, raw)
     if clean is None:
         return
-    answer_text = clean
 
-    s = session.get()
+    # 1. Verbatim в notes/ (человеческий скрэтчпад).
+    when = datetime.now()
+    try:
+        vault.append_note(when, clean)
+    except Exception:
+        log.exception("failed to append note")
 
-    # Случай 1: активная сессия и Q совпадает с last_question — обычный path.
-    if s is not None and s.current_q_num == n and s.last_question:
-        await _handle_probe_or_discuss(message, answer_text)
-        return
-
-    # Случай 2: Q<N> уже есть в истории — это «доп. ответ» на старый вопрос.
-    entry = vault.find_question(n)
-    if entry is None:
-        # Если сессия активна и last_question есть — мог быть имеется в виду свежий Q,
-        # но номер не сошёлся: подскажем.
-        if s is not None and s.last_question:
-            await message.answer(
-                f"Q{n} не найден. Текущий незакрытый вопрос: Q{s.current_q_num}. "
-                "Чтобы ответить на него — просто пиши текстом или /answer N с правильным номером."
-            )
-        else:
-            await message.answer(f"Q{n} не найден ни в активной сессии, ни в истории. /history покажет, что есть.")
-        return
-
-    new_n = vault.next_q_num()
-    asked_at = datetime.now()
-    domain = entry["domain"]
-    question_text = entry["question"]
-
-    context_concepts = _context_for_domain(_real_domain(domain))
+    # 2. Прогон через LLM process. Синтетический «вопрос» — заметка свободная,
+    #    домен выберет LLM. Концепты привязываются к raw-блоку (для evidence).
+    q_num = vault.next_q_num()
+    note_question = "(свободная заметка)"
+    context_concepts = _context_for_domain(None)
     thinking = await _start_thinking(message)
     try:
         result = await process_answer(
-            question=question_text,
-            answer=answer_text,
-            domain_hint=_real_domain(domain),
+            question=note_question,
+            answer=clean,
+            domain_hint=None,
             context_concepts=context_concepts,
             history=None,
             mode="probe",
         )
     except Exception:
-        log.exception("process_answer failed in /answer")
+        log.exception("process_answer failed in /text")
         await _stop_thinking(thinking)
-        await message.answer("Не получилось разобрать ответ. Попробуй ещё раз позже.")
+        await message.answer("Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
         return
     await _stop_thinking(thinking)
 
     try:
-        _apply_processed(result, new_n, asked_at, question_text, answer_text)
+        _apply_processed(result, q_num, when, note_question, clean)
     except Exception:
-        log.exception("apply_processed failed in /answer")
+        log.exception("apply_processed failed in /text")
 
-    debate = (result.get("debate_message") or "").strip()
-    head = f"Записал как Q{new_n} (доп. ответ на Q{n} · {domain})."
-    if debate:
-        for chunk in _split_for_telegram(f"{head}\n\n{debate}"):
-            await message.answer(chunk)
-    else:
-        await message.answer(head)
+    created = len(result.get("concepts_to_create", []) or [])
+    updated = len(result.get("concepts_to_update", []) or [])
+    await message.answer(
+        f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
+        f"В граф: +{created} новых, ~{updated} обновлено."
+    )
 
 
 # ---------- text messages ----------
@@ -764,15 +678,15 @@ async def on_text(message: Message) -> None:
         await _handle_review(message, text)
         return
 
-    # probe / discuss
+    # probe
     if not s.last_question:
-        await message.answer("Сначала вопрос. Напиши /ask или /discuss.")
+        await message.answer("Сначала вопрос. Напиши /ask.")
         return
 
-    await _handle_probe_or_discuss(message, text)
+    await _handle_probe(message, text)
 
 
-async def _handle_probe_or_discuss(message: Message, text: str) -> None:
+async def _handle_probe(message: Message, text: str) -> None:
     s = session.get()
     if s is None:
         return
@@ -806,7 +720,7 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
     except Exception:
         log.exception("process_answer failed")
         await _stop_thinking(thinking)
-        await message.answer("Не получилось разобрать ответ. Сформулируй ещё раз или /end.")
+        await message.answer("Не получилось разобрать ответ. Сформулируй ещё раз или /start (смыв).")
         return
     await _stop_thinking(thinking)
 
@@ -823,17 +737,11 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
     debate = (result.get("debate_message") or "").strip()
     close = bool(result.get("close_session"))
 
-    # /discuss закрывается только по команде пользователя.
-    if s.mode == "discuss":
-        close = False
+    # Лимит поясняющих: после MAX_CLARIFIERS отвеченных пояснений (или если LLM
+    # сама решила закрыть) — закрывающий комментарий вместо нового вопроса.
+    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS
 
-    # В режиме probe лимит поясняющих: после MAX_CLARIFIERS отвеченных
-    # пояснений — закрывающий комментарий вместо нового вопроса.
-    force_close_with_summary = (
-        s.mode == "probe" and s.clarifier_count >= MAX_CLARIFIERS
-    )
-
-    if force_close_with_summary or (s.mode == "probe" and close):
+    if force_close_with_summary or close:
         thinking2 = await _start_thinking(message)
         try:
             comment = await summarize_session(
@@ -850,15 +758,6 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
         session.clear()
         return
 
-    if close:
-        # discuss-ветка с close=False сюда не попадает; этот блок для будущей совместимости.
-        if debate:
-            for chunk in _split_for_telegram(debate):
-                await message.answer(chunk)
-        await message.answer("Закрыл сессию.")
-        session.clear()
-        return
-
     if not debate:
         debate = "Понял, продолжим — что скажешь дальше?"
 
@@ -868,9 +767,8 @@ async def _handle_probe_or_discuss(message: Message, text: str) -> None:
     raw_next = (result.get("raw_entry") or {}).get("domain")
     next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
     session.set_question(debate, next_domain, q_num=new_n)
-    if s.mode == "probe":
-        s.clarifier_count += 1
-        session.persist()
+    s.clarifier_count += 1
+    session.persist()
     await message.answer(_format_q(new_n, s.mode, next_domain, debate), parse_mode="HTML")
 
 
@@ -879,7 +777,7 @@ async def process_pending_on_startup(bot: Bot) -> None:
 
     Вызывается из main.py если session.restore() поднял сессию с
     непустым pending_answer. Использует тот же pipeline что
-    _handle_probe_or_discuss, но без объекта Message — все ответы шлёт
+    _handle_probe, но без объекта Message — все ответы шлёт
     через bot.send_message(OWNER_TELEGRAM_ID, ...). Нет dice-спиннера
     (нечего привязывать), но typing-индикатор шлём.
 
@@ -935,7 +833,7 @@ async def process_pending_on_startup(bot: Bot) -> None:
             await bot.send_message(
                 OWNER_TELEGRAM_ID,
                 "Не вышло прогнать через LLM. Pending-ответ оставлен на следующий рестарт. "
-                "Если не хочешь ждать — /end закроет сессию.",
+                "Если не хочешь ждать — /start закроет сессию.",
             )
         except Exception:
             pass
@@ -953,13 +851,9 @@ async def process_pending_on_startup(bot: Bot) -> None:
 
     debate = (result.get("debate_message") or "").strip()
     close = bool(result.get("close_session"))
-    if s.mode == "discuss":
-        close = False
-    force_close_with_summary = (
-        s.mode == "probe" and s.clarifier_count >= MAX_CLARIFIERS
-    )
+    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS
 
-    if force_close_with_summary or (s.mode == "probe" and close):
+    if force_close_with_summary or close:
         try:
             comment = await summarize_session(
                 main_question=s.main_question or question,
@@ -977,20 +871,6 @@ async def process_pending_on_startup(bot: Bot) -> None:
         session.clear()
         return
 
-    if close:
-        if debate:
-            for chunk in _split_for_telegram(debate):
-                try:
-                    await bot.send_message(OWNER_TELEGRAM_ID, chunk)
-                except Exception:
-                    log.exception("recovery: failed to send debate chunk")
-        try:
-            await bot.send_message(OWNER_TELEGRAM_ID, "Закрыл сессию.")
-        except Exception:
-            pass
-        session.clear()
-        return
-
     if not debate:
         debate = "Понял, продолжим — что скажешь дальше?"
 
@@ -999,9 +879,8 @@ async def process_pending_on_startup(bot: Bot) -> None:
     raw_next = (result.get("raw_entry") or {}).get("domain")
     next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
     session.set_question(debate, next_domain, q_num=new_n)
-    if s.mode == "probe":
-        s.clarifier_count += 1
-        session.persist()
+    s.clarifier_count += 1
+    session.persist()
     try:
         await bot.send_message(
             OWNER_TELEGRAM_ID,
@@ -1031,7 +910,7 @@ async def _handle_review(message: Message, text: str) -> None:
     except Exception:
         log.exception("review_query failed")
         await _stop_thinking(thinking)
-        await message.answer("Не получилось обработать запрос. Переформулируй или /end.")
+        await message.answer("Не получилось обработать запрос. Переформулируй или /start (смыв).")
         return
     await _stop_thinking(thinking)
 
@@ -1098,7 +977,6 @@ async def _send_next_question(
     bot: Bot,
     chat_id: int,
     domain: str | None = None,
-    slug_hint: str | None = None,
 ) -> None:
     s = session.get()
     if s is None:
@@ -1107,17 +985,11 @@ async def _send_next_question(
     # Если домен не указан — выбираем случайно из 10 (равномерно).
     # Это даёт честное покрытие всех тем вместо того, чтобы LLM сам выбирал
     # любимые домены при mode="ask domain=any".
-    if domain is None and not slug_hint:
+    if domain is None:
         domain = random.choice(DOMAINS)
         log.info("random domain selected for main question: %s", domain)
 
-    if slug_hint:
-        concepts = graph.find_concepts(domain=domain, slugs=[slug_hint], limit=10)
-        if not concepts:
-            concepts = graph.find_concepts(domain=domain, limit=30)
-        context_concepts = graph.context_snapshot(concepts)
-    else:
-        context_concepts = _context_for_domain(domain)
+    context_concepts = _context_for_domain(domain)
 
     try:
         await bot.send_chat_action(chat_id, "typing")

@@ -25,14 +25,11 @@ log = logging.getLogger(__name__)
 _client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 _system_prompt = (PROMPTS_DIR / "system.md").read_text(encoding="utf-8")
-_discuss_addendum = (PROMPTS_DIR / "discuss.md").read_text(encoding="utf-8")
 _review_addendum = (PROMPTS_DIR / "review.md").read_text(encoding="utf-8")
 _summarize_prompt = (PROMPTS_DIR / "summarize.md").read_text(encoding="utf-8")
 
 
 def _system(mode: str) -> str:
-    if mode == "discuss":
-        return f"{_system_prompt}\n\n{_discuss_addendum}"
     if mode == "review":
         return f"{_system_prompt}\n\n{_review_addendum}"
     return _system_prompt
@@ -152,24 +149,6 @@ async def summarize_session(main_question: str, exchanges: list[dict]) -> str:
         temperature=0.4,
     )
     return (resp.choices[0].message.content or "").strip()
-
-
-async def ping_llm() -> tuple[bool, Optional[float], Optional[str]]:
-    """Лёгкий round-trip для /ping. Returns (ok, latency_seconds, error_message)."""
-    import time
-    t0 = time.monotonic()
-    try:
-        resp = await _client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=4,
-            temperature=0,
-        )
-        _ = resp.choices[0].message.content
-        return True, time.monotonic() - t0, None
-    except Exception as exc:
-        log.exception("ping_llm failed")
-        return False, time.monotonic() - t0, repr(exc)
 
 
 async def review_query(query: str, catalog: str, history: Optional[list[dict]] = None) -> dict:

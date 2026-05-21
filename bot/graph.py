@@ -362,6 +362,8 @@ def find_concepts(domain: Optional[str] = None, slugs: Optional[Iterable[str]] =
     domains = [domain] if domain else list(DOMAINS)
     for d in domains:
         for p in (CONCEPTS_DIR / d).glob("*.md"):
+            if p.name.startswith("_"):  # служебные файлы (_moc.md и пр.) — не концепты
+                continue
             slug = p.stem
             if target_slugs is not None and slug not in target_slugs:
                 continue
@@ -379,6 +381,8 @@ def all_slugs() -> list[dict]:
     out: list[dict] = []
     for d in DOMAINS:
         for p in (CONCEPTS_DIR / d).glob("*.md"):
+            if p.name.startswith("_"):  # служебные файлы — не концепты
+                continue
             c = _parse_file(p)
             if c:
                 out.append({"slug": c.slug, "name": c.name, "domain": c.domain, "summary": c.summary})

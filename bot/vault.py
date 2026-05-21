@@ -15,6 +15,7 @@ log = logging.getLogger(__name__)
 
 RAW_DIR = VAULT_PATH / "raw"
 PROFILE_DIR = VAULT_PATH / "profile"
+NOTES_DIR = VAULT_PATH / "notes"
 INDEX_FILE = VAULT_PATH / "_index.md"
 STATE_FILE = VAULT_PATH / "_state.json"
 
@@ -274,6 +275,29 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
     )
     if not path.exists():
         path.write_text(f"# {date_str}\n\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as f:
+        f.write(block)
+    return path
+
+
+def append_note(when: datetime, text: str) -> Path:
+    """Append свободную заметку (/text) в `notes/YYYY-MM-DD.md` verbatim.
+
+    Человеческий скрэтчпад — отдельно от raw (машинный Q&A-лог). Текст
+    санитизируется так же, как ответ пользователя (control-байты, лимит),
+    и экранируется против подделки raw-заголовков на случай чтения парсером.
+    """
+    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    date_str = when.strftime("%Y-%m-%d")
+    time_str = when.strftime("%H:%M")
+    path = NOTES_DIR / f"{date_str}.md"
+    clean, truncated = safe_user_text(text)
+    if truncated:
+        append_log("warn", "note_truncated", f"{date_str} {time_str} length>limit")
+    clean = escape_raw_block(clean)
+    block = f"## {time_str}\n{clean}\n\n"
+    if not path.exists():
+        path.write_text(f"# Заметки · {date_str}\n\n", encoding="utf-8")
     with path.open("a", encoding="utf-8") as f:
         f.write(block)
     return path

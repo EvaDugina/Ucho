@@ -4,7 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeChat
 
-from . import handlers, session, vault
+from . import handlers, selfcheck, session, vault
 from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
 from .handlers import router
 from .scheduler import start_scheduler
@@ -19,16 +19,15 @@ log = logging.getLogger("psycho.main")
 # Команды, которые видны при наборе «/» в Telegram.
 # Описание ≤ 256 символов; ставим коротко и понятно.
 BOT_COMMANDS = [
-    BotCommand(command="ask", description="Задать вопрос (выбор домена кнопками)"),
-    BotCommand(command="requestion", description="Свой вопрос: /requestion <текст>"),
-    BotCommand(command="discuss", description="Оппонировать: /discuss [слаг|домен]"),
+    BotCommand(command="ask", description="Задать вопрос"),
+    BotCommand(command="echo", description="Вернуть пользовательский вопрос: /echo <текст>"),
+    BotCommand(command="text", description="Свободная заметка: /text <текст>"),
     BotCommand(command="review", description="Поговорить о своей базе знаний"),
-    BotCommand(command="history", description="Все вопросы и ответы"),
-    BotCommand(command="retry", description="Задать заново вопрос: /retry N"),
-    BotCommand(command="answer", description="Ответить на старый вопрос: /answer N текст"),
-    BotCommand(command="ping", description="Проверка живости бота и LLM"),
-    BotCommand(command="end", description="Закрыть текущую сессию"),
-    BotCommand(command="start", description="Подсказка по командам"),
+    BotCommand(command="history", description="История всех вопросов и ответов"),
+    BotCommand(command="requestion", description="Повторить вопрос"),
+    BotCommand(command="pebble", description="Бросить камушек"),
+    BotCommand(command="help", description="Подсказка по командам"),
+    BotCommand(command="start", description="Кнопка смыва"),
 ]
 
 
@@ -48,6 +47,15 @@ async def _setup_commands(bot: Bot) -> None:
 
 async def main() -> None:
     vault.ensure_layout()
+
+    # Механический self-check при старте (без LLM): MOC rebuild, валидация связей,
+    # отчёт о дублях/сиротах в .psycho/startup-check.md. Не должен валить старт.
+    try:
+        summary = selfcheck.run()
+        log.info("startup self-check: %s", summary)
+    except Exception:
+        log.exception("startup self-check failed (non-fatal)")
+
     restored = session.restore()
     if restored is not None:
         log.info(

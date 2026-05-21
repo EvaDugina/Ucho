@@ -14,7 +14,7 @@ from .config import VAULT_PATH
 
 log = logging.getLogger(__name__)
 
-Mode = Literal["probe", "discuss", "review"]
+Mode = Literal["probe", "review"]
 MAX_HISTORY = 6  # последние N пар user/assistant в LLM-контексте
 
 SESSION_FILE = VAULT_PATH / "_session.json"
