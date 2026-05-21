@@ -43,8 +43,9 @@
   - Telegram-бот (`bot/`) — диалоговый слой, маршрутизация команд, форматирование сообщений.
   - Ollama — локальный LLM-сервер, GPU-проброс через NVIDIA Container Toolkit.
   - Obsidian-vault на хосте — хранилище графа и raw-логов, синхронизируется через YandexDisk-клиент.
+- **Разделение труда (capture-first):** локальная Qwen (live) только захватывает — диалог, `raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенный граф строит сильная модель (Claude) раз в неделю через скилл `.claude/skills/weekly-review/` (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC.
 - **Потоки данных:**
-  - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON-ответа → атомарная запись в vault через `git_wrap` транзакцию → MOC rebuild.
+  - Пользователь шлёт сообщение → handler → LLM (через Ollama) → парсинг JSON (`concepts_to_create` как draft + `concepts_to_update` evidence; связи/конфликты НЕ обрабатываются) → атомарная запись в vault через `git_wrap` → MOC rebuild.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа.
   - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore()` + (при `pending_answer`) `process_pending_on_startup`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
 - **Внешние зависимости:** только Telegram Bot API. Никаких внешних AI-провайдеров.
@@ -53,7 +54,7 @@
 
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
-- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → концепты → conflicts → MOC).
+- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → черновые концепты `draft` + evidence → MOC). Связи/конфликты в live НЕ строит — это weekly-review.
 - `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование.
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/text` в `notes/`), `iter_history`.
@@ -69,24 +70,24 @@
 
 **Данные и контракты:**
 
-- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases`, тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`.
+- **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases`, тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, без связей) → `stable` (выверен Claude в weekly-review); промежуточные `tentative`/`contested`.
 - **Raw-блок** (`raw/YYYY-MM-DD.md`): `## Q<N> · HH:MM · <domain>`, `**Q:** …`, `**A:** …`, `^Q<N>` block-id на отдельной строке.
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
 - **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history`, `pending_answer` (двухфазный коммит).
-- **Контракт LLM `process`-режима:**
+- **Контракт LLM `process`-режима (capture-first — без связей/конфликтов):**
   ```json
   {
     "type": "processed",
     "raw_entry": {"domain": "ethics", "fragment": "..."},
-    "concepts_to_create": [{"slug": "...", "name": "...", "type": "...", "domain": "...", "summary": "...", "evidence": "...", "aliases": [], "relations": [{"to": "...", "kind": "..."}]}],
-    "concepts_to_update": [{"slug": "...", "append_evidence": "...", "summary_patch": null}],
-    "relations_to_add": [{"from": "...", "to": "...", "kind": "...", "note": "..."}],
-    "conflicts": [{"concept_a": "...", "concept_b": "...", "probe": "..."}],
+    "concepts_to_create": [{"slug": "...", "name": "...", "type": "...", "domain": "...", "summary": "...", "evidence": "..."}],
+    "concepts_to_update": [{"slug": "...", "append_evidence": "..."}],
     "debate_message": "...",
+    "question_type": "concrete|hypothetical|comparison|emotional_anchor|challenge",
     "close_session": false
   }
   ```
+  Поля `relations`, `relations_to_add`, `conflicts`, `summary_patch` бот игнорирует (граф строит weekly-review).
 
 ---
 
@@ -250,6 +251,13 @@ PoC B техчасть считается принятой, когда:
 
 ### Active plans
 
+**Реализовано 2026-05-21 (capture-first разделение труда):**
+
+- Бот переведён в режим «только захват»: `process` создаёт черновые концепты `status: draft`, БЕЗ `relations`/`conflicts`. `_apply_processed_inner` больше не строит связи и контр-callouts; `concepts_to_update` только дописывает evidence (не патчит summary). `CONCEPT_STATUSES` += `draft`.
+- `prompts/system.md` `mode: process` переписан под capture-first (без связей/конфликтов, draft, debate=вопрос).
+- Скилл `weekly-review` апгрейжен до v2: теперь это **сборщик графа** (proposal → apply под git): промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, переписывание `profile/`, осмысленный MOC, digest. Claude правит `concepts/`/`profile/`/MOC напрямую; `raw/` и служебное бота не трогает; drift-detection защищает его правки от перезаписи ботом.
+- Отложено до MVP A: локальная embedding-модель (`nomic-embed-text` в Ollama) для дедупа/поиска.
+
 **Реализовано 2026-05-21 (ревизия команд + startup self-check):**
 
 - Команды: убраны `/discuss`, `/answer`, `/end`; `/requestion`(старый)→`/echo`, `/retry`→`/requestion` («повторить вопрос»), `/ping`→`/pebble` («буль.»); добавлены `/text` (заметка в `notes/` + разбор в граф), `/help`. `/start` — «кнопка смыва»: закрывает активную сессию (данные целы), заменяет собой `/end`.
@@ -283,20 +291,24 @@ PoC B техчасть считается принятой, когда:
   - Шаги: открой в Obsidian, добавь строку, сохрани. В Telegram задай вопрос про честность, ответь. Бот пишет ответ.
   - Ожидаемый результат: твоя правка на месте, в `.psycho/log.md` появилась строка `drift_skipped` или операция прошла на другой файл; концепт не перезаписан целиком.
 
-- **Конфликт-callout:**
-  - Предусловия: в `ethics` есть концепт типа «всегда говори правду».
-  - Шаги: задай вопрос про ложь во спасение, ответь что иногда нужно соврать.
-  - Ожидаемый результат: в концепте `chestnost.md` появился блок `> [!contradiction] vs [[pragmatizm]]` (или аналогичный slug), такой же зеркальный — в `pragmatizm.md`.
+- **Черновик без связей (capture-first):**
+  - Шаги: задай вопрос, ответь развёрнуто. Бот создаёт концепт.
+  - Ожидаемый результат: новый файл `concepts/<domain>/<slug>.md` со `status: draft`, БЕЗ `supports/contradicts/...` (связи пустые), без `> [!contradiction]` callout. Связи появятся только после прогона `weekly-review` из Claude.
 
-- **Dedup через Jaccard:**
+- **Dedup через Jaccard (live, лёгкий):**
   - Предусловия: концепт `chestnost` с summary вида «не лгать никому даже когда удобно».
-  - Шаги: ответь так, чтобы LLM захотела создать концепт с близкой формулировкой («никогда не лгать никому даже когда очень удобно сейчас»).
-  - Ожидаемый результат: новый файл НЕ создаётся; в `chestnost.md` появляется второй evidence-callout и в `aliases` добавляется новая формулировка; в `.psycho/log.md` строка `dedup_jaccard` или `concept_alias_resolved`.
+  - Шаги: ответь так, чтобы LLM захотела создать концепт с близкой формулировкой.
+  - Ожидаемый результат: новый файл НЕ создаётся; в `chestnost.md` второй evidence-callout + alias; в `.psycho/log.md` строка `dedup_jaccard` или `concept_alias_resolved`.
 
 - **MOC автообновление:**
   - Предусловия: `<vault>/concepts/knowledge/` пустой или не существует.
   - Шаги: задай вопрос про знание, ответь, дай LLM создать концепт.
-  - Ожидаемый результат: появился `concepts/knowledge/_moc.md` с разделом «Ценности» (или нужного type) и одним пунктом — новым концептом.
+  - Ожидаемый результат: появился `concepts/knowledge/_moc.md` с разделом нужного type и пунктом — новым черновым концептом.
+
+- **weekly-review строит граф (Claude):**
+  - Предусловия: несколько `draft`-концептов за неделю.
+  - Шаги: в Claude Code запусти скилл `weekly-review`, подтверди план (Фаза 2).
+  - Ожидаемый результат: черновики стали `stable` (или слиты), появились связи и реальные `[!contradiction]`-callouts, `profile/<domain>.md` переписан в обзор, создан `digests/<неделя>.md`; `git log` vault содержит пару `weekly-review … before/applied`; `raw/` не тронут.
 
 - **Restart-safety:**
   - Предусловия: активная сессия (Q открыт, ответа не было).
@@ -327,10 +339,11 @@ PoC B техчасть считается принятой, когда:
 
 ## ai_pipeline
 
-- **Модели по задачам:**
-  - Все режимы (`ask`, `process`, `review`, `summarize`) → `qwen2.5:14b-instruct` (GPU) или `qwen2.5:7b-instruct` (CPU-fallback). Режим `discuss` убран 2026-05-21.
-  - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → та же модель, temperature=0.
-  - Embeddings → не используются (поиск делается через slug+alias+Jaccard на summary, не векторно).
+- **Разделение труда (две модели, разные роли):**
+  - **Qwen 14B локально (live, в контейнере)** — захват: режимы `ask`, `process` (capture-first: только черновики + evidence, без связей/конфликтов), `review`, `summarize`. GPU `qwen2.5:14b-instruct` / CPU-fallback `qwen2.5:7b-instruct`. Режим `discuss` убран 2026-05-21.
+  - **Сильная модель (Claude в Claude Code, вручную раз в неделю)** — сборка графа: скилл `weekly-review` (промоушн draft→stable, дедуп/слияние, связи, реальные противоречия, profile, MOC). Не в контейнере, запускается пользователем.
+  - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → Qwen, temperature=0.
+  - Embeddings → не используются (live-дедуп через slug+alias+Jaccard). Векторный дедуп/поиск (`nomic-embed-text` в Ollama) — кандидат на MVP A.
 - **Провайдер:** локальный Ollama, openai-совместимый API через `OPENAI_BASE_URL=http://ollama:11434/v1`.
 - **LLM-бенчмарки:** не делаются на PoC B. До MVP B добавим минимальный набор «правильно ли парсится JSON ответа» / «правильно ли выбран домен» / «находит ли реальные противоречия».
 
