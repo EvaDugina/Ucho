@@ -111,6 +111,17 @@ def _path_for(slug: str, domain: str) -> Path:
     return concepts_dir() / domain / f"{slug}.md"
 
 
+def _is_meta_file(p: Path) -> bool:
+    """Служебный файл в папке домена (не концепт): начинается с `_` (старый
+    `_moc.md`) ИЛИ это MOC-нода с именем = домен заглавными (`AESTHETICS.md`).
+    MOC теперь называется по домену, чтобы на графе узел подписывался категорией,
+    а не «_moc» — поэтому такие файлы надо исключать из перечисления концептов.
+    """
+    if p.name.startswith("_"):
+        return True
+    return p.stem == p.parent.name.upper()
+
+
 def _wikilink(slug: str) -> str:
     return f"[[{slug}]]"
 
@@ -368,7 +379,7 @@ def find_concepts(domain: Optional[str] = None, slugs: Optional[Iterable[str]] =
     domains = [domain] if domain else list(DOMAINS)
     for d in domains:
         for p in (concepts_dir() / d).glob("*.md"):
-            if p.name.startswith("_"):  # служебные файлы (_moc.md и пр.) — не концепты
+            if _is_meta_file(p):  # _moc / MOC-нода категории — не концепт
                 continue
             slug = p.stem
             if target_slugs is not None and slug not in target_slugs:
@@ -387,7 +398,7 @@ def all_slugs() -> list[dict]:
     out: list[dict] = []
     for d in DOMAINS:
         for p in (concepts_dir() / d).glob("*.md"):
-            if p.name.startswith("_"):  # служебные файлы — не концепты
+            if _is_meta_file(p):  # _moc / MOC-нода категории — не концепт
                 continue
             c = _parse_file(p)
             if c:
@@ -839,7 +850,7 @@ def find_similar_concept(summary: str, domain: str, threshold: float = 0.7) -> O
         # слишком короткий summary — Jaccard ненадёжен, не работаем.
         return None
     for p in (concepts_dir() / domain).glob("*.md"):
-        if p.name.startswith("_"):
+        if _is_meta_file(p):
             continue
         c = _parse_file(p)
         if c is None or not c.summary:
@@ -886,6 +897,8 @@ def resolve_slug(candidate: str, domain: Optional[str] = None) -> Optional[str]:
     domains = [domain] if domain else list(DOMAINS)
     for d in domains:
         for p in (concepts_dir() / d).glob("*.md"):
+            if _is_meta_file(p):
+                continue
             c = _parse_file(p)
             if not c:
                 continue

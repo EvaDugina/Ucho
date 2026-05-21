@@ -1,6 +1,7 @@
 """Map of Content (MOC) per-domain — Obsidian-native навигация по концептам.
 
-Один MOC-файл на домен: ``concepts/<domain>/_moc.md``. Содержит список
+Один MOC-файл на домен: ``concepts/<domain>/<DOMAIN>.md`` (имя = домен
+заглавными, чтобы узел графа подписывался названием темы, а не «_moc»). Содержит список
 всех концептов домена, сгруппированных по ``type`` (principle / value /
 preference / belief / claim), с одно-строчным summary под каждым.
 
@@ -8,9 +9,9 @@ preference / belief / claim), с одно-строчным summary под каж
 вызывается в ``handlers._apply_processed_inner`` внутри той же
 ``git_wrap`` транзакции. Запись атомарная.
 
-Файл начинается с underscore (`_moc.md`) — в Obsidian это обычно скрывает
-их из поиска по имени, но они остаются доступны через `[[_moc]]` и Graph
-View. Можно также поставить тег в frontmatter для фильтрации.
+На графе Obsidian MOC-нода — хаб темы (узел `AESTHETICS`, `ETHICS`, …) со
+связями ко всем концептам домена. Из перечисления концептов MOC-файл
+исключается (см. graph._is_meta_file: `_*` или stem == домен.upper()).
 """
 from __future__ import annotations
 
@@ -35,21 +36,39 @@ _TYPE_LABELS = {
 
 
 def _moc_path(domain: str) -> Path:
+    # Имя файла = домен ЗАГЛАВНЫМИ (`AESTHETICS.md`), чтобы на графе Obsidian
+    # узел-хаб подписывался названием категории, а не «_moc».
+    return concepts_dir() / domain / f"{domain.upper()}.md"
+
+
+def _legacy_moc_path(domain: str) -> Path:
     return concepts_dir() / domain / "_moc.md"
 
 
 def rebuild_domain_moc(domain: str) -> Path:
-    """Перезаписать `_moc.md` для домена. Возвращает путь."""
+    """Перезаписать MOC-ноду домена (`<DOMAIN>.md`). Возвращает путь.
+
+    Старый `_moc.md` (если остался от прежней схемы) удаляется.
+    """
     if domain not in DOMAINS:
         raise ValueError(f"unknown domain: {domain}")
     domain_dir = concepts_dir() / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
 
-    # Собираем концепты домена. _moc.md сам тоже окажется в glob, отсеиваем.
+    # Удаляем легаси `_moc.md`, чтобы не висел вторым узлом на графе.
+    legacy = _legacy_moc_path(domain)
+    if legacy.exists():
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+
+    moc_name = _moc_path(domain).stem  # сам MOC-файл — не концепт, отсеиваем
+    # Собираем концепты домена (исключая служебные: _* и саму MOC-ноду).
     concepts: dict[str, list[tuple[str, str, str]]] = {t: [] for t in CONCEPT_TYPES}
     others: list[tuple[str, str, str, str]] = []  # неизвестный type
     for p in sorted(domain_dir.glob("*.md")):
-        if p.name.startswith("_"):
+        if p.name.startswith("_") or p.stem == moc_name:
             continue
         c = _parse_file(p)
         if c is None:
@@ -69,9 +88,9 @@ def rebuild_domain_moc(domain: str) -> Path:
         f"domain: {domain}",
         "---",
         "",
-        f"# MOC — {domain}",
+        f"# {domain.upper()}",
         "",
-        "_Автоматически перестраивается ботом. Не редактируй вручную — правки потеряются._",
+        "_Карта темы. Автоматически перестраивается ботом — не редактируй вручную._",
         "",
     ]
     total = sum(len(v) for v in concepts.values()) + len(others)
