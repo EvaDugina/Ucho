@@ -1,6 +1,7 @@
 import html
 import logging
 import random
+import re
 from datetime import datetime, timedelta
 
 from aiogram import BaseMiddleware, Bot, F, Router
@@ -14,7 +15,7 @@ from aiogram.types import (
 )
 
 from . import graph, moc, qmap, ratelimit, session, userctx, users, vault
-from .config import DOMAINS
+from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
 from .validation import (
@@ -81,6 +82,65 @@ USER_DOMAIN_LABEL = "пользовательский"
 
 # В режиме probe — главный вопрос плюс не более N поясняющих, затем закрывающий комментарий.
 MAX_CLARIFIERS = 1
+
+# Заголовок вопроса в сообщении бота: "Q<N> · [mode ·] <domain>" (см. _format_q).
+_Q_HEAD_RE = re.compile(r"^Q(\d+)\s*·\s")
+
+
+def _parse_question_message(text: str | None) -> dict | None:
+    """Восстановить вопрос из тела процитированного (reply) сообщения бота.
+
+    Фолбэк, когда qmap не знает message_id (вопрос задан до появления qmap,
+    либо карта потерялась): сам текст сообщения несёт всё нужное — номер, домен
+    и формулировку. Формат — из ``_format_q``: "Q<N> · <domain>\\n\\n<тело>".
+    Возвращает ``{q_num, domain, text}`` или None, если это не вопрос-сообщение.
+    """
+    if not text:
+        return None
+    parts = text.split("\n\n", 1)
+    if len(parts) != 2:
+        return None
+    head, body = parts[0].strip(), parts[1].strip()
+    if not _Q_HEAD_RE.match(head):
+        return None
+    tokens = [t.strip() for t in head.split("·")]
+    try:
+        q_num = int(tokens[0][1:])  # "Q42" → 42
+    except (ValueError, IndexError):
+        return None
+    label = tokens[-1]
+    if label == USER_DOMAIN_LABEL:
+        domain = USER_DOMAIN
+    elif label in DOMAINS:
+        domain = label
+    else:
+        return None  # домен не распознан — не реконструируем
+    # Хвост "(повтор QN)" от /requestion в тело не тащим.
+    body = re.sub(r"\n*\(повтор\s+Q\d+\)\s*$", "", body).strip()
+    if not body:
+        return None
+    return {"q_num": q_num, "domain": domain, "text": body}
+
+
+# Сигналы того, что пользователь отвергает саму рамку вопроса (а не отвечает по
+# существу) — например, не принимает навязанное «противоречие». Ловим их, чтобы
+# не долбить ещё одним поясняющим по той же рамке: закрываем сессию комментарием,
+# а следующий вопрос (дневной / /ask) зайдёт с другой темы.
+_FRAME_REJECTION_MARKERS = (
+    "не противоречие",
+    "нет противоречия",
+    "не вижу противоречи",
+    "не считаю это противоречи",
+    "никак не объясняю",
+    "нечего объяснять",
+    "нечего тут объяснять",
+    "не буду объяснять",
+)
+
+
+def _rejects_frame(text: str) -> bool:
+    low = text.lower()
+    return any(m in low for m in _FRAME_REJECTION_MARKERS)
 
 
 def _ask_keyboard() -> InlineKeyboardMarkup:
@@ -486,7 +546,8 @@ _HELP_ADMIN = (
     "<b>Админ</b>\n"
     "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
     "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
-    "<b>/users</b> — список доверенных"
+    "<b>/users</b> — список доверенных\n"
+    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас"
 )
 
 _HELP_FOOTER = (
@@ -578,6 +639,31 @@ async def cmd_users(message: Message) -> None:
     else:
         lines.append("Других пользователей нет.")
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("dailyall"))
+async def cmd_dailyall(message: Message, bot: Bot) -> None:
+    if not _is_owner(message):
+        return
+    targets = set(users.allowed_ids()) | set(users.all_data_user_ids())
+    targets.add(OWNER_TELEGRAM_ID)
+    targets.update(ALLOWED_TELEGRAM_IDS)
+    sent = skipped = failed = 0
+    for uid in sorted(targets):
+        try:
+            userctx.set_user(uid)
+            if session.get() is not None:
+                skipped += 1
+                continue
+            await send_daily_question(bot, uid)
+            sent += 1
+        except Exception:
+            failed += 1
+            log.exception("dailyall failed for uid=%s", uid)
+    userctx.set_user(message.from_user.id)
+    await message.answer(
+        f"Разослал. Отправлено: {sent}, пропущено (активная сессия): {skipped}, ошибок: {failed}."
+    )
 
 
 @router.message(Command("ask"))
@@ -794,24 +880,16 @@ async def cmd_pebble(message: Message) -> None:
     await message.answer("буль.")
 
 
-@router.message(Command("ucho"))
-async def cmd_ucho(message: Message, command: CommandObject) -> None:
-    """Свободная заметка. Сохраняем verbatim в notes/<дата>.md и прогоняем через
-    LLM process — концепты попадают в граф как черновики. Заметка работает как
-    ответ без заданного вопроса.
-    """
-    if not _is_allowed(message):
-        return
-    raw = (command.args or "").strip()
-    if not raw:
-        await message.answer("Использование: /ucho <текст заметки>")
-        return
-    clean = await _accept_user_text(message, raw)
-    if clean is None:
-        return
+async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None = None) -> None:
+    """Сохранить текст как свободную заметку (notes/) и прогнать через LLM в граф.
 
-    # Per-user single-flight + cooldown: отклоняем до записи, чтобы /ucho был
-    # атомарным (на busy — ничего не сохранено, пользователь повторяет целиком).
+    Единый путь для /ucho и для текста, который не привязался к вопросу
+    (неразрешённый reply / нет активной сессии) — чтобы осмысленный ответ
+    пользователя НИКОГДА не терялся. ``note_prefix`` — пояснение, почему текст
+    ушёл в заметку (для салвейдж-случаев).
+    """
+    # Per-user single-flight + cooldown: отклоняем до записи, чтобы заметка была
+    # атомарной (на busy — ничего не сохранено, пользователь повторяет целиком).
     uid = userctx.current_uid()
     if not ratelimit.try_acquire(uid):
         await message.answer(ratelimit.BUSY_MESSAGE)
@@ -840,9 +918,10 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
                 mode="probe",
             )
         except Exception:
-            log.exception("process_answer failed in /ucho")
+            log.exception("process_answer failed in note ingest")
             await _stop_thinking(thinking)
-            await message.answer("Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
+            prefix = (note_prefix + ". ") if note_prefix else ""
+            await message.answer(f"{prefix}Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
             return
         await _stop_thinking(thinking)
 
@@ -850,14 +929,33 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
         try:
             created, updated = _apply_processed(result, q_num, when, note_question, clean)
         except Exception:
-            log.exception("apply_processed failed in /ucho")
+            log.exception("apply_processed failed in note ingest")
         vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
+        prefix = (note_prefix + ". ") if note_prefix else ""
         await message.answer(
-            f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
+            f"{prefix}Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
             f"В граф: +{created} новых, ~{updated} обновлено."
         )
     finally:
         ratelimit.release(uid)
+
+
+@router.message(Command("ucho"))
+async def cmd_ucho(message: Message, command: CommandObject) -> None:
+    """Свободная заметка. Сохраняем verbatim в notes/<дата>.md и прогоняем через
+    LLM process — концепты попадают в граф как черновики. Заметка работает как
+    ответ без заданного вопроса.
+    """
+    if not _is_allowed(message):
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer("Использование: /ucho <текст заметки>")
+        return
+    clean = await _accept_user_text(message, raw)
+    if clean is None:
+        return
+    await _ingest_note(message, clean)
 
 
 # ---------- text messages ----------
@@ -875,10 +973,26 @@ async def on_text(message: Message) -> None:
     if message.reply_to_message is not None:
         entry = qmap.find_by_message_id(message.reply_to_message.message_id)
         if entry is None:
-            await message.answer(
-                "Здесь не на что отвечать — сделай reply на сообщение с вопросом (Q…), "
-                "либо ответь обычным сообщением на текущий."
-            )
+            # qmap не знает это сообщение (вопрос задан до qmap / карта потерялась).
+            # Фолбэк: восстанавливаем вопрос прямо из тела процитированного сообщения.
+            parsed = _parse_question_message(message.reply_to_message.text)
+            if parsed is not None:
+                # В raw → уже отвечен → новый ответ станет Q-повтором (старый цел);
+                # иначе — отвечаем под исходным номером.
+                parsed["answered"] = vault.find_question(parsed["q_num"]) is not None
+                vault.append_log(
+                    "info", "reply_reconstructed",
+                    f"Q{parsed['q_num']} {parsed['domain']} answered={parsed['answered']}",
+                )
+                entry = parsed
+        if entry is None:
+            # Reply не на вопрос-сообщение (или его не разобрать) — не теряем текст.
+            clean = await _accept_user_text(message, text)
+            if clean is not None:
+                await _ingest_note(
+                    message, clean,
+                    note_prefix="Не понял, на какой вопрос это ответ — сохранил как заметку",
+                )
             return
         # Цель == текущий активный неотвеченный вопрос → это обычный ответ,
         # сессию зря не пересоздаём.
@@ -891,7 +1005,13 @@ async def on_text(message: Message) -> None:
             s = session.get()
 
     if s is None:
-        await message.answer("Сейчас сессии нет. /ask чтобы начать, /review чтобы поговорить о базе.")
+        # Нет активной сессии и это не reply на вопрос — не теряем текст: в заметку.
+        clean = await _accept_user_text(message, text)
+        if clean is not None:
+            await _ingest_note(
+                message, clean,
+                note_prefix="Сейчас сессии нет — сохранил как заметку (/ask — начать диалог)",
+            )
         return
 
     # /review: подтверждение предложенных добавлений
@@ -987,7 +1107,14 @@ async def _handle_probe(message: Message, text: str) -> None:
 
     # Лимит поясняющих: после MAX_CLARIFIERS отвеченных пояснений (или если LLM
     # сама решила закрыть) — закрывающий комментарий вместо нового вопроса.
-    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS
+    # Плюс: если пользователь отверг саму рамку вопроса — не долбим поясняющим.
+    rejected = _rejects_frame(text)
+    if rejected:
+        vault.append_log(
+            "info", "frame_rejected",
+            f"Q{s.current_q_num}: закрываю сессию вместо поясняющего",
+        )
+    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS or rejected
 
     if force_close_with_summary or close:
         thinking2 = await _start_thinking(message)
@@ -1095,7 +1222,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     debate = (result.get("debate_message") or "").strip()
     close = bool(result.get("close_session"))
-    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS
+    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS or _rejects_frame(text)
 
     if force_close_with_summary or close:
         try:
@@ -1231,19 +1358,13 @@ async def _send_next_question(
         domain = random.choice(DOMAINS)
         log.info("random domain selected for main question: %s", domain)
 
+    # Никаких сообщений-индикаторов: пользователь должен получить РОВНО одно
+    # сообщение — сам вопрос. Активность показываем нативным «печатает…»
+    # (send_chat_action не создаёт сообщения и гаснет сам).
     try:
         await bot.send_chat_action(chat_id, "typing")
     except Exception:
         pass
-    thinking = None
-    try:
-        try:
-            await bot.send_dice(chat_id, emoji=_thinking_token())
-        except Exception:
-            log.exception("failed to send dice in _send_next_question")
-        thinking = await bot.send_message(chat_id, "Думаю.")
-    except Exception:
-        log.exception("failed to send thinking message")
 
     try:
         # Главный вопрос (/ask, дневной) генерим НЕ опираясь на текущую базу:
@@ -1258,20 +1379,9 @@ async def _send_next_question(
         )
     except Exception:
         log.exception("ask_next failed")
-        if thinking is not None:
-            try:
-                await thinking.delete()
-            except Exception:
-                pass
         await bot.send_message(chat_id, "Не вышло сформулировать вопрос. Попробуй ещё раз.")
         session.clear()
         return
-
-    if thinking is not None:
-        try:
-            await thinking.delete()
-        except Exception:
-            pass
 
     q_num = vault.next_q_num()
     session.set_question(result["question"], result["domain"], q_num=q_num)

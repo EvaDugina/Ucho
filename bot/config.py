@@ -30,7 +30,9 @@ ALLOWED_TELEGRAM_IDS = tuple(
     int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
 )
 
-DAILY_HOUR = int(os.getenv("DAILY_HOUR", "20"))
+DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
+# Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
+DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
 
 DOMAINS = (

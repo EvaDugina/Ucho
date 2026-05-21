@@ -35,6 +35,7 @@ ADMIN_COMMANDS = [
     BotCommand(command="adduser", description="Добавить пользователя: /adduser <id>"),
     BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
     BotCommand(command="users", description="Список доверенных"),
+    BotCommand(command="dailyall", description="Разослать дневной вопрос всем сейчас"),
 ]
 
 

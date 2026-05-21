@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from . import users
-from .config import ALLOWED_TELEGRAM_IDS, DAILY_HOUR, OWNER_TELEGRAM_ID
+from .config import ALLOWED_TELEGRAM_IDS, DAILY_HOUR, DAILY_TZ, OWNER_TELEGRAM_ID
 from .handlers import send_daily_question
 
 log = logging.getLogger(__name__)
@@ -25,14 +25,14 @@ async def _daily_for_all(bot: Bot) -> None:
 
 
 def start_scheduler(bot: Bot) -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler = AsyncIOScheduler(timezone=DAILY_TZ)
     scheduler.add_job(
         _daily_for_all,
-        trigger=CronTrigger(hour=DAILY_HOUR, minute=0),
+        trigger=CronTrigger(hour=DAILY_HOUR, minute=0, timezone=DAILY_TZ),
         args=[bot],
         id="daily_question",
         replace_existing=True,
     )
     scheduler.start()
-    log.info("scheduler started: daily_question at %02d:00 UTC", DAILY_HOUR)
+    log.info("scheduler started: daily_question at %02d:00 %s", DAILY_HOUR, DAILY_TZ)
     return scheduler
