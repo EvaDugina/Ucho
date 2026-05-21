@@ -108,11 +108,15 @@ async def process_answer(
     history: Optional[list[dict]] = None,
     mode: str = "probe",
 ) -> dict:
-    """Разбор ответа пользователя.
+    """Разбор ответа пользователя — ТОЛЬКО анализ + следующий вопрос.
+
+    LLM не управляет записью в БД: не присылает slug, raw_entry, не делит на
+    create/update. Возвращает наблюдения (что человек сказал о себе) и вопрос;
+    куда и как это лечь в граф — решает код (`_apply_processed_inner`).
 
     Returns dict с ключами:
-        type, raw_entry, concepts_to_create, concepts_to_update,
-        relations_to_add, conflicts, debate_message, close_session
+        observations: [{domain, type, name, summary, quote}],
+        debate_message, question_type, close_session
     """
     user_msg = "\n\n".join([
         "mode: process",
@@ -128,11 +132,10 @@ async def process_answer(
     messages.append({"role": "user", "content": user_msg})
 
     data = await _chat_json(messages, temperature=0.5)
-    for key in ("concepts_to_create", "concepts_to_update", "relations_to_add", "conflicts"):
-        data.setdefault(key, [])
+    data.setdefault("observations", [])
     data.setdefault("debate_message", "")
+    data.setdefault("question_type", "")
     data.setdefault("close_session", False)
-    data.setdefault("raw_entry", {"domain": domain_hint or "everyday", "fragment": answer[:200]})
     return data
 
 

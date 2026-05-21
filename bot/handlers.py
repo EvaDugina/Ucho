@@ -21,6 +21,7 @@ from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
     safe_user_text,
+    slugify,
 )
 
 log = logging.getLogger(__name__)
@@ -262,10 +263,30 @@ def _apply_processed(
     asked_at: datetime,
     original_question: str,
     original_answer: str,
-) -> None:
-    """Записать в raw и применить изменения к графу. Транзакция через git_wrap."""
+    session_domain: str | None = None,
+) -> tuple[int, int]:
+    """Записать в raw и применить анализ LLM к графу. Возвращает (created, updated).
+
+    Запись и идентичность — целиком на коде: raw пишется дословно (реальные
+    Q/A + домен сессии), slug выводит код из имени (`slugify`), create-vs-update
+    решает дедуп. LLM присылает только `observations` + следующий вопрос —
+    он анализирует, код кладёт в БД. Транзакция через git_wrap.
+    """
     with vault.git_wrap(f"apply_processed Q{q_num}"):
-        _apply_processed_inner(result, q_num, asked_at, original_question, original_answer)
+        return _apply_processed_inner(
+            result, q_num, asked_at, original_question, original_answer, session_domain
+        )
+
+
+def _verbatim_quote(quote: str | None, answer: str) -> str:
+    """Цитата для evidence — дословный фрагмент ответа. Если LLM перефразировал
+    (нет как подстрока при схлопнутых пробелах) — фолбэк на отрывок самого
+    ответа. Гарантия: evidence — реальные слова человека, не выдумка модели."""
+    a = answer.strip()
+    q = (quote or "").strip()
+    if q and " ".join(q.split()).lower() in " ".join(a.split()).lower():
+        return q
+    return a[:300]
 
 
 def _apply_processed_inner(
@@ -274,18 +295,20 @@ def _apply_processed_inner(
     asked_at: datetime,
     original_question: str,
     original_answer: str,
-) -> None:
-    raw_entry = result.get("raw_entry") or {}
-    raw_domain = raw_entry.get("domain") or "everyday"
-    if raw_domain not in DOMAINS:
-        vault.append_log(
-            "warn",
-            "llm_domain_fallback",
-            f"process: LLM raw_entry.domain={raw_domain!r} → coerced to 'everyday'",
-        )
-        raw_domain = "everyday"
-    raw_fragment = raw_entry.get("fragment") or original_answer[:200]
+    session_domain: str | None = None,
+) -> tuple[int, int]:
+    observations = result.get("observations") or []
 
+    # Домен raw-блока — детерминированно от кода: домен сессии (в нём задан
+    # вопрос). Для свободной заметки (/ucho, session_domain=None) — из первого
+    # валидного наблюдения, иначе everyday. LLM raw-доменом больше не управляет.
+    raw_domain = session_domain if session_domain in DOMAINS else None
+    if raw_domain is None:
+        raw_domain = next((o.get("domain") for o in observations if o.get("domain") in DOMAINS), None)
+    if raw_domain is None:
+        raw_domain = "everyday"
+
+    # raw — дословно Q + A (источник правды); профиль — дословный ответ человека.
     vault.append_raw(
         q_num=q_num,
         when=asked_at,
@@ -296,110 +319,81 @@ def _apply_processed_inner(
     vault.append_profile(
         when=datetime.now(),
         domain=raw_domain,
-        fragment=raw_fragment,
+        fragment=original_answer,
         raw_time=asked_at.strftime("%H:%M"),
     )
 
-    # Obsidian-native: ссылка на конкретный Q-блок (block-ref ^Q<n>) вместо
-    # просто на день. Клик в концепте → точное место в raw.
+    # Obsidian-native: ссылка на конкретный Q-блок (^Q<n>) — клик в концепте
+    # ведёт в точное место raw.
     raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}#^Q{q_num}]]"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     session_marker = f"chat · {now_str}"
-
-    # Домены, в которых что-то поменялось — для последующего rebuild MOC.
     touched_domains: set[str] = set()
+    created = updated = 0
 
-    # 1. Создать новые концепты (со связями). Сначала через resolve_slug + Jaccard
-    # проверяем — не дубликат ли это под другим именем; если да, переводим в
-    # update вместо create.
-    for c_data in result.get("concepts_to_create", []):
+    # Каждое наблюдение LLM → код решает: дубль (дописать evidence) или новый
+    # черновик. slug код выводит сам из имени; LLM slug/create-vs-update не шлёт.
+    for obs in observations:
         try:
-            raw_slug = c_data.get("slug") or ""
-            target_domain = c_data.get("domain", raw_domain) if c_data.get("domain") in DOMAINS else raw_domain
-            existing = graph.resolve_slug(raw_slug, domain=target_domain) if raw_slug else None
+            name = (obs.get("name") or "").strip()
+            if not name:
+                continue
+            domain = obs.get("domain") if obs.get("domain") in DOMAINS else raw_domain
+            summary = obs.get("summary") or ""
+            quote = _verbatim_quote(obs.get("quote"), original_answer)
+            slug = slugify(name)
 
-            # Если по slug/alias не нашли — пробуем по summary через Jaccard.
-            if not existing:
-                summary_text = c_data.get("summary") or ""
-                similar = graph.find_similar_concept(summary_text, target_domain)
+            # Дедуп (всё в коде): по имени/алиасу → по существующему slug-файлу →
+            # по Jaccard на summary. Совпало — обновляем, иначе новый draft.
+            existing = graph.resolve_slug(name, domain=domain)
+            if not existing and slug:
+                existing = graph.resolve_slug(slug, domain=domain)
+            if not existing and summary:
+                similar = graph.find_similar_concept(summary, domain)
                 if similar is not None:
                     existing = similar.slug
                     vault.append_log(
-                        "info",
-                        "dedup_jaccard",
-                        f"LLM proposed new {raw_slug!r}, but summary overlaps {similar.slug!r} ≥0.7 → update",
+                        "info", "dedup_jaccard",
+                        f"obs {name!r} overlaps {similar.slug!r} ≥0.7 → update",
                     )
 
             if existing:
-                # уже есть концепт с этим slug или alias — добавим evidence и
-                # alias (если новая формулировка отличается от существующих)
-                vault.append_log(
-                    "info",
-                    "concept_alias_resolved",
-                    f"LLM proposed {raw_slug!r} → existing {existing!r}",
-                )
-                graph.append_evidence(
-                    existing,
-                    Evidence(
-                        when=now_str,
-                        text=c_data.get("evidence", original_answer[:200]),
-                        raw_ref=raw_ref,
-                    ),
-                )
-                # Если LLM прислала отличающееся имя — сохраним как alias.
-                proposed_name = (c_data.get("name") or raw_slug).strip()
-                if proposed_name and proposed_name != existing:
-                    graph.add_alias(existing, proposed_name)
-                touched_domains.add(target_domain)
+                graph.append_evidence(existing, Evidence(when=now_str, text=quote, raw_ref=raw_ref))
+                if name.lower() != existing.lower():
+                    graph.add_alias(existing, name)
+                updated += 1
+                touched_domains.add(domain)
                 continue
 
-            # capture-first: Qwen создаёт ЧЕРНОВИК. Без связей и без конфликтов —
-            # их строит Claude в недельном weekly-review. status=draft.
+            if not slug:
+                vault.append_log("warn", "bad_obs_name", f"name={name!r} → пустой slug, пропуск")
+                continue
+            # capture-first: создаём ЧЕРНОВИК (status=draft). Связи/конфликты
+            # строит weekly-review, не бот.
             concept = Concept(
-                slug=raw_slug,
-                name=c_data.get("name", raw_slug),
-                type=c_data.get("type", "claim"),
-                domain=target_domain,
-                summary=c_data.get("summary", ""),
+                slug=slug,
+                name=name,
+                type=obs.get("type", "claim"),
+                domain=domain,
+                summary=summary,
                 status="draft",
-                aliases=[a for a in (c_data.get("aliases") or []) if isinstance(a, str)],
-                evidence=[Evidence(when=now_str, text=c_data.get("evidence", original_answer[:200]), raw_ref=raw_ref)],
+                evidence=[Evidence(when=now_str, text=quote, raw_ref=raw_ref)],
                 source_session=session_marker,
             )
-            graph.save_concept(concept)
-            touched_domains.add(target_domain)
+            if graph.save_concept(concept) is not None:
+                created += 1
+                touched_domains.add(domain)
         except Exception:
-            log.exception("failed to create concept from %r", c_data)
+            log.exception("failed to apply observation %r", obs)
 
-    # 2. Дописать evidence к существующим концептам (включая выверенные Claude).
-    # Qwen НЕ переписывает summary и НЕ строит связи — только добавляет цитату.
-    # slug проходит через resolve_slug (если LLM назвала концепт его алиасом).
-    for u in result.get("concepts_to_update", []):
-        raw_slug = u.get("slug") or ""
-        if not raw_slug:
-            continue
-        slug = graph.resolve_slug(raw_slug) or raw_slug
-        try:
-            ev_text = u.get("append_evidence")
-            if ev_text:
-                graph.append_evidence(slug, Evidence(when=now_str, text=ev_text, raw_ref=raw_ref))
-            c_loaded = graph.load_concept(slug)
-            if c_loaded:
-                touched_domains.add(c_loaded.domain)
-        except Exception:
-            log.exception("failed to update concept %s", slug)
-
-    # Связи (relations_to_add) и конфликты (conflicts) В LIVE НЕ СТРОЯТСЯ.
-    # capture-first: Qwen слаба в графовом рассуждении и плодит ложные связи/
-    # конфликты. Их строит Claude в недельном weekly-review (см. SKILL.md).
-
-    # 3. Пересобрать MOC для каждого затронутого домена (атомарно, внутри
-    # текущей git_wrap транзакции).
+    # Пересобрать MOC для затронутых доменов (атомарно, внутри git_wrap).
     for d in touched_domains:
         try:
             moc.rebuild_domain_moc(d)
         except Exception:
             log.exception("failed to rebuild MOC for domain %s", d)
+
+    return created, updated
 
 
 # ---------- commands ----------
@@ -742,13 +736,11 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
             return
         await _stop_thinking(thinking)
 
+        created = updated = 0
         try:
-            _apply_processed(result, q_num, when, note_question, clean)
+            created, updated = _apply_processed(result, q_num, when, note_question, clean)
         except Exception:
             log.exception("apply_processed failed in /ucho")
-
-        created = len(result.get("concepts_to_create", []) or [])
-        updated = len(result.get("concepts_to_update", []) or [])
         vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
         await message.answer(
             f"Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
@@ -851,7 +843,7 @@ async def _handle_probe(message: Message, text: str) -> None:
     await _stop_thinking(thinking)
 
     try:
-        _apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text)
+        _apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
     except Exception:
         log.exception("apply_processed failed")
 
@@ -890,8 +882,7 @@ async def _handle_probe(message: Message, text: str) -> None:
     # Новый поясняющий вопрос — счётчик +1
     new_n = vault.next_q_num()
     s.record_assistant(debate)
-    raw_next = (result.get("raw_entry") or {}).get("domain")
-    next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
+    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
     session.set_question(debate, next_domain, q_num=new_n)
     s.clarifier_count += 1
     session.persist()
@@ -960,7 +951,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         return  # pending_answer сохранён — повторим в следующий раз.
 
     try:
-        _apply_processed(result, q_num, s.asked_at, question, text)
+        _apply_processed(result, q_num, s.asked_at, question, text, session_domain=real_hint)
     except Exception:
         log.exception("recovery: apply_processed failed")
         vault.append_log("error", "pending_answer_apply_failed", f"Q{q_num} apply_processed raised")
@@ -996,8 +987,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     new_n = vault.next_q_num()
     s.record_assistant(debate)
-    raw_next = (result.get("raw_entry") or {}).get("domain")
-    next_domain = raw_next if raw_next in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
+    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
     session.set_question(debate, next_domain, q_num=new_n)
     s.clarifier_count += 1
     session.persist()

@@ -83,6 +83,30 @@ def safe_slug(raw: str) -> str:
     return s if _SLUG_RE.fullmatch(s) else ""
 
 
+# Транслитерация ru→latin для вывода slug ИЗ имени концепта на стороне кода
+# (LLM больше не присылает slug — только имя). Простая BGN/PCGN-подобная карта.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
+
+def slugify(raw: str) -> str:
+    """Имя концепта → канонический ascii-slug (транслит + safe_slug).
+
+    LLM присылает только русское ``name``; slug (имя файла черновика, ascii —
+    его требует ``save_concept``) выводит код, детерминированно. Пустую строку
+    возвращаем, если после чистки ничего не осталось — вызывающий решает.
+    """
+    if not raw:
+        return ""
+    s = "".join(_TRANSLIT.get(ch, _TRANSLIT.get(ch.lower(), ch)) if ch.lower() in _TRANSLIT else ch for ch in raw.lower())
+    return safe_slug(s)
+
+
 def safe_name(raw: str) -> str:
     """Имя концепта: одна строка, без \\n, ограниченная длина."""
     if not raw:
