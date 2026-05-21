@@ -29,6 +29,8 @@
 | `OPENAI_BASE_URL` | URL Ollama | `http://ollama:11434/v1` |
 | `OPENAI_API_KEY` | игнорируется Ollama, но требуется openai-sdk | `ollama` |
 | `OPENAI_MODEL` | имя модели в Ollama | `qwen2.5:14b-instruct` |
+| `LLM_TIMEOUT` | таймаут одного LLM-вызова, сек (без него sdk ждёт ~600 c) | `90` |
+| `LLM_COOLDOWN_SEC` | мин. интервал между LLM-операциями одного пользователя (anti-DoS) | `4` |
 | `DAILY_HOUR` | час суток для авто-вопроса | `20` |
 
 **Поведение `DEBUG`:**
@@ -57,7 +59,8 @@
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw → profile → черновые концепты `draft` + evidence → MOC). Связи/конфликты в live НЕ строит — это weekly-review.
-- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование.
+- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
+- `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/ucho` в `notes/`), `iter_history`. `_ensure_user_graph_settings` сидит `users/<uid>/.obsidian/graph.json` из шаблона `bot/assets/graph.json` новому юзеру (идемпотентно — существующий не трогает).
 - `bot/assets/graph.json` — шаблон настроек графа Obsidian для папки пользователя (фильтр только `concepts` + скрытие MOC через `-file:<DOMAIN>` + без сирот, `showTags`, цветовые группы по доменам, серые узлы-теги). Копируется в каждый новый `users/<uid>/.obsidian/`.
