@@ -4,9 +4,9 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeChat
 
-from . import handlers, selfcheck, session, vault
+from . import handlers, selfcheck, session, userctx, users, vault
 from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
-from .handlers import router
+from .handlers import AccessMiddleware, router
 from .scheduler import start_scheduler
 
 logging.basicConfig(
@@ -16,8 +16,7 @@ logging.basicConfig(
 log = logging.getLogger("psycho.main")
 
 
-# Команды, которые видны при наборе «/» в Telegram.
-# Описание ≤ 256 символов; ставим коротко и понятно.
+# Команды, видимые при наборе «/». Базовый набор — для всех доверенных.
 BOT_COMMANDS = [
     BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
     BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
@@ -32,56 +31,52 @@ BOT_COMMANDS = [
 
 
 async def _setup_commands(bot: Bot) -> None:
-    """Регистрируем команды только для владельца — чтобы никто посторонний даже подсказок не видел."""
+    """Команды видны только доверенным (per-chat scope). Глобально — пусто."""
     try:
-        await bot.set_my_commands(
-            commands=BOT_COMMANDS,
-            scope=BotCommandScopeChat(chat_id=OWNER_TELEGRAM_ID),
-        )
-        # Для всех остальных явно сбрасываем — пусто.
-        await bot.delete_my_commands()
-        log.info("bot commands registered for owner_id=%s", OWNER_TELEGRAM_ID)
+        await bot.delete_my_commands()  # для всех остальных — пусто
+        for uid in users.allowed_ids():
+            try:
+                await bot.set_my_commands(
+                    commands=BOT_COMMANDS,
+                    scope=BotCommandScopeChat(chat_id=uid),
+                )
+            except Exception:
+                log.exception("failed to set commands for uid=%s", uid)
+        log.info("bot commands registered for %d allowed user(s)", len(users.allowed_ids()))
     except Exception:
         log.exception("failed to set bot commands")
 
 
 async def main() -> None:
+    # Контекст владельца + структура его данных (на случай свежего вольта).
+    userctx.set_user(OWNER_TELEGRAM_ID)
     vault.ensure_layout()
 
-    # Механический self-check при старте (без LLM): MOC rebuild, валидация связей,
-    # отчёт о дублях/сиротах в .psycho/startup-check.md. Не должен валить старт.
+    # Механический self-check по всем пользователям (без LLM). Не валит старт.
     try:
         summary = selfcheck.run()
         log.info("startup self-check: %s", summary)
     except Exception:
         log.exception("startup self-check failed (non-fatal)")
 
-    restored = session.restore()
-    if restored is not None:
-        log.info(
-            "active session loaded from disk: mode=%s q=%s — продолжим оттуда",
-            restored.mode,
-            restored.current_q_num,
-        )
-        if restored.pending_answer:
-            log.info(
-                "pending_answer detected (Q%s, %d chars) — recovery will run after startup",
-                restored.current_q_num,
-                len(restored.pending_answer),
-            )
+    # Восстановление сессий всех пользователей + список pending для recovery.
+    restored = session.restore_all()
+    pending_uids = [uid for uid, s in restored if s.pending_answer]
+    for uid in pending_uids:
+        log.info("pending_answer detected for uid=%s — recovery will run after startup", uid)
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
+    dp.message.middleware(AccessMiddleware())
+    dp.callback_query.middleware(AccessMiddleware())
     dp.include_router(router)
 
     await _setup_commands(bot)
     scheduler = start_scheduler(bot)
 
-    # Recovery несработавшего LLM-цикла (двухфазный коммит pending_answer).
-    # Запускаем в фоне до start_polling — bot.send_message работает без активного polling,
-    # и пользователь увидит уведомление сразу, не дожидаясь следующего входящего сообщения.
-    if restored is not None and restored.pending_answer:
-        asyncio.create_task(handlers.process_pending_on_startup(bot))
+    # Recovery несработавшего LLM-цикла — по каждому пользователю с pending.
+    for uid in pending_uids:
+        asyncio.create_task(handlers.process_pending_on_startup(bot, uid))
 
     log.info("bot starting polling…")
     try:

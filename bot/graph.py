@@ -14,9 +14,9 @@ from typing import Iterable, Optional
 
 import yaml
 
-from . import manifest
+from . import manifest, userctx
 from .atomic import atomic_write_text
-from .config import DOMAINS, VAULT_PATH
+from .config import DOMAINS
 from .validation import (
     safe_evidence_text,
     safe_name,
@@ -28,7 +28,10 @@ from .vault import append_log
 
 log = logging.getLogger(__name__)
 
-CONCEPTS_DIR = VAULT_PATH / "concepts"
+def concepts_dir() -> Path:
+    """Папка концептов ТЕКУЩЕГО пользователя: `<vault>/users/<uid>/concepts/`."""
+    return userctx.user_root() / "concepts"
+
 
 RELATION_KINDS = ("supports", "contradicts", "derived_from", "related")
 CONCEPT_TYPES = ("principle", "value", "preference", "belief", "claim")
@@ -99,13 +102,13 @@ _WIKILINK_RE = re.compile(r"\[\[([^\[\]\n|#]+)(\|[^\[\]\n]+)?\]\]")
 
 
 def _ensure_layout() -> None:
-    CONCEPTS_DIR.mkdir(parents=True, exist_ok=True)
+    concepts_dir().mkdir(parents=True, exist_ok=True)
     for d in DOMAINS:
-        (CONCEPTS_DIR / d).mkdir(exist_ok=True)
+        (concepts_dir() / d).mkdir(exist_ok=True)
 
 
 def _path_for(slug: str, domain: str) -> Path:
-    return CONCEPTS_DIR / domain / f"{slug}.md"
+    return concepts_dir() / domain / f"{slug}.md"
 
 
 def _wikilink(slug: str) -> str:
@@ -364,7 +367,7 @@ def find_concepts(domain: Optional[str] = None, slugs: Optional[Iterable[str]] =
     target_slugs = set(slugs) if slugs else None
     domains = [domain] if domain else list(DOMAINS)
     for d in domains:
-        for p in (CONCEPTS_DIR / d).glob("*.md"):
+        for p in (concepts_dir() / d).glob("*.md"):
             if p.name.startswith("_"):  # служебные файлы (_moc.md и пр.) — не концепты
                 continue
             slug = p.stem
@@ -383,7 +386,7 @@ def all_slugs() -> list[dict]:
     _ensure_layout()
     out: list[dict] = []
     for d in DOMAINS:
-        for p in (CONCEPTS_DIR / d).glob("*.md"):
+        for p in (concepts_dir() / d).glob("*.md"):
             if p.name.startswith("_"):  # служебные файлы — не концепты
                 continue
             c = _parse_file(p)
@@ -835,7 +838,7 @@ def find_similar_concept(summary: str, domain: str, threshold: float = 0.7) -> O
     if len(target) < 3:
         # слишком короткий summary — Jaccard ненадёжен, не работаем.
         return None
-    for p in (CONCEPTS_DIR / domain).glob("*.md"):
+    for p in (concepts_dir() / domain).glob("*.md"):
         if p.name.startswith("_"):
             continue
         c = _parse_file(p)
@@ -882,7 +885,7 @@ def resolve_slug(candidate: str, domain: Optional[str] = None) -> Optional[str]:
     candidate_norm = candidate.strip().lower()
     domains = [domain] if domain else list(DOMAINS)
     for d in domains:
-        for p in (CONCEPTS_DIR / d).glob("*.md"):
+        for p in (concepts_dir() / d).glob("*.md"):
             c = _parse_file(p)
             if not c:
                 continue

@@ -1,47 +1,70 @@
-"""Механический self-check базы при старте контейнера (без LLM).
+"""Механический self-check базы при старте контейнера (без LLM), multi-user.
 
-Запускается из main.py после ensure_layout. Делает дёшево и детерминированно:
+Запускается из main.py после layout. Для КАЖДОГО пользователя (`users/<uid>/`)
+дёшево и детерминированно:
 - пересобирает все per-domain MOC,
 - валидирует frontmatter-связи концептов (битые [[slug]]),
-- ищет дубли (Jaccard) и сирот (ноль связей),
-- пишет отчёт в .psycho/startup-check.md.
+- ищет дубли (Jaccard) и сирот (ноль связей).
+Сводный отчёт по всем пользователям — в глобальный `.psycho/startup-check.md`.
 
-Глубокий смысловой реиндекс (слияние дублей, переписать profile, кластеризация
-MOC по смыслу) — НЕ здесь. Это ручной weekly-review из сильного агента (Claude):
-локальная Qwen 14B для такого слишком слаба, а контейнер кроме неё ничего не
-поднимает. Здесь — только механика.
+Глубокий смысловой реиндекс (слияние, profile, кластеризация MOC) — НЕ здесь.
+Это ручной weekly-review из сильного агента (Claude).
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
-from . import graph, moc, vault
+from . import graph, moc, userctx, vault
 from .atomic import atomic_write_text
-from .config import DOMAINS, PSYCHO_META_DIR
+from .config import DOMAINS, PSYCHO_META_DIR, VAULT_PATH
 
 log = logging.getLogger(__name__)
 
 STARTUP_CHECK_PATH = PSYCHO_META_DIR / "startup-check.md"
 
 
+def _user_ids() -> list[int]:
+    users_dir = VAULT_PATH / "users"
+    if not users_dir.exists():
+        return []
+    return sorted(
+        int(p.name) for p in users_dir.iterdir() if p.is_dir() and p.name.isdigit()
+    )
+
+
 def run() -> dict:
-    """Прогнать self-check. Возвращает summary-dict (для лога/тестов)."""
+    """Self-check по всем пользователям. Возвращает {uid: summary}."""
+    uids = _user_ids()
+    per_user: dict[int, dict] = {}
+    report_sections: list[str] = []
+
+    for uid in uids:
+        userctx.set_user(uid)
+        summary, section = _run_one(uid)
+        per_user[uid] = summary
+        report_sections.append(section)
+
+    _write_report(per_user, report_sections)
+    vault.append_log("info", "startup_selfcheck", str({u: s for u, s in per_user.items()}))
+    return per_user
+
+
+def _run_one(uid: int) -> tuple[dict, str]:
+    """Проверка одного пользователя (контекст уже выставлен). (summary, md-секция)."""
     all_concepts: list[graph.Concept] = []
     for d in DOMAINS:
         all_concepts.extend(graph.find_concepts(domain=d, limit=10_000))
     known = graph.all_slugs_set()
 
-    # 1. MOC rebuild по всем доменам.
     moc_rebuilt = 0
     for d in DOMAINS:
         try:
             moc.rebuild_domain_moc(d)
             moc_rebuilt += 1
         except Exception:
-            log.exception("selfcheck: MOC rebuild failed for %s", d)
+            log.exception("selfcheck: MOC rebuild failed for uid=%s domain=%s", uid, d)
 
-    # 2. Битые связи во frontmatter (target не существует ни как slug, ни как alias).
     broken: list[tuple[str, str, str]] = []
     for c in all_concepts:
         for kind in graph.RELATION_KINDS:
@@ -51,13 +74,11 @@ def run() -> dict:
                 if graph.resolve_slug(target) is None:
                     broken.append((c.slug, kind, target))
 
-    # 3. Сироты — ноль связей любого вида.
     orphans = [
         c.slug for c in all_concepts
         if not any(c.relations(k) for k in graph.RELATION_KINDS)
     ]
 
-    # 4. Дубли — Jaccard внутри домена (исключая сам концепт).
     dupes: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for c in all_concepts:
@@ -70,8 +91,6 @@ def run() -> dict:
                 seen.add(pair)
                 dupes.append(pair)
 
-    _write_report(len(all_concepts), moc_rebuilt, broken, orphans, dupes)
-
     summary = {
         "concepts": len(all_concepts),
         "moc_rebuilt": moc_rebuilt,
@@ -79,19 +98,27 @@ def run() -> dict:
         "orphans": len(orphans),
         "dupes": len(dupes),
     }
-    vault.append_log("info", "startup_selfcheck", str(summary))
-    return summary
 
-
-def _write_report(
-    total: int,
-    moc_rebuilt: int,
-    broken: list[tuple[str, str, str]],
-    orphans: list[str],
-    dupes: list[tuple[str, str]],
-) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     lines = [
+        f"## Пользователь {uid}",
+        "",
+        f"- Концептов: **{len(all_concepts)}** · MOC: **{moc_rebuilt}/{len(DOMAINS)}** · "
+        f"битых: **{len(broken)}** · сирот: **{len(orphans)}** · дублей: **{len(dupes)}**",
+        "",
+    ]
+    if broken:
+        lines += [f"  - битая связь `{s}` → `{kind}` → `{t}`" for s, kind, t in broken]
+    if orphans:
+        lines += [f"  - сирота `{s}`" for s in orphans]
+    if dupes:
+        lines += [f"  - дубль `{a}` ≈ `{b}`" for a, b in dupes]
+    lines.append("")
+    return summary, "\n".join(lines)
+
+
+def _write_report(per_user: dict[int, dict], sections: list[str]) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    head = [
         "---",
         "type: startup-check",
         f"generated: {ts}",
@@ -99,29 +126,11 @@ def _write_report(
         "",
         f"# Self-check · {ts}",
         "",
-        "_Механическая проверка при старте контейнера. Глубокий реиндекс — `weekly-review` из Claude._",
+        "_Механическая проверка при старте (без LLM), по всем пользователям._",
         "",
-        f"- Концептов: **{total}**",
-        f"- MOC пересобрано: **{moc_rebuilt}/{len(DOMAINS)}**",
-        f"- Битых связей: **{len(broken)}**",
-        f"- Сирот (без связей): **{len(orphans)}**",
-        f"- Кандидатов в дубли: **{len(dupes)}**",
+        f"Пользователей: **{len(per_user)}**.",
         "",
     ]
-    if broken:
-        lines += ["## Битые связи", ""]
-        lines += [f"- `{s}` → `{kind}` → `{t}` (цель не найдена)" for s, kind, t in broken]
-        lines.append("")
-    if orphans:
-        lines += ["## Сироты (ноль связей)", ""]
-        lines += [f"- [[{s}]]" for s in orphans]
-        lines.append("")
-    if dupes:
-        lines += ["## Кандидаты в дубли (Jaccard ≥ 0.7)", ""]
-        lines += [f"- [[{a}]] ≈ [[{b}]]" for a, b in dupes]
-        lines.append("")
-    if not (broken or orphans or dupes):
-        lines += ["Проблем не найдено.", ""]
-
+    body = sections or ["_Пользователей с данными нет._", ""]
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(STARTUP_CHECK_PATH, "\n".join(lines).rstrip() + "\n")
+    atomic_write_text(STARTUP_CHECK_PATH, "\n".join(head + body).rstrip() + "\n")

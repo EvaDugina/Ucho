@@ -3,17 +3,18 @@ import logging
 import random
 from datetime import datetime, timedelta
 
-from aiogram import Bot, F, Router
+from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    TelegramObject,
 )
 
-from . import graph, moc, session, vault
-from .config import DOMAINS, OWNER_TELEGRAM_ID
+from . import graph, moc, session, userctx, users, vault
+from .config import DOMAINS
 from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
 from .validation import (
@@ -24,6 +25,37 @@ from .validation import (
 
 log = logging.getLogger(__name__)
 router = Router()
+
+_CONSENT_TEXT = (
+    "Это личный бот-собеседник. Он задаёт вопросы и складывает твои ответы в "
+    "психо-философский портрет (граф концептов) в локальной базе владельца — "
+    "ничего не уходит в облако. Доступ к твоей базе есть у владельца этого бота. "
+    "Продолжая пользоваться, ты соглашаешься. Команды — /help."
+)
+
+
+class AccessMiddleware(BaseMiddleware):
+    """Гейт доступа + установка request-scoped пользователя.
+
+    На КАЖДЫЙ update (message/callback): берёт user_id, проверяет whitelist
+    (не в списке → молча роняем), выставляет userctx (per-user маршрутизация
+    данных), один раз показывает disclaimer о приватности новым гостям.
+    """
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = data.get("event_from_user")
+        uid = user.id if user is not None else None
+        if uid is None or not users.is_allowed(uid):
+            return  # не в whitelist — тишина
+        userctx.set_user(uid)
+        # Disclaimer один раз для гостей (не владельца).
+        if not users.is_owner(uid) and not users.has_consent(uid):
+            try:
+                await event.bot.send_message(uid, _CONSENT_TEXT)
+            except Exception:
+                log.exception("failed to send consent disclaimer to %s", uid)
+            users.set_consent(uid)
+        return await handler(event, data)
 
 _DOMAIN_LABELS = {
     "ethics": "Этика",
@@ -69,7 +101,11 @@ def _ask_keyboard() -> InlineKeyboardMarkup:
 
 
 def _is_owner(message: Message) -> bool:
-    return message.from_user is not None and message.from_user.id == OWNER_TELEGRAM_ID
+    return message.from_user is not None and users.is_owner(message.from_user.id)
+
+
+def _is_allowed(message: Message) -> bool:
+    return message.from_user is not None and users.is_allowed(message.from_user.id)
 
 
 def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
@@ -195,7 +231,7 @@ def _recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
         today = datetime.now().date()
         for delta in range(days):
             day = today - timedelta(days=delta)
-            f = vault.RAW_DIR / f"{day.isoformat()}.md"
+            f = vault.raw_dir() / f"{day.isoformat()}.md"
             if f.exists():
                 chunks.append(f.read_text(encoding="utf-8"))
                 if sum(len(c) for c in chunks) > max_chars:
@@ -396,7 +432,7 @@ _HELP_TEXT = (
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     """Кнопка смыва: закрывает текущую сессию. Данные (граф/raw) не трогает."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         log.info("ignored /start from non-owner user_id=%s", message.from_user.id if message.from_user else None)
         return
     vault.ensure_layout()
@@ -410,14 +446,81 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
+    if not _is_allowed(message):
+        return
+    text = _HELP_TEXT
+    if _is_owner(message):
+        text += (
+            "\n\n<b>Админ</b>\n"
+            "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
+            "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
+            "<b>/users</b> — список доверенных"
+        )
+    await message.answer(text, parse_mode="HTML")
+
+
+# ---------- админ-команды (только владелец) ----------
+
+
+@router.message(Command("adduser"))
+async def cmd_adduser(message: Message, command: CommandObject) -> None:
     if not _is_owner(message):
         return
-    await message.answer(_HELP_TEXT, parse_mode="HTML")
+    arg = (command.args or "").strip()
+    try:
+        uid = int(arg)
+    except ValueError:
+        await message.answer("Использование: /adduser <telegram_user_id>")
+        return
+    if uid <= 0 or uid > 10**15:
+        await message.answer("Некорректный id.")
+        return
+    added = users.add_user(uid, by=message.from_user.id)
+    if added:
+        await message.answer(f"Пользователь {uid} добавлен. Его база создастся при первом обращении.")
+    else:
+        await message.answer(f"Пользователь {uid} уже в списке.")
+
+
+@router.message(Command("removeuser"))
+async def cmd_removeuser(message: Message, command: CommandObject) -> None:
+    if not _is_owner(message):
+        return
+    arg = (command.args or "").strip()
+    try:
+        uid = int(arg)
+    except ValueError:
+        await message.answer("Использование: /removeuser <telegram_user_id>")
+        return
+    if users.is_owner(uid):
+        await message.answer("Нельзя убрать владельца.")
+        return
+    removed = users.remove_user(uid)
+    await message.answer(
+        f"Пользователь {uid} убран из доступа. Данные в users/{uid}/ остались (бот не удаляет)."
+        if removed else f"Пользователя {uid} не было в списке."
+    )
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message) -> None:
+    if not _is_owner(message):
+        return
+    reg = users.list_users()
+    lines = [f"Владелец: {message.from_user.id}", ""]
+    if reg:
+        lines.append("Доверенные:")
+        for u in reg:
+            consent = "✓" if u.get("consent") else "—"
+            lines.append(f"• {u.get('id')} (с {u.get('added','?')}, consent {consent})")
+    else:
+        lines.append("Других пользователей нет.")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("ask"))
 async def cmd_ask(message: Message, command: CommandObject) -> None:
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     domain = (command.args or "").strip().lower() or None
     if domain and not is_valid_telegram_command_arg(domain, max_len=50):
@@ -435,9 +538,10 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
 
 @router.callback_query(F.data.startswith("ask:"))
 async def cb_ask_domain(callback: CallbackQuery) -> None:
-    if callback.from_user.id != OWNER_TELEGRAM_ID:
+    if not users.is_allowed(callback.from_user.id):
         await callback.answer()
         return
+    userctx.set_user(callback.from_user.id)
     payload = (callback.data or "").split(":", 1)[1]
     # Whitelist: только 'any' или конкретный домен из закрытого списка.
     if payload != "any" and payload not in DOMAINS:
@@ -458,7 +562,7 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
 
 @router.message(Command("review"))
 async def cmd_review(message: Message) -> None:
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     session.start(mode="review")
     await message.answer(
@@ -469,7 +573,7 @@ async def cmd_review(message: Message) -> None:
 
 @router.message(Command("history"))
 async def cmd_history(message: Message) -> None:
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     entries = vault.iter_history()
     if not entries:
@@ -496,7 +600,7 @@ async def cmd_history(message: Message) -> None:
 @router.message(Command("requestion"))
 async def cmd_requestion(message: Message, command: CommandObject) -> None:
     """Повторить вопрос Q<N> — задаёт его заново как новый главный."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     arg = (command.args or "").strip()
     try:
@@ -531,7 +635,7 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
 @router.message(Command("echo"))
 async def cmd_echo(message: Message, command: CommandObject) -> None:
     """Пользователь сам задаёт вопрос. Бот возвращает его как Q под меткой «пользовательский»."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     raw = (command.args or "").strip()
     if not raw:
@@ -561,7 +665,7 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
     """Бросить камушек: если бот жив — отвечает «буль.». Никакого LLM-вызова."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     await message.answer("буль.")
 
@@ -572,7 +676,7 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
     LLM process — концепты попадают в граф как черновики. Заметка работает как
     ответ без заданного вопроса.
     """
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     raw = (command.args or "").strip()
     if not raw:
@@ -629,7 +733,7 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
 
 @router.message(F.text)
 async def on_text(message: Message) -> None:
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
     s = session.get()
     text = (message.text or "").strip()
@@ -746,19 +850,13 @@ async def _handle_probe(message: Message, text: str) -> None:
     await message.answer(_format_q(new_n, s.mode, next_domain, debate), parse_mode="HTML")
 
 
-async def process_pending_on_startup(bot: Bot) -> None:
-    """Дожать висящий ответ после рестарта (двухфазный recovery).
+async def process_pending_on_startup(bot: Bot, uid: int) -> None:
+    """Дожать висящий ответ конкретного пользователя после рестарта (recovery).
 
-    Вызывается из main.py если session.restore() поднял сессию с
-    непустым pending_answer. Использует тот же pipeline что
-    _handle_probe, но без объекта Message — все ответы шлёт
-    через bot.send_message(OWNER_TELEGRAM_ID, ...). Нет dice-спиннера
-    (нечего привязывать), но typing-индикатор шлём.
-
-    На любую ошибку — лог в .psycho/log.md, pending_answer сохраняется
-    нетронутым (следующий рестарт попробует снова) ЕСЛИ apply_processed
-    не дошёл; если уже частично применили — сбрасываем, чтоб не задвоить.
+    Вызывается из main.py для каждого пользователя с непустым pending_answer.
+    Выставляет userctx на uid, все ответы шлёт в его личный чат (chat_id == uid).
     """
+    userctx.set_user(uid)
     s = session.get()
     if s is None or not s.pending_answer:
         return
@@ -781,10 +879,10 @@ async def process_pending_on_startup(bot: Bot) -> None:
 
     try:
         await bot.send_message(
-            OWNER_TELEGRAM_ID,
+            uid,
             f"Дожимаю твой ответ на Q{q_num} — обработка прервалась при рестарте.",
         )
-        await bot.send_chat_action(OWNER_TELEGRAM_ID, "typing")
+        await bot.send_chat_action(uid, "typing")
     except Exception:
         log.exception("recovery: failed to notify owner")
 
@@ -805,7 +903,7 @@ async def process_pending_on_startup(bot: Bot) -> None:
         vault.append_log("error", "pending_answer_recovery_failed", f"Q{q_num} process_answer raised")
         try:
             await bot.send_message(
-                OWNER_TELEGRAM_ID,
+                uid,
                 "Не вышло прогнать через LLM. Pending-ответ оставлен на следующий рестарт. "
                 "Если не хочешь ждать — /start закроет сессию.",
             )
@@ -839,7 +937,7 @@ async def process_pending_on_startup(bot: Bot) -> None:
         if comment:
             for chunk in _split_for_telegram(comment):
                 try:
-                    await bot.send_message(OWNER_TELEGRAM_ID, chunk)
+                    await bot.send_message(uid, chunk)
                 except Exception:
                     log.exception("recovery: failed to send summary chunk")
         session.clear()
@@ -857,7 +955,7 @@ async def process_pending_on_startup(bot: Bot) -> None:
     session.persist()
     try:
         await bot.send_message(
-            OWNER_TELEGRAM_ID,
+            uid,
             _format_q(new_n, s.mode, next_domain, debate),
             parse_mode="HTML",
         )
@@ -1018,10 +1116,11 @@ async def _send_next_question(
     )
 
 
-async def send_daily_question(bot: Bot) -> None:
-    """Точка входа для scheduler-а."""
+async def send_daily_question(bot: Bot, uid: int) -> None:
+    """Точка входа для scheduler-а — дневной вопрос конкретному пользователю."""
+    userctx.set_user(uid)
     if session.get() is not None:
-        log.info("daily skipped: session already active")
+        log.info("daily skipped: session already active for uid=%s", uid)
         return
     session.start(mode="probe", domain=None)
-    await _send_next_question(bot, OWNER_TELEGRAM_ID, domain=None)
+    await _send_next_question(bot, uid, domain=None)

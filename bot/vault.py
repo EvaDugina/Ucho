@@ -7,17 +7,35 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
+from . import userctx
 from .atomic import atomic_write_json, atomic_write_text
 from .config import DOMAINS, LOG_PATH, PSYCHO_META_DIR, VAULT_PATH
 from .validation import escape_raw_block, safe_question_text, safe_user_text
 
 log = logging.getLogger(__name__)
 
-RAW_DIR = VAULT_PATH / "raw"
-PROFILE_DIR = VAULT_PATH / "profile"
-NOTES_DIR = VAULT_PATH / "notes"
-INDEX_FILE = VAULT_PATH / "_index.md"
-STATE_FILE = VAULT_PATH / "_state.json"
+
+# Per-user пути: зависят от текущего пользователя (userctx). Раньше были
+# модульными константами от VAULT_PATH — теперь функции, т.к. у каждого
+# пользователя свой `<vault>/users/<uid>/`. `.psycho/` и git — глобальные.
+def raw_dir() -> Path:
+    return userctx.user_root() / "raw"
+
+
+def profile_dir() -> Path:
+    return userctx.user_root() / "profile"
+
+
+def notes_dir() -> Path:
+    return userctx.user_root() / "notes"
+
+
+def index_file() -> Path:
+    return userctx.user_root() / "_index.md"
+
+
+def state_file() -> Path:
+    return userctx.user_root() / "_state.json"
 
 # Парсер записей вида:
 #   ## Q42 · 14:32 · politics
@@ -195,18 +213,24 @@ def git_wrap(op_name: str) -> Iterator[None]:
 
 
 def ensure_layout() -> None:
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    """Создать структуру для ТЕКУЩЕГО пользователя (userctx) + глобальный .psycho.
+
+    Per-user: raw/profile/notes/_index. Глобально (корень вольта): .psycho/,
+    git-репо.
+    """
+    raw_dir().mkdir(parents=True, exist_ok=True)
+    profile_dir().mkdir(parents=True, exist_ok=True)
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
     for domain in DOMAINS:
-        f = PROFILE_DIR / f"{domain}.md"
+        f = profile_dir() / f"{domain}.md"
         if not f.exists():
             f.write_text(f"# Портрет: {domain}\n\n", encoding="utf-8")
-    if not INDEX_FILE.exists():
-        lines = ["# Psycho — индекс", "", "## Портрет по доменам", ""]
+    idx = index_file()
+    if not idx.exists():
+        lines = ["# Psycho — индекс", "", "## Портрет по темам", ""]
         lines += [f"- [[profile/{d}|{d}]]" for d in DOMAINS]
         lines += ["", "## Сырые логи", "", "Папка `raw/` — Q&A по дням."]
-        INDEX_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        idx.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
     ensure_git_repo()
@@ -216,9 +240,10 @@ def ensure_layout() -> None:
 
 
 def _load_state() -> dict:
-    if STATE_FILE.exists():
+    sf = state_file()
+    if sf.exists():
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            return json.loads(sf.read_text(encoding="utf-8"))
         except Exception:
             log.exception("failed to load state, resetting")
             append_log("warn", "state_corrupted", "_state.json unreadable, resetting to 0")
@@ -227,7 +252,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     ensure_layout()
-    atomic_write_json(STATE_FILE, state)
+    atomic_write_json(state_file(), state)
 
 
 def next_q_num() -> int:
@@ -254,7 +279,7 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
         append_log("warn", "append_raw_unknown_domain", f"q={q_num} domain={domain!r}")
     date_str = when.strftime("%Y-%m-%d")
     time_str = when.strftime("%H:%M")
-    path = RAW_DIR / f"{date_str}.md"
+    path = raw_dir() / f"{date_str}.md"
 
     q_clean = safe_question_text(question)
     a_clean, a_truncated = safe_user_text(answer)
@@ -287,10 +312,11 @@ def append_note(when: datetime, text: str) -> Path:
     санитизируется так же, как ответ пользователя (control-байты, лимит),
     и экранируется против подделки raw-заголовков на случай чтения парсером.
     """
-    NOTES_DIR.mkdir(parents=True, exist_ok=True)
+    nd = notes_dir()
+    nd.mkdir(parents=True, exist_ok=True)
     date_str = when.strftime("%Y-%m-%d")
     time_str = when.strftime("%H:%M")
-    path = NOTES_DIR / f"{date_str}.md"
+    path = nd / f"{date_str}.md"
     clean, truncated = safe_user_text(text)
     if truncated:
         append_log("warn", "note_truncated", f"{date_str} {time_str} length>limit")
@@ -308,7 +334,7 @@ def append_profile(when: datetime, domain: str, fragment: str, raw_time: str) ->
         raise ValueError(f"unknown domain: {domain}")
     ensure_layout()
     date_str = when.strftime("%Y-%m-%d")
-    path = PROFILE_DIR / f"{domain}.md"
+    path = profile_dir() / f"{domain}.md"
     # fragment — короткая выжимка от LLM. Чистим переводы строк и спец-разметку,
     # чтобы не сместить структуру профиля и не подделать заголовки.
     fragment_clean = safe_question_text(fragment)
@@ -330,10 +356,11 @@ def iter_history() -> list[dict]:
 
     Каждая запись: {n, date, time, domain, question, answer}.
     """
-    if not RAW_DIR.exists():
+    rd = raw_dir()
+    if not rd.exists():
         return []
     entries: list[dict] = []
-    for path in sorted(RAW_DIR.glob("*.md")):
+    for path in sorted(rd.glob("*.md")):
         date_str = path.stem
         try:
             text = path.read_text(encoding="utf-8")

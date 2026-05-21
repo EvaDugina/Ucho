@@ -12,6 +12,14 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://ollama:11434/v1")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen2.5:14b-instruct")
 
 OWNER_TELEGRAM_ID = int(os.environ["OWNER_TELEGRAM_ID"])
+
+# Дополнительные доверенные пользователи (multi-user). Через запятую, например
+# "111,222". Владелец добавляется автоматически. Рантайм-добавления — в
+# <vault>/.psycho/users.json (см. bot/users.py), env — лишь начальный список.
+ALLOWED_TELEGRAM_IDS = tuple(
+    int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
+)
+
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "20"))
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
 

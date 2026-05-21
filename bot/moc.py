@@ -18,8 +18,8 @@ import logging
 from pathlib import Path
 
 from .atomic import atomic_write_text
-from .config import DOMAINS, VAULT_PATH
-from .graph import CONCEPTS_DIR, CONCEPT_TYPES, _parse_file
+from .config import DOMAINS
+from .graph import CONCEPT_TYPES, _parse_file, concepts_dir
 
 log = logging.getLogger(__name__)
 
@@ -35,14 +35,14 @@ _TYPE_LABELS = {
 
 
 def _moc_path(domain: str) -> Path:
-    return CONCEPTS_DIR / domain / "_moc.md"
+    return concepts_dir() / domain / "_moc.md"
 
 
 def rebuild_domain_moc(domain: str) -> Path:
     """Перезаписать `_moc.md` для домена. Возвращает путь."""
     if domain not in DOMAINS:
         raise ValueError(f"unknown domain: {domain}")
-    domain_dir = CONCEPTS_DIR / domain
+    domain_dir = concepts_dir() / domain
     domain_dir.mkdir(parents=True, exist_ok=True)
 
     # Собираем концепты домена. _moc.md сам тоже окажется в glob, отсеиваем.

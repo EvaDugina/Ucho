@@ -1,14 +1,19 @@
-"""Активная сессия владельца. Глобальная — пользователь один (whitelist).
+"""Активные сессии пользователей (multi-user).
 
-Сессия персистится в `<vault>/_session.json` на каждом изменении, чтобы
-перезапуск контейнера / рестарт хоста не терял контекст.
+У каждого пользователя — своя сессия, персистится в его
+`<vault>/users/<uid>/_session.json`. В памяти держим `dict[uid → Session]`.
+Текущий пользователь определяется через `userctx` (request-scoped contextvar),
+поэтому публичный API (`get/start/clear/set_question/persist`) работает с
+сессией текущего пользователя без явной передачи uid.
 """
 import json
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Optional
 
+from . import userctx
 from .atomic import atomic_write_json
 from .config import VAULT_PATH
 
@@ -17,7 +22,9 @@ log = logging.getLogger(__name__)
 Mode = Literal["probe", "review"]
 MAX_HISTORY = 6  # последние N пар user/assistant в LLM-контексте
 
-SESSION_FILE = VAULT_PATH / "_session.json"
+
+def _session_file() -> Path:
+    return userctx.user_root() / "_session.json"
 
 
 @dataclass
@@ -30,13 +37,10 @@ class Session:
     asked_at: datetime = field(default_factory=datetime.now)
     history: list[dict] = field(default_factory=list)
     pending_review_additions: list[dict] = field(default_factory=list)
-    # Иерархия вопросов в режиме probe: один главный + до 2 поясняющих + закрывающий комментарий.
     main_question: str = ""
     main_q_num: Optional[int] = None
     clarifier_count: int = 0
-    # Двухфазный коммит ответа: записывается ДО process_answer, чистится ПОСЛЕ
-    # успешного завершения всех шагов. Если бот падает между этими точками —
-    # после рестарта recovery дожимает обработку.
+    # Двухфазный коммит ответа: ставится ДО process_answer, чистится ПОСЛЕ.
     pending_answer: Optional[str] = None
 
     def record_assistant(self, text: str) -> None:
@@ -64,8 +68,6 @@ class Session:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Session":
-        # Не-известные поля (например, после downgrade схемы) тихо отбрасываем;
-        # старые JSON без новых полей подхватят дефолты.
         valid = {f for f in cls.__dataclass_fields__}
         d = {k: v for k, v in d.items() if k in valid}
         ts = d.get("asked_at")
@@ -73,68 +75,87 @@ class Session:
         return cls(**d)
 
 
-_active: Optional[Session] = None
+# uid → Session. Текущий uid берётся из userctx.
+_active: dict[int, "Session"] = {}
 
 
 def _persist() -> None:
+    """Сохранить/удалить файл сессии ТЕКУЩЕГО пользователя."""
+    uid = userctx.current_uid()
+    sf = _session_file()
     try:
-        if _active is None:
-            if SESSION_FILE.exists():
-                SESSION_FILE.unlink()
+        s = _active.get(uid) if uid is not None else None
+        if s is None:
+            if sf.exists():
+                sf.unlink()
             return
-        atomic_write_json(SESSION_FILE, _active.to_dict())
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(sf, s.to_dict())
     except Exception:
-        log.exception("failed to persist session")
+        log.exception("failed to persist session for uid=%s", uid)
 
 
 def persist() -> None:
-    """Публичный хук — вызывать после прямой мутации полей сессии (вне методов класса)."""
+    """Публичный хук — после прямой мутации полей сессии текущего пользователя."""
     _persist()
 
 
-def restore() -> Optional[Session]:
-    """Вызывается один раз при старте бота. Если файл сессии есть — поднимает её."""
-    global _active
-    if not SESSION_FILE.exists():
-        return None
-    try:
-        d = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        _active = Session.from_dict(d)
-        log.info(
-            "session restored: mode=%s domain=%s last_q=%s",
-            _active.mode,
-            _active.domain,
-            _active.current_q_num,
-        )
-        return _active
-    except Exception:
-        log.exception("failed to restore session, starting fresh")
-        return None
+def restore_all() -> list[tuple[int, "Session"]]:
+    """Поднять сессии всех пользователей из `users/<uid>/_session.json`.
+
+    Вызывается один раз при старте. Возвращает [(uid, session)] для логов и
+    pending-recovery.
+    """
+    out: list[tuple[int, Session]] = []
+    users_dir = VAULT_PATH / "users"
+    if not users_dir.exists():
+        return out
+    for udir in sorted(users_dir.iterdir()):
+        if not udir.is_dir() or not udir.name.isdigit():
+            continue
+        sf = udir / "_session.json"
+        if not sf.exists():
+            continue
+        try:
+            d = json.loads(sf.read_text(encoding="utf-8"))
+            s = Session.from_dict(d)
+            uid = int(udir.name)
+            _active[uid] = s
+            out.append((uid, s))
+            log.info("session restored: uid=%s mode=%s last_q=%s", uid, s.mode, s.current_q_num)
+        except Exception:
+            log.exception("failed to restore session from %s", sf)
+    return out
 
 
-def get() -> Optional[Session]:
-    return _active
+def get() -> Optional["Session"]:
+    uid = userctx.current_uid()
+    return _active.get(uid) if uid is not None else None
 
 
-def start(mode: Mode, domain: Optional[str] = None) -> Session:
-    global _active
-    _active = Session(mode=mode, domain=domain)
+def start(mode: Mode, domain: Optional[str] = None) -> "Session":
+    uid = userctx.current_uid()
+    s = Session(mode=mode, domain=domain)
+    if uid is not None:
+        _active[uid] = s
     _persist()
-    return _active
+    return s
 
 
 def clear() -> None:
-    global _active
-    _active = None
+    uid = userctx.current_uid()
+    if uid is not None:
+        _active.pop(uid, None)
     _persist()
 
 
 def set_question(question: str, domain: str, q_num: Optional[int] = None) -> None:
-    if _active is None:
+    s = get()
+    if s is None:
         return
-    _active.last_question = question
-    _active.last_domain = domain
-    _active.asked_at = datetime.now()
+    s.last_question = question
+    s.last_domain = domain
+    s.asked_at = datetime.now()
     if q_num is not None:
-        _active.current_q_num = q_num
+        s.current_q_num = q_num
     _persist()
