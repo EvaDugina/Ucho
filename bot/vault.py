@@ -324,7 +324,27 @@ def ensure_layout() -> None:
         idx.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
+    _ensure_user_graph_settings()
     ensure_git_repo()
+
+
+# Дефолтные настройки графа Obsidian для папки пользователя. Шаблон лежит в
+# репозитории (`bot/assets/graph.json`) и копируется в `users/<uid>/.obsidian/`
+# нового пользователя — чтобы его папку можно было открыть отдельным вольтом с
+# готовой раскраской по доменам, серыми тегами и фильтром (только concepts, без
+# сирот). Существующий graph.json НЕ трогаем — у пользователя могут быть правки.
+_GRAPH_TEMPLATE = Path(__file__).parent / "assets" / "graph.json"
+
+
+def _ensure_user_graph_settings() -> None:
+    gj = userctx.user_root() / ".obsidian" / "graph.json"
+    if gj.exists() or not _GRAPH_TEMPLATE.exists():
+        return
+    try:
+        gj.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(gj, _GRAPH_TEMPLATE.read_text(encoding="utf-8"))
+    except OSError:
+        log.warning("could not seed graph.json for %s", userctx.user_root())
 
 
 # ---------- сквозная нумерация вопросов ----------
