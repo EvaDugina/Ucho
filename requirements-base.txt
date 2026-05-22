@@ -6,3 +6,6 @@ openai==1.59.5
 APScheduler==3.10.4
 python-dotenv==1.0.1
 PyYAML==6.0.2
+# Тяжёлая (+ модель ru→en ~200МБ ставится в Dockerfile сразу после этого слоя):
+# держим в base, чтобы добавление новых либ в requirements.txt не перекачивало её.
+argostranslate==1.9.6
