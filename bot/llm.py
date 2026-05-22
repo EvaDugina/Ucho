@@ -14,8 +14,6 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import about, moods, vault
-from .errors import LLMError
-from .validation import strip_extra_punctuation
 from .config import (
     DOMAINS,
     LLM_TIMEOUT,
@@ -24,6 +22,8 @@ from .config import (
     OPENAI_MODEL,
     PROMPTS_DIR,
 )
+from .errors import LLMError
+from .validation import strip_extra_punctuation
 
 log = logging.getLogger(__name__)
 

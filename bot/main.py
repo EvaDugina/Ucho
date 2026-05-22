@@ -5,13 +5,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from . import handlers, selfcheck, session, userctx, users, vault
-from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
+from .config import LOG_LEVEL, OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
 from .handlers import router
 from .middleware import AccessMiddleware
 from .scheduler import start_scheduler
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
 log = logging.getLogger("psycho.main")

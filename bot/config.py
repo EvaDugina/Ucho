@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +30,10 @@ OWNER_TELEGRAM_ID = int(os.environ["OWNER_TELEGRAM_ID"])
 ALLOWED_TELEGRAM_IDS = tuple(
     int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
 )
+
+# Уровень логирования (stderr/docker logs). Из env, чтобы поднять до DEBUG без
+# пересборки образа. Невалидное значение → INFO (см. main.py).
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).

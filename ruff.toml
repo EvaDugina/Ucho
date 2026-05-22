@@ -1,0 +1,10 @@
+# Линтер для PoC B: ловим реальные дефекты (неиспользуемые импорты/имена —
+# pyflakes F) и порядок импортов (I), базовый pycodestyle (E/W). Длинные строки
+# (E501) НЕ форсируем — в коде намеренно длинные комментарии «что и почему».
+# Запуск только в Docker: docker compose run --rm --no-deps bot ruff check bot tests
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
