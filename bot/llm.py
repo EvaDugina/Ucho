@@ -3,7 +3,7 @@
 Функции по режимам system-prompt:
 - ask_next        → mode: ask (главный вопрос; примеры стиля из questions_examples.md)
 - process_answer  → mode: process (разбор ответа + реакция)
-- about_present   → отдельный промпт about.md (показать портрет)
+- about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 """
 import json
 import logging
@@ -202,8 +202,10 @@ async def about_present(portrait: str) -> str:
     """Показать пользователю его портрет (/about) — отформатированный текст от
     1-го лица. portrait — это render_for_prompt() (компактная опись). Plain text.
     """
+    # Персона (iuda) + аддендум режима about. Голос Иуды берётся из единого
+    # источника (iuda.md), about.md несёт только специфику показа портрета.
     messages = [
-        {"role": "system", "content": _about_prompt},
+        {"role": "system", "content": f"{_iuda_prompt}\n\n{_about_prompt}"},
         {"role": "user", "content": f"Портрет (твоя опись этого человека):\n{portrait}\n\nПокажи мне, каким ты меня видишь."},
     ]
     resp = await _client.chat.completions.create(
