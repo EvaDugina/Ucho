@@ -4,7 +4,7 @@
 - **Live (Qwen, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
-  и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 11 секций live НЕ трогаем.**
+  и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 14 секций live НЕ трогаем.**
 - **Weekly (Claude).** Скилл `weekly-review` раз в неделю переписывает прозу секций
   из накопленных дельт + `raw/` (Qwen 14B для связного портрета слаба).
 
@@ -32,20 +32,26 @@ _DELTAS_MAX = 200  # кольцо журнала дельт (старое выт
 _FIELD_KEYS = ("register", "tone", "openness", "provocation_tolerance")
 # Прозаические поля дельты — копятся в журнал, прозу пишет weekly-review.
 # style — стиль/вкус/самоподача; passion — что вдохновляет/зажигает;
-# letdown — что огорчает/разочаровывает.
+# letdown — что огорчает/разочаровывает; epistemics — как познаёт (доверие
+# опыту/логике/авторитету, перенос «не знаю»); attachment — как строит близость
+# (доверие/контроль, тянется/отстраняется); routine — уклад/быт (порядок vs хаос).
 _PROSE_KEYS = (
     "speech_note", "trigger", "motif", "fact", "rapport",
     "style", "passion", "letdown",
+    "epistemics", "attachment", "routine",
 )
 # Поля настроения: пишет КОД (set_mood) и weekly (mood_baseline) — НЕ live-дельта LLM.
 # mood — текущий вектор (строка), bot_mood — последнее лицо, mood_baseline — prior "valence,arousal,dominance".
 _MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
-# 11 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
+# 14 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
 _SECTIONS = (
     "Манера речи",
     "Стиль",
     "Характер",
+    "Эпистемический стиль",
+    "Привязанность и дистанция",
+    "Ритуалы и быт",
     "Self-image vs зазор",
     "Болевые точки",
     "Сквозные мотивы",
