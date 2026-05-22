@@ -353,13 +353,16 @@ def ensure_layout() -> None:
         idx.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
-    # Портрет пользователя (about_user.md) — пустой скелет, заполняется live-дельтами
-    # бота и прозой weekly-review. Импорт локальный: about → atomic, без цикла с vault.
+    # Портрет (personality/about.md) + черновик настроения (personality/mood.md) —
+    # пустые скелеты, заполняются live кодом и прозой/графом weekly-review. Импорт
+    # локальный: about/mood_file → atomic, без цикла с vault. ensure() мигрирует
+    # старый about_user.md, если он есть.
     try:
-        from . import about
+        from . import about, mood_file
         about.ensure()
+        mood_file.ensure()
     except Exception:
-        log.exception("failed to ensure about_user.md")
+        log.exception("failed to ensure personality/ files")
     _ensure_user_graph_settings()
     ensure_git_repo()
 

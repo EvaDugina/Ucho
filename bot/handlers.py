@@ -18,6 +18,7 @@ from . import (
     analysis,
     graph,
     lexicon,
+    mood_file,
     moods,
     qmap,
     questions,
@@ -1006,9 +1007,9 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             vad = await lexicon.score(text)
             per_msg = await classify_mood(text, about.render_for_prompt(), vad=vad)
             s.record_mood(per_msg)
-            mood_vec = moods.session_mood(s.mood_trajectory, about.baseline())
+            mood_vec = moods.session_mood(s.mood_trajectory, mood_file.baseline())
             bot_mood = moods.pick_bot_mood(mood_vec)
-            about.set_mood(mood_vec, bot_mood)
+            mood_file.set_current(mood_vec, bot_mood)
             # Разбор — отдельным сообщением ПЕРЕД основным ответом. Не вопрос →
             # шлём напрямую, мимо _send_question/qmap. Сбой отправки не должен ломать
             # ход: bot_mood уже посчитан и пойдёт в process_answer.
@@ -1115,7 +1116,7 @@ async def _send_next_question(
     # сессия свежая) → контрастное лицо. Сбой не мешает задать вопрос.
     bot_mood = None
     try:
-        mv = moods.session_mood(getattr(s, "mood_trajectory", []) or [], about.baseline())
+        mv = moods.session_mood(getattr(s, "mood_trajectory", []) or [], mood_file.baseline())
         bot_mood = moods.pick_bot_mood(mv)
     except Exception:
         log.exception("ask mood pick failed (non-fatal)")

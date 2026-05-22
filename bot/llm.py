@@ -13,7 +13,7 @@ from typing import Optional
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from . import about, moods, vault
+from . import about, mood_file, moods, vault
 from .config import (
     DOMAINS,
     LLM_TIMEOUT,
@@ -104,13 +104,20 @@ def _user_prompt_block() -> str:
 
 
 def _portrait_block() -> str:
-    """Блок «# Кто перед тобой» из per-user about_user.md (или '')."""
+    """Блок «# Кто перед тобой»: портрет (personality/about.md) + текущее
+    настроение (personality/mood.md). Пусто → ''."""
+    p = ""
     try:
         p = about.render_for_prompt()
     except Exception:
         log.exception("about.render_for_prompt failed")
-        return ""
-    return f"\n\n# Кто перед тобой\n{p}" if p else ""
+    try:
+        m = mood_file.render_for_prompt()
+    except Exception:
+        log.exception("mood_file.render_for_prompt failed")
+        m = ""
+    block = "\n".join(x for x in (p, m) if x).strip()
+    return f"\n\n# Кто перед тобой\n{block}" if block else ""
 
 
 def _system(kind: str) -> str:

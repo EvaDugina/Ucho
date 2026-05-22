@@ -1,4 +1,4 @@
-"""Портрет пользователя (per-user): `about_user.md` + журнал дельт.
+"""Портрет пользователя (per-user): `personality/about.md` + журнал дельт.
 
 Гибрид (capture-first):
 - **Live (Qwen, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
@@ -8,8 +8,14 @@
 - **Weekly (Claude).** Скилл `weekly-review` раз в неделю переписывает прозу секций
   из накопленных дельт + `raw/` (Qwen 14B для связного портрета слаба).
 
-Файл инъецируется в системный промпт (`llm._system`), чтобы голос
-Иуды подстраивался под человека. Пути — per-user через `userctx` (как vault/session/qmap).
+Настроение вынесено в `personality/mood.md` (см. `bot/mood_file.py`) — здесь только
+портрет носителя, без mood-полей.
+
+Миграция: старый `about_user.md` в корне per-user лениво переносится в
+`personality/about.md` (mood-поля уезжают в mood.md через `mood_file`). Бот старый файл
+**не удаляет** (инвариант проекта) — его чистят руками в Obsidian.
+
+Файл инъецируется в системный промпт (`llm._system`). Пути — per-user через `userctx`.
 Любой сбой здесь не должен ронять обработку ответа — отсюда широкие try/except.
 """
 import json
@@ -20,7 +26,7 @@ from pathlib import Path
 
 import yaml
 
-from . import moods, userctx
+from . import userctx
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -40,9 +46,8 @@ _PROSE_KEYS = (
     "style", "passion", "letdown",
     "epistemics", "attachment", "routine",
 )
-# Поля настроения: пишет КОД (set_mood) и weekly (mood_baseline) — НЕ live-дельта LLM.
-# mood — текущий вектор (строка), bot_mood — последнее лицо, mood_baseline — prior "valence,arousal,dominance".
-_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
+# mood-поля больше НЕ живут в about — они в personality/mood.md (bot/mood_file.py).
+_LEGACY_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
 # 14 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
 _SECTIONS = (
@@ -63,7 +68,16 @@ _SECTIONS = (
 )
 
 
+def _dir() -> Path:
+    return userctx.user_root() / "personality"
+
+
 def path() -> Path:
+    return _dir() / "about.md"
+
+
+def _legacy_path() -> Path:
+    """Старое расположение портрета (до перехода на personality/)."""
     return userctx.user_root() / "about_user.md"
 
 
@@ -79,27 +93,65 @@ def _skeleton() -> str:
         "tone": "",
         "openness": "",
         "provocation_tolerance": "",
-        "mood": "",
-        "bot_mood": "",
-        "mood_baseline": "",
     }
     head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
     body = "\n".join(f"## {s}\n" for s in _SECTIONS)
     return f"---\n{head}\n---\n\n# Портрет пользователя\n\n{body}\n"
 
 
+def _migrate_from_legacy(legacy: Path) -> None:
+    """Перенести содержимое legacy `about_user.md` в `personality/about.md`,
+    выкинув mood-поля (их забирает mood_file). Старый файл НЕ удаляем."""
+    try:
+        m = _FRONTMATTER_RE.match(legacy.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("read legacy about failed")
+        m = None
+    if not m:
+        atomic_write_text(path(), _skeleton())
+        return
+    try:
+        fm = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        fm = {}
+    if not isinstance(fm, dict):
+        fm = {}
+    for k in _LEGACY_MOOD_KEYS:
+        fm.pop(k, None)
+    body = m.group(2)
+    head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
+    content = f"---\n{head}\n---\n{body}"
+    if not content.endswith("\n"):
+        content += "\n"
+    atomic_write_text(path(), content)
+
+
 def ensure() -> None:
-    """Создать пустой скелет, если файла ещё нет (идемпотентно)."""
+    """Создать `personality/about.md`, если его ещё нет (идемпотентно).
+
+    Если есть старый `about_user.md` — лениво мигрируем его содержимое. Иначе —
+    пустой скелет. Старый файл не трогаем (чистка — руками)."""
     p = path()
-    if not p.exists():
+    if p.exists():
+        return
+    _dir().mkdir(parents=True, exist_ok=True)
+    legacy = _legacy_path()
+    if legacy.exists():
+        _migrate_from_legacy(legacy)
+    else:
         atomic_write_text(p, _skeleton())
 
 
 def _parse() -> tuple[dict, str]:
-    """(frontmatter dict, body). Нет файла/шапки → ({}, '')."""
+    """(frontmatter dict, body). Нет нового файла → читаем legacy (back-compat),
+    пока миграция не прошла. Совсем ничего → ({}, '')."""
     p = path()
     if not p.exists():
-        return {}, ""
+        legacy = _legacy_path()
+        if legacy.exists():
+            p = legacy
+        else:
+            return {}, ""
     text = p.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(text)
     if not m:
@@ -107,7 +159,7 @@ def _parse() -> tuple[dict, str]:
     try:
         fm = yaml.safe_load(m.group(1)) or {}
     except yaml.YAMLError:
-        log.exception("about_user frontmatter parse failed")
+        log.exception("about frontmatter parse failed")
         fm = {}
     return (fm if isinstance(fm, dict) else {}), m.group(2)
 
@@ -135,52 +187,6 @@ def apply_delta(delta: dict) -> None:
         log.exception("about.apply_delta failed (non-fatal)")
 
 
-def set_mood(mood_vec: dict, bot_mood: str | None = None) -> None:
-    """Записать текущее настроение пользователя (и выбранное лицо) в портрет.
-
-    Пишет КОД детерминированно (не LLM-дельта). `mood` — компактная строка вектора
-    из `moods.mood_label`. Никогда не роняет вызывающий код.
-    """
-    if not isinstance(mood_vec, dict):
-        return
-    try:
-        ensure()
-        fm, body = _parse()
-        fm["mood"] = moods.mood_label(mood_vec)
-        if bot_mood:
-            fm["bot_mood"] = str(bot_mood)
-        fm["updated"] = datetime.now().strftime("%Y-%m-%d")
-        head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
-        content = f"---\n{head}\n---\n{body}"
-        if not content.endswith("\n"):
-            content += "\n"
-        atomic_write_text(path(), content)
-    except Exception:
-        log.exception("about.set_mood failed (non-fatal)")
-
-
-def baseline() -> tuple[float, float, float]:
-    """Prior (valence, arousal, dominance) из `mood_baseline` портрета (пишет weekly).
-
-    Формат — строка "v,a,d". Обратная совместимость: старый "v,a" → dominance=0.0.
-    Нет/мусор → (0,0,0).
-    """
-    def _clamp(x: str) -> float:
-        return max(-1.0, min(1.0, float(x)))
-    try:
-        fm, _ = _parse()
-        raw = str(fm.get("mood_baseline") or "").strip()
-        if not raw:
-            return (0.0, 0.0, 0.0)
-        parts = [p.strip() for p in raw.split(",")]
-        v = _clamp(parts[0])
-        a = _clamp(parts[1]) if len(parts) > 1 else 0.0
-        d = _clamp(parts[2]) if len(parts) > 2 else 0.0
-        return (v, a, d)
-    except Exception:
-        return (0.0, 0.0, 0.0)
-
-
 def _append_delta_log(delta: dict) -> None:
     """Сохранить непустые поля дельты строкой в `_user_deltas.jsonl` (кольцо)."""
     kept = {
@@ -202,12 +208,9 @@ def render_for_prompt(max_chars: int = 1500) -> str:
 
     Пустые секции (прозу пишет weekly-review) опускаем — на ранней стадии в промпт
     уходит только строка машинных полей, чтобы не жечь токены пустыми заголовками.
-    """
+    Настроение инъецируется отдельно (см. `llm._portrait_block` + `mood_file`)."""
     fm, body = _parse()
-    # В промпт идут машинные поля + текущее настроение/лицо (mood_baseline — нет,
-    # это prior для расчёта в коде, а не для персоны).
-    render_keys = (*_FIELD_KEYS, "mood", "bot_mood")
-    fields = [f"{k}: {fm[k]}" for k in render_keys if str(fm.get(k) or "").strip()]
+    fields = [f"{k}: {fm[k]}" for k in _FIELD_KEYS if str(fm.get(k) or "").strip()]
 
     sections: list[str] = []
     title: str | None = None
