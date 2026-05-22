@@ -74,7 +74,7 @@
 - `bot/selfcheck.py` — механический self-check при старте по всем пользователям (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
-- `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
+- `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `safe_chat_html` (экранирование вывода LLM для Telegram) / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
 - `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `about.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима (`ask`/`process`) + портрет; `about.md`/`summarize.md` — отдельные standalone-промпты. JSON-контракт строгий. (`review.md` удалён вместе с режимом review.)
 - `bot/sessions.py` — кольцо последних 25 сессий (`_sessions.json`): `snapshot`/`load`/`find_by_message_id` для reply-resume.
 - `bot/about.py` — портрет пользователя (`about_user.md` + `_user_deltas.jsonl`): `apply_delta` (live), `render_for_prompt` (инъекция в системный промпт), `ensure`.
@@ -222,6 +222,8 @@ docker compose logs -f bot
 - **HTML-escape** всего динамического контента в `_format_q` + лимит 3500 символов (защита от 400 Bad Request от Telegram).
 - **Whitelist callback `ask:<domain>`** — только `any` или конкретный домен из `DOMAINS`.
 - **LLM возвращает только то что в whitelist:** домен/type/status/relation kind проверяются по closed-list, фолбэки логируются.
+- **Иерархия доверия user < system (anti-prompt-injection):** пользовательский ввод (`answer`/`hint`) подаётся в `role:"user"` обёрнутым в маркеры данных (`llm._fence_user` → `<<<USER_ANSWER … >>>` / `<<<USER_HINT … >>>`); поддельные `<<<`/`>>>` внутри ввода нейтрализуются. Правило в `base.md`: текст между маркерами — данные, не инструкции; системный промпт приоритетнее. Защита держится не только на промпте — вывод всё равно валидируется кодом (см. выше).
+- **Вывод LLM не исполняется, остаётся текстом:** `validation.safe_chat_html` (`html.escape` + чистка control-символов) на всех путях LLM→Telegram (реакция, `/about`); запись в граф — через `safe_*`-санитайзеры. У модели **нет инструментов/function-calling** (вызовы `chat.completions` без `tools=`), и нигде нет `eval`/`exec`/`shell=True` над её выводом (`subprocess` — только git, аргументы списком, без текста LLM).
 - **Никаких stacktrace пользователю** — все exceptions перехвачены, в чат уходит нейтральная фраза.
 
 ---
@@ -329,6 +331,7 @@ PoC B техчасть считается принятой, когда:
 - **2026-05-20:** парсер концептов поддерживает два формата (callouts + старый H2) — нужно для миграции и для того, чтобы ручные правки в Obsidian в любом из стилей не теряли данные.
 - **2026-05-20:** dedup через Jaccard на биграммах токенов (порог 0.7), не BM25. Граф ≤ сотни узлов, простой алгоритм достаточен, BM25-индекс — оверкилл для PoC B.
 - **2026-05-20:** валидация ввода — Defence-in-depth: на границе Telegram (`_accept_user_text`), на входе в vault (`escape_raw_block` в `append_raw`), на входе в граф (`safe_slug` в `save_concept`/`add_relation`/`append_evidence`), на выходе в Telegram (`html.escape` в `_format_q`).
+- **2026-05-22:** иерархия доверия user < system + вывод LLM как текст. Пользовательский ввод фенсится маркерами данных (`_fence_user`), правило доверия — в `base.md`; вывод LLM экранируется на выходе в Telegram (`safe_chat_html`). У модели нет инструментов/`eval`/`shell` — она только генерирует текст по входным параметрам, вся запись и идентичность на коде.
 
 ### Технический долг
 
