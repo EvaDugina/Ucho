@@ -112,7 +112,7 @@ docker exec -it psycho-ollama nvidia-smi   # проверка GPU-проброс
 
 1. Пишет сырое Q&A в `raw/YYYY-MM-DD.md` с заголовком `## Q42 · 14:32 · ethics`.
 2. LLM (`mode: process`) возвращает только **анализ**: `observations` (атомы `domain/type/name/summary/quote`), `reaction` (реплика от 1-го лица) и опц. `user_delta` (портрет пользователя). Slug/raw/связи модель НЕ присылает.
-3. Код пишет дословный raw, выводит slug из имени, через дедуп решает create-vs-update концепта (`status: draft`), применяет `user_delta` к `about_user.md`.
+3. Код пишет дословный raw, выводит slug из имени, через дедуп решает create-vs-update концепта (`status: draft`), применяет `user_delta` к `personality/about.md`.
 4. Связи, реальные противоречия и промоушн `draft → stable` — еженедельный разбор сильной моделью (скилл `weekly-review`).
 5. `reaction` отправляется пользователю и становится якорем следующего хода; сессия остаётся открытой.
 
