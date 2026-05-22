@@ -28,4 +28,6 @@ def test_format_report_full():
     s = analysis.format_report(results["pad"], "ласка", results)
     assert "EmoLex" in s and "Big Five" in s and "PANAS" in s and "Dostoevsky" in s
     assert "ласка" in s  # выбранное лицо в строке PAD
-    assert "sadness" in s
+    assert "грусть" in s  # эмоция EmoLex переведена на русский
+    # после чисел есть текстовые пояснения
+    assert "негатив" in s and "тревога" in s.lower()

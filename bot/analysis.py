@@ -82,61 +82,124 @@ def _pad_view(mv: dict | None) -> dict | None:
     }
 
 
-def _fmt_kv(d: dict, keys, prec=2) -> str:
-    return " ".join(f"{k}={round(d[k], prec)}" for k in keys if d.get(k) is not None)
+# --- словари расшифровки (число → понятная фраза) ---
+_EMO_RU = {
+    "anger": "гнев", "anticipation": "предвкушение", "disgust": "отвращение",
+    "fear": "страх", "joy": "радость", "sadness": "грусть", "surprise": "удивление",
+    "trust": "доверие",
+}
+_DVK_RU = {
+    "positive": "позитив", "negative": "негатив", "neutral": "нейтрально",
+    "skip": "не определить", "speech": "речевой этикет",
+}
+_STAB_RU = {
+    "rigid": "застрял в одном состоянии", "labile": "настроение скачет",
+    "adequate": "ровные колебания",
+}
+_DOM_LABEL_RU = {"high": "контроль/сила", "normal": "обычный контроль", "low": "бессилие/придавлен"}
+# Big Five: ярлык + что значит высокий полюс.
+_OCEAN_RU = (
+    ("openness", "открытость", "любознательность, тяга к новому и идеям"),
+    ("conscientiousness", "добросовестность", "организованность, дисциплина"),
+    ("extraversion", "экстраверсия", "общительность, энергия вовне"),
+    ("agreeableness", "доброжелательность", "теплота, уступчивость, эмпатия"),
+    ("neuroticism", "нейротизм", "тревожность, эмоц. неустойчивость"),
+)
+_PANAS_RU = (
+    ("positive_affect", "позитивный аффект", "бодрость, интерес, энтузиазм"),
+    ("negative_affect", "негативный аффект", "тревога, раздражение, подавленность"),
+)
+
+
+def _axis_ru(x, kind: str) -> str:
+    """Ось VAD ∈[-1..1] → понятная фраза."""
+    if x is None:
+        return "—"
+    hi, lo = x > 0.33, x < -0.33
+    if kind == "valence":
+        return "позитив (хорошее)" if hi else ("негатив (плохое)" if lo else "нейтрально")
+    if kind == "arousal":
+        return "много энергии/возбуждён" if hi else ("вялость, мало сил" if lo else "ровная энергия")
+    if kind == "dominance":
+        return "чувствует силу/контроль" if hi else ("бессилие, не управляет" if lo else "обычный контроль")
+    return ""
+
+
+def _level01_ru(x) -> str:
+    """Шкала 0..1 → низко/средне/высоко."""
+    if x is None:
+        return "—"
+    return "высоко" if x > 0.66 else ("низко" if x < 0.34 else "средне")
 
 
 def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) -> str:
     """Единое сообщение-сравнение методов для владельца (перед основным ответом).
 
-    Только числа/ярлыки (без слов человека) → можно слать как есть. Это НЕ вопрос:
-    шлётся напрямую, мимо `_send_question`/qmap.
+    После каждого вычисленного числа — текстовая расшифровка (числа без пояснений
+    мало о чём говорят). Только числа/ярлыки (без слов человека) → шлём напрямую,
+    мимо `_send_question`/qmap (это не вопрос).
     """
-    lines = ["🧪 Анализ ответа — сравнение методов\n"]
+    L = ["🧪 Анализ ответа — методы (число → пояснение)"]
 
     pad = results.get("pad")
+    L.append("\n▸ PAD (Qwen+код), вектор по сессии")
     if pad:
-        lines.append(
-            f"PAD (Qwen+код): {pad.get('quality')} · "
-            f"V {pad.get('valence')} A {pad.get('arousal')} D {pad.get('dominance')} "
-            f"({pad.get('dominance_label')}) · {pad.get('stability')} → лицо {bot_mood or '—'}"
-        )
+        L.append(f"эмоция: {pad.get('quality')}")
+        L.append(f"валентность: {pad.get('valence')} — {_axis_ru(pad.get('valence'), 'valence')}")
+        L.append(f"энергия: {pad.get('arousal')} — {_axis_ru(pad.get('arousal'), 'arousal')}")
+        L.append(f"доминирование: {pad.get('dominance')} — {_DOM_LABEL_RU.get(pad.get('dominance_label'), '—')}")
+        L.append(f"устойчивость: {pad.get('stability')} — {_STAB_RU.get(pad.get('stability'), '—')}")
+        L.append(f"выбранное лицо Иуды: {bot_mood or '—'}")
     else:
-        lines.append("PAD (Qwen+код): нет данных")
+        L.append("нет данных")
 
     vad = results.get("vad_lex")
-    lines.append(
-        f"NRC-VAD (лексикон): v={vad.get('valence')} a={vad.get('arousal')} "
-        f"d={vad.get('dominance')} (слов {vad.get('n')})" if vad
-        else "NRC-VAD (лексикон): нет совпадений"
-    )
+    L.append("\n▸ NRC-VAD (лексикон, по словам)")
+    if vad:
+        L.append(f"валентность: {vad.get('valence')} — {_axis_ru(vad.get('valence'), 'valence')}")
+        L.append(f"возбуждение: {vad.get('arousal')} — {_axis_ru(vad.get('arousal'), 'arousal')}")
+        L.append(f"доминирование: {vad.get('dominance')} — {_axis_ru(vad.get('dominance'), 'dominance')}")
+        L.append(f"(слов из лексикона: {vad.get('n')})")
+    else:
+        L.append("нет совпадений со словарём")
 
     emo = results.get("emolex")
+    L.append("\n▸ NRC-EmoLex (эмоции Плутчика, по словам)")
     if emo:
-        top = ", ".join(f"{e} {emo.get(e)}" for e in (emo.get("top") or [])) or "нейтрально"
-        lines.append(f"NRC-EmoLex (Плутчик): {top} · pos {emo.get('positive')} / neg {emo.get('negative')} (слов {emo.get('n')})")
+        top = ", ".join(f"{_EMO_RU.get(e, e)} {emo.get(e)}" for e in (emo.get("top") or [])) or "нет выраженных"
+        L.append(f"ведущие эмоции: {top}")
+        L.append(f"полярность: позитив {emo.get('positive')} / негатив {emo.get('negative')} — "
+                 f"{'преобладает негатив' if (emo.get('negative') or 0) > (emo.get('positive') or 0) else ('преобладает позитив' if (emo.get('positive') or 0) > (emo.get('negative') or 0) else 'поровну')}")
+        L.append(f"(слов из лексикона: {emo.get('n')})")
     else:
-        lines.append("NRC-EmoLex (Плутчик): нет совпадений")
+        L.append("нет совпадений со словарём")
 
     dvk = results.get("dostoevsky")
-    lines.append(
-        f"Dostoevsky (тональность): {dvk.get('label')} {dvk.get('score')}" if dvk
-        else "Dostoevsky (тональность): нет данных"
-    )
+    L.append("\n▸ Dostoevsky (тональность, RuSentiment)")
+    if dvk:
+        L.append(f"{_DVK_RU.get(dvk.get('label'), dvk.get('label'))}: {dvk.get('score')} — уверенность модели")
+    else:
+        L.append("нет данных (модель не загружена)")
 
     oc = results.get("ocean")
-    lines.append(
-        "Big Five (Qwen): " + _fmt_kv(oc, ("openness", "conscientiousness", "extraversion", "agreeableness", "neuroticism"))
-        if oc else "Big Five (Qwen): нет данных"
-    )
+    L.append("\n▸ Big Five / OCEAN (Qwen, 0..1)")
+    if oc:
+        for key, ru, meaning in _OCEAN_RU:
+            v = oc.get(key)
+            L.append(f"{ru}: {v} — {_level01_ru(v)} ({meaning})")
+    else:
+        L.append("нет данных")
 
     pa = results.get("panas")
-    lines.append(
-        f"PANAS (Qwen): PA {pa.get('positive_affect')} / NA {pa.get('negative_affect')}" if pa
-        else "PANAS (Qwen): нет данных"
-    )
+    L.append("\n▸ PANAS (Qwen, аффект сейчас, 0..1)")
+    if pa:
+        for key, ru, meaning in _PANAS_RU:
+            v = pa.get(key)
+            L.append(f"{ru}: {v} — {_level01_ru(v)} ({meaning})")
+    else:
+        L.append("нет данных")
 
-    return "\n".join(lines)
+    return "\n".join(L)
 
 
 def log_analysis(text_len: int, results: dict) -> None:
