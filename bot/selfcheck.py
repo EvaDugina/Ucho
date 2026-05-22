@@ -8,7 +8,7 @@
 Сводный отчёт по всем пользователям — в глобальный `.psycho/startup-check.md`.
 
 Глубокий смысловой реиндекс (слияние, profile, кластеризация MOC) — НЕ здесь.
-Это ручной weekly-review из сильного агента (Claude).
+Это ручная сборка из сильного агента (Claude): скиллы reconcista / depersonalization.
 """
 from __future__ import annotations
 

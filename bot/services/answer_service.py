@@ -10,7 +10,7 @@
 * raw пишется ДОСЛОВНО (реальные Q/A + домен сессии), не из LLM-полей;
 * slug выводит код из имени (``slugify``), LLM slug не присылает;
 * create-vs-update решает дедуп (имя/алиас → файл → Jaccard);
-* новые узлы создаются как ``status="draft"`` — связи/конфликты строит weekly-review;
+* новые узлы создаются как ``status="draft"`` — связи/конфликты строит reconcista;
 * вся запись обёрнута в ``vault.git_wrap`` (атомарность + откат на исключении).
 """
 from __future__ import annotations
@@ -141,7 +141,7 @@ def _apply_inner(
                 vault.append_log("warn", "bad_obs_name", f"name={name!r} → пустой slug, пропуск")
                 continue
             # capture-first: создаём ЧЕРНОВИК (status=draft). Связи/конфликты
-            # строит weekly-review, не бот.
+            # строит reconcista, не бот.
             concept = Concept(
                 slug=slug,
                 name=name,

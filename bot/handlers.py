@@ -1059,7 +1059,7 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     s.pending_answer = None
     session.persist()
 
-    # Журнал пары (настроение → лицо) + лексиконный VAD для графа Фазы D (weekly агрегирует).
+    # Журнал пары (настроение → лицо) + лексиконный VAD для графа настроений (depersonalization агрегирует).
     if mood_vec and bot_mood:
         moods.log_turn(mood_vec, bot_mood, vad=vad)
 

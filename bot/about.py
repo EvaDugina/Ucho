@@ -5,7 +5,7 @@
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
   и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 14 секций live НЕ трогаем.**
-- **Weekly (Claude).** Скилл `weekly-review` раз в неделю переписывает прозу секций
+- **Weekly (Claude).** Скилл `depersonalization` раз в неделю переписывает прозу секций
   из накопленных дельт + `raw/` (Qwen 14B для связного портрета слаба).
 
 Настроение вынесено в `personality/mood.md` (см. `bot/mood_file.py`) — здесь только
@@ -32,11 +32,11 @@ from .atomic import atomic_write_text
 log = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
-_DELTAS_MAX = 200  # кольцо журнала дельт (старое вытесняется; чистит weekly-review)
+_DELTAS_MAX = 200  # кольцо журнала дельт (старое вытесняется; чистит depersonalization)
 
 # Машинные поля frontmatter, которые live-дельта обновляет (overwrite-if-present).
 _FIELD_KEYS = ("register", "tone", "openness", "provocation_tolerance")
-# Прозаические поля дельты — копятся в журнал, прозу пишет weekly-review.
+# Прозаические поля дельты — копятся в журнал, прозу пишет depersonalization.
 # style — стиль/вкус/самоподача; passion — что вдохновляет/зажигает;
 # letdown — что огорчает/разочаровывает; epistemics — как познаёт (доверие
 # опыту/логике/авторитету, перенос «не знаю»); attachment — как строит близость
@@ -49,7 +49,7 @@ _PROSE_KEYS = (
 # mood-поля больше НЕ живут в about — они в personality/mood.md (bot/mood_file.py).
 _LEGACY_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
-# 14 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
+# 14 секций портрета (порядок фиксирован; прозу заполняет depersonalization).
 _SECTIONS = (
     "Манера речи",
     "Стиль",
@@ -206,7 +206,7 @@ def _append_delta_log(delta: dict) -> None:
 def render_for_prompt(max_chars: int = 1500) -> str:
     """Компактный портрет для системного промпта. '' если пусто/нет файла.
 
-    Пустые секции (прозу пишет weekly-review) опускаем — на ранней стадии в промпт
+    Пустые секции (прозу пишет depersonalization) опускаем — на ранней стадии в промпт
     уходит только строка машинных полей, чтобы не жечь токены пустыми заголовками.
     Настроение инъецируется отдельно (см. `llm._portrait_block` + `mood_file`)."""
     fm, body = _parse()

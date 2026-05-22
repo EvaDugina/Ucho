@@ -85,7 +85,7 @@ def _fence_user(text: str, label: str) -> str:
 
 
 def _user_prompt_block() -> str:
-    """Per-user тюнинг персоны из `<base>/user_prompt.md` (пишет ТОЛЬКО weekly-review).
+    """Per-user тюнинг персоны из `<base>/user_prompt.md` (пишет ТОЛЬКО depersonalization).
 
     Как держать регистр с этим человеком, на что давить, чего избегать (включает
     выжимку mood-map). Бот файл не создаёт; нет файла → ''. Инжектится рядом с
@@ -200,7 +200,7 @@ def normalize_observations(raw) -> list[dict]:
     dropped = total - len(out)
     if dropped:
         # Потеря данных пользователя должна быть видна в vault-журнале, а не
-        # тонуть только в stderr: weekly-review/разработчик увидит, что часть
+        # тонуть только в stderr: reconcista/разработчик увидит, что часть
         # наблюдений LLM не прошла контракт.
         log.warning("normalize_observations dropped %d of %d observation(s)", dropped, total)
         try:

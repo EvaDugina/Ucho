@@ -338,7 +338,7 @@ def ensure_layout() -> None:
     """
     raw_dir().mkdir(parents=True, exist_ok=True)
     profile_dir().mkdir(parents=True, exist_ok=True)
-    # Папка графа настроений (узлы quality/лица + _mood_map.json); строит weekly-review.
+    # Папка графа настроений (узлы quality/лица + _mood_map.json); строит depersonalization.
     (userctx.user_root() / "mood").mkdir(parents=True, exist_ok=True)
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
     for domain in DOMAINS:
@@ -354,7 +354,7 @@ def ensure_layout() -> None:
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
     # Портрет (personality/about.md) + черновик настроения (personality/mood.md) —
-    # пустые скелеты, заполняются live кодом и прозой/графом weekly-review. Импорт
+    # пустые скелеты, заполняются live кодом и прозой/графом depersonalization. Импорт
     # локальный: about/mood_file → atomic, без цикла с vault. ensure() мигрирует
     # старый about_user.md, если он есть.
     try:

@@ -6,7 +6,7 @@
 - **Код (этот модуль)** считает математику: вектор настроения по сессии с
   приоритетом на последнее сообщение (recency) + затухающий prior из портрета,
   устойчивость (дисперсия), выбор контрастного лица, журнал и mood-map.
-- **weekly-review (сильная модель)** строит граф `mood/` и пишет `_mood_map.json`
+- **depersonalization (сильная модель)** строит граф `mood/` и пишет `_mood_map.json`
   + `mood_baseline` в портрет.
 
 Часть 1 (Фаза B) — измерения + `session_mood`. Часть 2 (Фаза C) — `BOT_MOODS`,
@@ -258,7 +258,7 @@ def _default_faces(mv: dict) -> list[str]:
 
 
 def load_mood_map() -> dict:
-    """Per-user рантайм-карта `mood/_mood_map.json` (пишет weekly-review). Нет → {}."""
+    """Per-user рантайм-карта `mood/_mood_map.json` (пишет depersonalization). Нет → {}."""
     try:
         p = _mood_dir() / "_mood_map.json"
         if not p.exists():
@@ -286,7 +286,7 @@ def pick_bot_mood(mood_vec: dict) -> str:
 
 def log_turn(mood_vec: dict, bot_mood: str, vad: dict | None = None) -> None:
     """Записать пару (настроение → лицо) в `_mood_log.jsonl` (кольцо). Для графа
-    Фазы D (weekly-review агрегирует в `mood/` + `_mood_map.json`). `vad` —
+    Фазы D (depersonalization агрегирует в `mood/` + `_mood_map.json`). `vad` —
     нативная русская VAD-оценка лексикона (`lexicon.score`): сверка арбитр↔лексикон
     (где LLM перебивает детерминированный сигнал)."""
     try:

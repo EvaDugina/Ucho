@@ -1,12 +1,13 @@
 """Живой черновик настроения пользователя: `personality/mood.md`.
 
-Capture-first (как и весь проект): **код** пишет структурный снимок из классификации
-Qwen (`moods.session_mood`/`mood_label`) — текущий вектор (эмоция/V/A/D/устойчивость),
-последнее «лицо» Иуды, prior (`mood_baseline`). Это ЧЕРНОВИК; выверенный граф
-настроений и baseline собирает **weekly-review** в папке `mood/`.
+Capture-first (как и весь проект), разделение как в `about.py`:
+- **Код (live, каждый ход)** пишет ТОЛЬКО frontmatter — живой снимок из классификации
+  Qwen (`moods`): эмоция/V/A/D/устойчивость/последнее лицо. Тело файла НЕ трогает.
+- **Скилл `depersonalization` (вручную)** пишет в ТЕЛЕ связный анализ настроения за
+  период (доминанты, динамика, триггеры) + ставит `mood_baseline` (prior) и строит
+  выверенный граф настроений в `mood/`. Код тело сохраняет — нарратив скилла не затирается.
 
-`mood_baseline` (prior для `moods.session_mood`) хранится здесь (раньше — в about).
-
+`mood_baseline` (prior для `moods.session_mood`) хранится здесь.
 Миграция: mood-поля из старого `about_user.md` лениво переносятся сюда в `ensure()`.
 Старый файл бот не удаляет (инвариант) — чистят руками.
 """
@@ -24,6 +25,15 @@ log = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
 _MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
+
+# Тело-скелет: H1 + пояснение + пустая секция анализа (её пишет depersonalization).
+_BODY = (
+    "# Настроение\n\n"
+    "> Frontmatter выше — живой снимок настроения (пишет код на каждый ответ из "
+    "категориальной классификации Qwen). Связный анализ ниже выверяет и пишет "
+    "скилл `depersonalization`; выверенный граф настроений — в папке `mood/`.\n\n"
+    "## Анализ настроения\n\n"
+)
 
 
 def _dir() -> Path:
@@ -54,26 +64,12 @@ def _legacy_mood_fields() -> dict:
         return {}
 
 
-def _compose(fm: dict, mood_vec: dict | None = None, bot_mood: str | None = None) -> str:
+def _write(fm: dict, body: str) -> None:
     head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
-    if mood_vec:
-        line = (
-            f"Текущий снимок по сессии: {mood_vec.get('quality', '—')} · "
-            f"валентность {mood_vec.get('valence')} · энергия {mood_vec.get('energy')} · "
-            f"доминирование {mood_vec.get('dominance_label')} · "
-            f"устойчивость {mood_vec.get('stability')}. "
-            f"Последнее лицо Иуды: {bot_mood or '—'}."
-        )
-    else:
-        line = "Снимок ещё не считался."
-    body = (
-        "# Настроение (черновик)\n\n"
-        f"{line}\n\n"
-        "> Живой черновик: пишет код из категориальной классификации Qwen на каждый "
-        "ответ. Выверенный граф настроений, карту лиц и `mood_baseline` собирает "
-        "weekly-review в папке `mood/`.\n"
-    )
-    return f"---\n{head}\n---\n\n{body}"
+    content = f"---\n{head}\n---\n{body}"
+    if not content.endswith("\n"):
+        content += "\n"
+    atomic_write_text(path(), content)
 
 
 def ensure() -> None:
@@ -89,32 +85,35 @@ def ensure() -> None:
         "stability": "", "bot_mood": "", "mood_baseline": "", "n": 0,
     }
     fm.update(_legacy_mood_fields())  # перенос prior/последнего лица, если были
-    atomic_write_text(p, _compose(fm))
+    _write(fm, "\n" + _BODY)
 
 
-def _parse() -> dict:
+def _parse() -> tuple[dict, str]:
+    """(frontmatter dict, body). Нет файла/шапки → ({}, '')."""
     p = path()
     if not p.exists():
-        return {}
+        return {}, ""
+    text = p.read_text(encoding="utf-8")
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
     try:
-        m = _FRONTMATTER_RE.match(p.read_text(encoding="utf-8"))
-        if not m:
-            return {}
         fm = yaml.safe_load(m.group(1)) or {}
-        return fm if isinstance(fm, dict) else {}
-    except Exception:
-        log.exception("mood.md parse failed (non-fatal)")
-        return {}
+    except yaml.YAMLError:
+        log.exception("mood.md frontmatter parse failed")
+        fm = {}
+    return (fm if isinstance(fm, dict) else {}), m.group(2)
 
 
 def set_current(mood_vec: dict, bot_mood: str | None = None) -> None:
-    """Записать текущий снимок настроения (живой черновик). `mood_baseline`
-    (его пишет weekly-review) сохраняется. Никогда не роняет вызывающий код."""
+    """Записать живой снимок настроения в frontmatter. **Тело (анализ от
+    depersonalization) НЕ трогаем** — иначе затёрли бы нарратив скилла.
+    `mood_baseline` (его пишет скилл) сохраняется. Никогда не роняет вызывающий код."""
     if not isinstance(mood_vec, dict):
         return
     try:
         ensure()
-        fm = _parse()
+        fm, body = _parse()
         fm["updated"] = datetime.now().strftime("%Y-%m-%d")
         fm["quality"] = mood_vec.get("quality")
         fm["valence"] = mood_vec.get("valence")
@@ -125,20 +124,20 @@ def set_current(mood_vec: dict, bot_mood: str | None = None) -> None:
         fm["mood"] = moods.mood_label(mood_vec)
         if bot_mood:
             fm["bot_mood"] = str(bot_mood)
-        fm.setdefault("mood_baseline", "")  # не затираем prior от weekly
-        atomic_write_text(path(), _compose(fm, mood_vec, bot_mood or fm.get("bot_mood")))
+        fm.setdefault("mood_baseline", "")  # не затираем prior от скилла
+        _write(fm, body)
     except Exception:
         log.exception("mood_file.set_current failed (non-fatal)")
 
 
 def baseline() -> tuple[float, float, float]:
-    """Prior (valence, arousal, dominance) из `mood_baseline` (пишет weekly).
+    """Prior (valence, arousal, dominance) из `mood_baseline` (пишет скилл).
     Формат "v,a,d", back-compat "v,a" → d=0. Нет mood.md → пробуем legacy about.
     Нет/мусор → (0,0,0)."""
     def _clamp(x: str) -> float:
         return max(-1.0, min(1.0, float(x)))
     try:
-        fm = _parse()
+        fm, _ = _parse()
         raw = str(fm.get("mood_baseline") or "").strip()
         if not raw:
             raw = str(_legacy_mood_fields().get("mood_baseline") or "").strip()
@@ -155,7 +154,7 @@ def baseline() -> tuple[float, float, float]:
 
 def render_for_prompt() -> str:
     """Короткая строка настроения для системного промпта персоны ('' если пусто)."""
-    fm = _parse()
+    fm, _ = _parse()
     parts = []
     if str(fm.get("mood") or "").strip():
         parts.append(f"настроение: {fm['mood']}")

@@ -53,10 +53,15 @@ def test_set_current_writes_and_preserves_baseline():
     legacy.write_text('---\nmood_baseline: "0.2,0.1,-0.1"\n---\n\n# x\n', encoding="utf-8")
     mood_file.ensure()
     assert mood_file.baseline() == (0.2, 0.1, -0.1)
+    # скилл depersonalization дописал нарратив в тело
+    p = mood_file.path()
+    p.write_text(p.read_text(encoding="utf-8") + "\nЧеловек всю неделю в апатии, гаснет к вечеру.\n", encoding="utf-8")
+
     mv = moods.session_mood(
         [{"sign": "-", "energy": "low", "dominance": "low", "quality": "грусть_тоска"}]
     )
     mood_file.set_current(mv, "вселение_уверенности")
-    # снимок записан, prior сохранён
+    # снимок записан, prior сохранён, нарратив скилла НЕ затёрт
     assert mood_file.baseline() == (0.2, 0.1, -0.1)
     assert "вселение_уверенности" in mood_file.render_for_prompt()
+    assert "апатии, гаснет к вечеру" in p.read_text(encoding="utf-8")
