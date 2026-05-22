@@ -61,7 +61,7 @@
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review. Хелпер `_send_question()` — единая точка отправки любого вопроса (главный/кларифер/`/echo`/`/requestion`/recovery): шлёт сообщение, ловит `message_id`, пишет в `qmap`. Ответ на выбранный вопрос: ветка `reply` в `on_text` + `cmd_answer` (`/answer N <текст>`) резолвят вопрос из `qmap` и через `_open_anchored_session` открывают probe, заякоренную на него (исходный q_num если не отвечен, новый — если отвечен → Q-повтор).
 - `bot/qmap.py` — персистентная карта `message_id→вопрос` (`users/<uid>/_qmap.json`, кольцо на 50). Источник правды по заданным вопросам, **включая неотвеченные** (в `raw/` их нет — блок пишется только при ответе). API: `append` / `find_by_message_id` / `find_by_q_num` / `mark_answered` (вызывается из `_apply_processed_inner` после записи raw). `message_id` стабилен между рестартами → reply резолвится надёжно.
-- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` / `review` + `summarize_session`, фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
+- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` + `about_present` (портрет) и `summarize_session` (отдельные промпты), фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/ucho` в `notes/`), `iter_history`. `_ensure_user_graph_settings` сидит `users/<uid>/.obsidian/graph.json` из шаблона `bot/assets/graph.json` новому юзеру (идемпотентно — существующий не трогает).
@@ -75,7 +75,7 @@
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
 - `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
-- `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `review.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима + портрет. JSON-контракт строгий.
+- `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `about.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима (`ask`/`process`) + портрет; `about.md`/`summarize.md` — отдельные standalone-промпты. JSON-контракт строгий. (`review.md` удалён вместе с режимом review.)
 - `bot/sessions.py` — кольцо последних 25 сессий (`_sessions.json`): `snapshot`/`load`/`find_by_message_id` для reply-resume.
 - `bot/about.py` — портрет пользователя (`about_user.md` + `_user_deltas.jsonl`): `apply_delta` (live), `render_for_prompt` (инъекция в системный промпт), `ensure`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
@@ -190,7 +190,7 @@ docker compose logs -f bot
   - `/ask <domain>` для каждого из 10 доменов → концепт создаётся.
   - Ручная правка `.md` в Obsidian → следующий `/ask` не теряет правку.
   - `/ucho <заметка>` → заметка в `notes/` + концепты в граф.
-  - `/review` → бот отвечает по существующей базе.
+  - `/about` → бот показывает портрет, затем обычная сессия-обсуждение.
   - Граф View в Obsidian → видны узлы и связи.
 
 ### Наблюдаемость и логирование
@@ -265,6 +265,14 @@ PoC B техчасть считается принятой, когда:
 ## notes
 
 ### Active plans
+
+**Реализовано 2026-05-22 (доводка: индикатор, pebble/history, слияние about+review, help):**
+
+- **Индикатор «Думаю»** — один стикер `🎰` (не случайный) + текст; показывается только при генерации главного вопроса (`/ask`, `show_thinking=True` в `_send_next_question`) и портрета (`/about`). Реакции в диалоге, `/ucho`, `/requestion`, `/pebble`, дневной вопрос — молча.
+- **`/pebble`** — прозрачен для сессии: исключён из close-on-command в `AccessMiddleware`, не открывает/не закрывает сессию, не прерывает in-flight реакцию (она в своей задаче под ratelimit). Просто «буль.».
+- **`/history`** — `cmd_history` читает новый `bot/questions.py` (кольцо 50, `record`/`recent`): только **главные вопросы** (записываются в `_send_question` при `plain=False`), последние 25, без ответов/реакций/якорей. Свою сессию не открывает (после неё сообщение без reply → `/ucho`).
+- **Слияние `about`+`review`:** `/about` = портрет → обычная probe-сессия. **`review` удалён целиком:** `cmd_review`, ветка `on_text`, `_handle_review`, `_commit_review_additions`, `_catalog_text`, `llm.review_query`, `_MODE_PROMPTS["review"]`, `prompts/review.md`.
+- **`/help`** перегруппирован: `echo/ucho/ask/requestion/about` | `start/help/history` | админ (владельцу) | `pebble`; футер «Я сам настигну тебя вопросом.» + строка про reply-по-смахиванию.
 
 **Реализовано 2026-05-22 (модульные промпты + голос от 1-го лица + открытые сессии-реакции):**
 
