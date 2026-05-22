@@ -48,7 +48,7 @@ PY
 
 **Capture-first, две модели с разными ролями** — ключевой принцип:
 - **Qwen 14B локально (live, в контейнере)** только *захватывает*: режимы `ask` /
-  `process` / `review` / `summarize`. В `process` создаёт лишь черновые концепты
+  `process` + `about_present` (портрет). В `process` создаёт лишь черновые концепты
   (`status: draft`) с evidence — **без связей и конфликтов**.
 - **Claude (вручную раз в неделю, НЕ в контейнере)** *собирает граф*: скилл
   `.claude/skills/weekly-review/` делает промоушн draft→stable, дедуп/слияние, связи,
@@ -83,7 +83,7 @@ log, users.json) и `.git/` — **глобальные** на корне, НЕ p
 
 - **LLM в `process` отдаёт только `observations`** (анализ + следующий вопрос). Запись
   в граф, идентичность концептов, slug, create/update — целиком на коде. Не возвращай
-  LLM к генерации slug/raw_entry/связей — контракт в `prompts/system.md` строгий.
+  LLM к генерации slug/raw_entry/связей — контракт в `prompts/process.md` строгий.
 - **`_send_question()` в `handlers.py` — единственная точка отправки любого вопроса**
   (главный, кларифер, `/echo`, `/requestion`, recovery). Только она пишет в `qmap`.
   Отправляешь вопрос мимо неё — reply/`/answer N` на него не разрезолвятся.

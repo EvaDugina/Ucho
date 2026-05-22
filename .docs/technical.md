@@ -61,7 +61,7 @@
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC; плюс `about.apply_delta`); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review. На ответ — **реакция** (реплика-укол, не вопрос), сессия остаётся открытой; уточняющих вопросов бот не задаёт. Хелпер `_send_question()` — единая точка отправки вопроса/реакции (`plain` отделяет реакцию от главного вопроса; главный пишется в `questions` для `/history`), пишет `message_id` в `qmap` и в `message_ids` сессии. Команды (кроме `/pebble`) закрывают активную сессию в `AccessMiddleware`; `ask/echo/ucho/about/requestion` открывают новую. Reply: `on_text` сперва резюмирует сессию из кольца (`sessions.find_by_message_id`), иначе фолбэк на `qmap`/реконструкцию/заметку.
 - `bot/qmap.py` — персистентная карта `message_id→вопрос` (`users/<uid>/_qmap.json`, кольцо на 50). Источник правды по заданным вопросам, **включая неотвеченные** (в `raw/` их нет — блок пишется только при ответе). API: `append` / `find_by_message_id` / `find_by_q_num` / `mark_answered` (вызывается из `_apply_processed_inner` после записи raw). `message_id` стабилен между рестартами → reply резолвится надёжно.
-- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` + `about_present` (портрет) и `summarize_session` (отдельные промпты), фолбэк-логирование. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
+- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` + `about_present` (портрет, отдельный промпт), фолбэк-логирование. `ask_next` подмешивает в user-сообщение примеры стиля по теме из `questions_examples.md`. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/ucho` в `notes/`), `iter_history`. `_ensure_user_graph_settings` сидит `users/<uid>/.obsidian/graph.json` из шаблона `bot/assets/graph.json` новому юзеру (идемпотентно — существующий не трогает).
@@ -113,7 +113,7 @@ Psycho/
 │   ├── main.py             точка входа
 │   ├── config.py           env, домены, пути
 │   ├── handlers.py         маршруты команд + _apply_processed
-│   ├── llm.py              обёртка над Ollama (ask/process/about/summarize)
+│   ├── llm.py              обёртка над Ollama (ask/process/about)
 │   ├── graph.py            Concept dataclass + рендер/парсер + dedup/resolve
 │   ├── vault.py            git_wrap, log, layout, raw, state
 │   ├── session.py          активная сессия с persistence (id, message_ids)
@@ -130,7 +130,7 @@ Psycho/
 │   ├── moc.py              per-domain MOC rebuild
 │   ├── selfcheck.py        механический self-check при старте
 │   └── validation.py       safe_slug/user_text/etc.
-├── prompts/                base + ask/process/about/summarize + seeds
+├── prompts/                iuda + base + ask/process + about + questions_examples
 ├── scripts/
 │   └── migrate_domains.py  одноразовая миграция 4→10
 ├── docker-compose.yml      bot + ollama (GPU-проброс)
@@ -278,7 +278,7 @@ PoC B техчасть считается принятой, когда:
 **Текущее состояние (2026-05-22):**
 
 - **Диалог:** главный вопрос (`/ask`/`/echo`/`/requestion`/дневной) открывает сессию-обсуждение; на каждый ответ — реакция-укол от 1-го лица (НЕ вопрос), сессия открыта, пока не задан новый вопрос или не выполнена любая команда (`/pebble` — исключение, не трогает сессию). Уточняющих вопросов бот не задаёт. Reply на любую реплику последних **25 сессий** её продолжает (`bot/sessions.py`, `session.resume`).
-- **Голос:** в чат — от первого лица, на «ты», себя не называет. Досье (`summary` концептов, `about_user.md`) — описательно от 3-го лица. Промпты разнесены: `prompts/base.md` + `ask`/`process`/`about`/`summarize` + `seeds` (`llm._system(kind)` = base + addendum + портрет).
+- **Голос:** в чат — от первого лица, на «ты», себя не называет. Досье (`summary` концептов, `about_user.md`) — описательно от 3-го лица. Промпты разнесены: `prompts/iuda.md` (персона: голос/характер/правила общения) + `base.md` (домены, концепты, формат JSON) + аддендумы `ask`/`process`; `about.md` отдельно; примеры стиля вопросов — `questions_examples.md` (`llm._system(kind)` = iuda + base + addendum + портрет).
 - **Capture-first:** live Qwen только захватывает — `process` отдаёт `observations` + `reaction` + `user_delta`; запись/идентичность (raw дословно, slug из имени, дедуп, верификация цитаты) на коде. Связи, реальные противоречия, промоушн `draft→stable`, profile, MOC — Claude раз в неделю (`weekly-review`).
 - **Портрет носителя** `about_user.md` (`bot/about.py`): live-дельты в frontmatter + журнал, инъекция в системный промпт; прозу 8 секций пишет weekly. `/about` показывает портрет словами.
 - **Команды:** `/ask /echo /ucho /about /requestion /history /pebble /start /help` + админ (`/adduser`/`/removeuser`/`/users`/`/dailyall`). `/history` — последние 25 главных вопросов (`bot/questions.py`). Индикатор «Думаю» — один стикер 🎰, только для `/ask` и `/about`.
@@ -335,7 +335,7 @@ PoC B техчасть считается принятой, когда:
 - E2E-сценарии не оформлены как `pytest` в `tests/smoke/` — гоняются ad-hoc через `docker compose run python <<...`.
 - `deploy.sh` отсутствует — для single-user покрыто `docker compose up -d`, но формально PoC B требует.
 - Двухфазный коммит ответа (`Session.pending_answer`) — поле введено, recovery-логика не доведена в handlers.
-- Промпты LLM (`prompts/system.md`) пока описывают старый формат концепта (H2-секции). LLM по-прежнему отдаёт data в виде JSON, который бот рендерит в callouts — но в идеале и сам промпт обновить под новый формат, чтобы LLM лучше «понимала» как читать существующие файлы.
+- Промпты LLM (`prompts/base.md` + `process.md`) пока описывают старый формат концепта (H2-секции). LLM по-прежнему отдаёт data в виде JSON, который бот рендерит в callouts — но в идеале и сам промпт обновить под новый формат, чтобы LLM лучше «понимала» как читать существующие файлы.
 - Бэкап-стратегия: сейчас полагаемся на git внутри vault + YandexDisk-history. До MVP A нужна явная стратегия (тест восстановления).
 
 ### Журнал изменений
@@ -347,7 +347,7 @@ PoC B техчасть считается принятой, когда:
 ## ai_pipeline
 
 - **Разделение труда (две модели, разные роли):**
-  - **Qwen 14B локально (live, в контейнере)** — захват: режимы `ask`, `process` (capture-first: только черновики + evidence, без связей/конфликтов), `review`, `summarize`. GPU `qwen2.5:14b-instruct` / CPU-fallback `qwen2.5:7b-instruct`. Режим `discuss` убран 2026-05-21.
+  - **Qwen 14B локально (live, в контейнере)** — захват: режимы `ask`, `process` (capture-first: только черновики + evidence, без связей/конфликтов) + `about_present` (портрет). GPU `qwen2.5:14b-instruct` / CPU-fallback `qwen2.5:7b-instruct`. Режимы `discuss`/`review`/`summarize` убраны.
   - **Сильная модель (Claude в Claude Code, вручную раз в неделю)** — сборка графа: скилл `weekly-review` (промоушн draft→stable, дедуп/слияние, связи, реальные противоречия, profile, MOC). Не в контейнере, запускается пользователем.
   - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → Qwen, temperature=0.
   - Embeddings → не используются (live-дедуп через slug+alias+Jaccard). Векторный дедуп/поиск (`nomic-embed-text` в Ollama) — кандидат на MVP A.
