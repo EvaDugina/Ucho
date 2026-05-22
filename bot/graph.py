@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -756,7 +756,7 @@ def _extract_callout(body: str, want_type: str) -> str:
         if ctype != want_type:
             continue
         # отрезаем хвостовую атрибуцию (для [!quote])
-        text_lines = [l for l in lines if not _QUOTE_ATTR_RE.match("> " + l)]
+        text_lines = [ln for ln in lines if not _QUOTE_ATTR_RE.match("> " + ln)]
         return "\n".join(text_lines).strip()
     return ""
 

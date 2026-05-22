@@ -23,7 +23,6 @@ from typing import Optional
 
 from . import userctx
 from .atomic import atomic_write_json
-from .config import VAULT_PATH
 
 log = logging.getLogger(__name__)
 

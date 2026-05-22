@@ -191,7 +191,7 @@ def render_for_prompt(max_chars: int = 1500) -> str:
     buf: list[str] = []
 
     def flush() -> None:
-        content = " ".join(l.strip() for l in buf if l.strip()).strip()
+        content = " ".join(ln.strip() for ln in buf if ln.strip()).strip()
         if title and content:
             sections.append(f"{title}: {content}")
 

@@ -129,7 +129,9 @@ def session_mood(trajectory: list[dict], prior: tuple[float, float] = (0.0, 0.0)
     for i, p in enumerate(traj):
         v, a = to_numeric(p)
         w = _RECENCY_DECAY ** (n - 1 - i)
-        vals.append(v); ars.append(a); weights.append(w)
+        vals.append(v)
+        ars.append(a)
+        weights.append(w)
     wsum = sum(weights) or 1.0
     v_rec = sum(v * w for v, w in zip(vals, weights)) / wsum
     a_rec = sum(a * w for a, w in zip(ars, weights)) / wsum
