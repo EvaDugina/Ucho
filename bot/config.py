@@ -38,6 +38,12 @@ ALLOWED_TELEGRAM_IDS = tuple(
 # только метаданные (uid, q_num, длины). DEBUG включать осознанно и не на проде.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
+# Мульти-методный анализ ответа (сравнение методов оценки настроения/состояния):
+# гоняется ТОЛЬКО для владельца, шлёт разбор перед основным ответом + пишет в
+# _analysis_log.jsonl. Это экспериментальный режим (OWNER-тестирование) — можно
+# выключить без пересборки. false → остаётся только базовый разбор настроения.
+ANALYSIS_ENABLED = os.getenv("ANALYSIS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
 DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")

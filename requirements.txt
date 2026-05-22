@@ -5,3 +5,9 @@
 # CPU, офлайн. Заменяет связку перевод(argos)→VADER. dicts-ru — словарная база.
 pymorphy3==2.0.2
 pymorphy3-dicts-ru==2.4.417150.4580142
+# Dostoevsky (тональность RuSentiment, провайдер анализа). Сам пакет ставится в
+# Dockerfile с --no-deps (его пин fasttext==0.9.2 не собирается на py3.12); вместо
+# него — готовые бинарники fasttext-wheel + токенизатор razdel. numpy<2 — fasttext.
+fasttext-wheel==0.9.2
+razdel==0.5.0
+numpy<2

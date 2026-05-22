@@ -363,6 +363,63 @@ async def classify_mood(answer: str, portrait: str = "", vad: Optional[dict] = N
     return moods.normalize_per_msg(data)
 
 
+def _clamp01(x) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(x))), 2)
+    except (TypeError, ValueError):
+        return 0.5
+
+
+async def analyze_psych(answer: str, history: Optional[list[dict]] = None) -> Optional[dict]:
+    """Оценка Big Five (OCEAN) + PANAS по сообщению В КОНТЕКСТЕ сессии (Qwen).
+
+    Один дешёвый классифицирующий вызов (низкая temp). Контекст сессии (history)
+    подаётся, чтобы черты опирались на накопленный диалог, а не на одну реплику.
+    Возвращает `{"ocean": {... 5 черт 0..1}, "panas": {pa, na 0..1}}` или None при сбое.
+    Это ИНСТРУМЕНТ СРАВНЕНИЯ (OWNER-тестирование), не приговор.
+    """
+    sys = (
+        "Ты психолингвистический классификатор. По последнему сообщению человека, "
+        "С УЧЁТОМ предыдущего контекста диалога, оцени его профиль и верни СТРОГО "
+        "JSON без текста снаружи. Все значения — числа 0..1.\n"
+        '{"ocean":{"openness":0.0,"conscientiousness":0.0,"extraversion":0.0,'
+        '"agreeableness":0.0,"neuroticism":0.0},"panas":{"positive_affect":0.0,'
+        '"negative_affect":0.0}}\n'
+        "- ocean — Big Five: openness (открытость опыту), conscientiousness "
+        "(добросовестность), extraversion (экстраверсия), agreeableness "
+        "(доброжелательность), neuroticism (нейротизм/тревожность). 0 — низко, 1 — высоко.\n"
+        "- panas — аффект сейчас: positive_affect (бодрость/интерес/энтузиазм), "
+        "negative_affect (тревога/раздражение/подавленность). 0..1 независимо друг от друга.\n"
+        "Оценивай осторожно: мало данных → значения ближе к 0.5. Только JSON."
+    )
+    messages: list[dict] = [{"role": "system", "content": sys}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": _fence_user(answer, "USER_ANSWER")})
+    try:
+        data = await _chat_json(messages, temperature=0.2)
+    except Exception:
+        log.exception("analyze_psych failed (non-fatal)")
+        return None
+    o = data.get("ocean") if isinstance(data, dict) else None
+    p = data.get("panas") if isinstance(data, dict) else None
+    if not isinstance(o, dict) or not isinstance(p, dict):
+        return None
+    return {
+        "ocean": {
+            "openness": _clamp01(o.get("openness")),
+            "conscientiousness": _clamp01(o.get("conscientiousness")),
+            "extraversion": _clamp01(o.get("extraversion")),
+            "agreeableness": _clamp01(o.get("agreeableness")),
+            "neuroticism": _clamp01(o.get("neuroticism")),
+        },
+        "panas": {
+            "positive_affect": _clamp01(p.get("positive_affect")),
+            "negative_affect": _clamp01(p.get("negative_affect")),
+        },
+    }
+
+
 async def about_present(portrait: str) -> str:
     """Показать пользователю его портрет (/about) — отформатированный текст от
     1-го лица. portrait — это render_for_prompt() (компактная опись). Plain text.

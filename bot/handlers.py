@@ -15,6 +15,7 @@ from aiogram.types import (
 
 from . import (
     about,
+    analysis,
     graph,
     lexicon,
     moods,
@@ -27,7 +28,7 @@ from . import (
     users,
     vault,
 )
-from .config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
+from .config import ALLOWED_TELEGRAM_IDS, ANALYSIS_ENABLED, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError
 from .llm import about_present, ask_next, classify_mood, process_answer
 from .services.answer_service import apply_processed
@@ -1008,13 +1009,22 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             mood_vec = moods.session_mood(s.mood_trajectory, about.baseline())
             bot_mood = moods.pick_bot_mood(mood_vec)
             about.set_mood(mood_vec, bot_mood)
-            # Настроенческий анализ — отдельным сообщением ПЕРЕД основным ответом.
-            # Не вопрос → шлём напрямую, мимо _send_question/qmap. Сбой отправки не
-            # должен ломать ход: bot_mood уже посчитан и пойдёт в process_answer.
+            # Разбор — отдельным сообщением ПЕРЕД основным ответом. Не вопрос →
+            # шлём напрямую, мимо _send_question/qmap. Сбой отправки не должен ломать
+            # ход: bot_mood уже посчитан и пойдёт в process_answer.
+            # ANALYSIS_ENABLED → мульти-методное сравнение (OWNER-тестирование);
+            # иначе — базовый разбор настроения.
             try:
-                await message.answer(_format_mood(mood_vec, bot_mood, vad))
+                if ANALYSIS_ENABLED:
+                    results = await analysis.run_all(
+                        text, s.history[:-1], mood_vec=mood_vec, vad=vad,
+                    )
+                    await message.answer(analysis.format_report(mood_vec, bot_mood, results))
+                    analysis.log_analysis(len(text), results)
+                else:
+                    await message.answer(_format_mood(mood_vec, bot_mood, vad))
             except Exception:
-                log.exception("mood report send failed (non-fatal)")
+                log.exception("analysis report failed (non-fatal)")
         except Exception:
             log.exception("mood detection failed (non-fatal)")
 
