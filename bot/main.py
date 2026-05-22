@@ -4,9 +4,9 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
-from . import handlers, selfcheck, session, userctx, users, vault
+from . import recovery, selfcheck, session, userctx, users, vault
 from .config import LOG_LEVEL, OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
-from .handlers import router
+from .handlers import admin_router, router
 from .middleware import AccessMiddleware
 from .scheduler import start_scheduler
 
@@ -80,6 +80,9 @@ async def main() -> None:
     dp = Dispatcher()
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
+    # admin_router ПЕРВЫМ: его Command-хэндлеры должны матчиться раньше catch-all
+    # on_text(F.text) в основном router.
+    dp.include_router(admin_router)
     dp.include_router(router)
 
     @dp.errors()
@@ -99,14 +102,14 @@ async def main() -> None:
     # затем лягут офлайн-сообщения. (Раньше был create_task — гонка с поллингом.)
     for uid in pending_uids:
         try:
-            await handlers.process_pending_on_startup(bot, uid)
+            await recovery.process_pending_on_startup(bot, uid)
         except Exception:
             log.exception("pending recovery failed for uid=%s", uid)
 
     # Сообщения, пришедшие пока контейнер лежал, — обработать склеенными в один
     # ответ (один итоговый комментарий), ДО старта обычного поллинга.
     try:
-        await handlers.process_offline_backlog(bot, dp)
+        await recovery.process_offline_backlog(bot, dp)
     except Exception:
         log.exception("offline backlog processing failed")
 
