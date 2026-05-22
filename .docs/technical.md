@@ -75,7 +75,9 @@
 - `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
 - `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
-- `prompts/system.md` + `prompts/review.md` + `prompts/summarize.md` + `prompts/seeds.md` — промпты под режимы `ask`/`process`/`review`/`summarize`. Несут **персону «Иуда из Кариота»** (характер — в формулировках вопросов/комментариев; JSON-контракт строгий, механика не меняется).
+- `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `review.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима + портрет. JSON-контракт строгий.
+- `bot/sessions.py` — кольцо последних 25 сессий (`_sessions.json`): `snapshot`/`load`/`find_by_message_id` для reply-resume.
+- `bot/about.py` — портрет пользователя (`about_user.md` + `_user_deltas.jsonl`): `apply_delta` (live), `render_for_prompt` (инъекция в системный промпт), `ensure`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
 - `scripts/migrate_to_multiuser.py` — одноразовый перенос корня владельца → `users/<owner>/` (dry-run + `--apply` под git_wrap, с post-верификацией). Выполнен; можно удалить.
 
@@ -85,18 +87,20 @@
 - **Raw-блок** (`raw/YYYY-MM-DD.md`): `## Q<N> · HH:MM · <domain>`, `**Q:** …`, `**A:** …`, `^Q<N>` block-id на отдельной строке.
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
-- **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history`, `pending_answer` (двухфазный коммит).
-- **QMap** (`_qmap.json`): список последних ≤50 заданных вопросов — `[{message_id, q_num, text, domain, answered, ts}]`. Кольцо (старое вытесняется). Резолвит reply (`find_by_message_id`) и `/answer N` (`find_by_q_num`); `answered` решает «исходный q_num vs Q-повтор».
-- **Контракт LLM `process`-режима (LLM только анализ — запись в БД делает код):**
+- **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history`, `pending_answer` (двухфазный коммит), `id` (uuid сессии) и `message_ids` (все сообщения бота сессии — для reply-resume).
+- **Sessions ring** (`_sessions.json`): кольцо последних ≤25 снапшотов сессий (`Session.to_dict()` каждый). `bot/sessions.py`: `snapshot`/`load`/`find_by_message_id`. Источник для reply-resume (reply на любое сообщение прошлой сессии её продолжает).
+- **QMap** (`_qmap.json`): список последних ≤50 реплик бота — `[{message_id, q_num, text, domain, answered, ts}]`. Кольцо. Резолвит `/answer N` (`find_by_q_num`) и реконструкцию из тела; reply-resume идёт через `sessions`, не qmap.
+- **About / портрет** (`about_user.md` + `_user_deltas.jsonl`): см. `bot/about.py` — досье человека (8 секций, описательно от 3-го лица), инъецируется в системный промпт; live-дельты копятся, проза переписывается weekly.
+- **Контракт LLM `process`-режима (LLM только анализ + реакция — запись в БД делает код):**
   ```json
   {
     "type": "processed",
     "observations": [{"domain": "ethics", "type": "principle", "name": "Нарушение слова", "summary": "...", "quote": "дословный фрагмент ответа"}],
-    "debate_message": "...",
-    "question_type": "concrete|hypothetical|comparison|emotional_anchor|challenge",
-    "close_session": false
+    "reaction": "реплика-укол от 1-го лица (НЕ вопрос)",
+    "user_delta": {"tone": "...", "trigger": "..."}
   }
   ```
+  Бот не задаёт уточняющих вопросов: на ответ — `reaction`, сессия остаётся открытой (модель открытого обсуждения; закрытие — новый вопрос/команда).
   LLM **не присылает** `slug`, `raw_entry`, `concepts_to_create/update`, связи — код их игнорирует. Идентичность/запись на коде: slug выводит `validation.slugify` из `name`, домен raw — из сессии, create-vs-update решает дедуп (`resolve_slug` по имени/slug + Jaccard), `quote` валидируется как дословная подстрока ответа. Граф (связи/конфликты) строит weekly-review.
 
 ---
@@ -261,6 +265,14 @@ PoC B техчасть считается принятой, когда:
 ## notes
 
 ### Active plans
+
+**Реализовано 2026-05-22 (модульные промпты + голос от 1-го лица + открытые сессии-реакции):**
+
+- **Промпты разбиты по режимам:** общий `prompts/base.md` (характер, голос **от первого лица, без самоназывания**, домены, концепты, формат) + `ask.md` / `process.md` / `review.md` / `summarize.md`. `system.md` удалён. `llm._system(kind)` собирает `base + addendum + портрет`; `ask_next→_system("ask")`, `process_answer→"process"`, `review_query→"review"`.
+- **Голос:** в чат всё от 1-го лица на «ты», себя не называет; досье (`summary`, `about_user.md`) — описательно от 3-го лица.
+- **Бот не задаёт уточняющих вопросов.** `process` отдаёт `reaction` (реплика-укол, не вопрос) вместо `debate_message`; убраны `MAX_CLARIFIERS`/клариферы/авто-`summarize`. Модель диалога: главный вопрос открывает сессию → на каждый ответ реакция → сессия открыта, пока не задан новый вопрос или **любая команда** (закрытие в `AccessMiddleware`).
+- **Reply-resume:** `Session` получил `id`+`message_ids`; новый `bot/sessions.py` — кольцо 25 снапшотов; reply на любое сообщение прошлой сессии её продолжает (`session.resume`). `session.close()`/`start`/`resume` снапшотят в кольцо.
+- **Портреты пользователей** (`about_user.md`) заполнены вручную (синтез как weekly-шаг) для существующих пользователей; weekly LINT усилен (проза не пуста, без утечки 1-го лица).
 
 **Реализовано 2026-05-21 (надёжность ответов: реконструкция reply + салвейдж текста + анти-долбёжка):**
 
