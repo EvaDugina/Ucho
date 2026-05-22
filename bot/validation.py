@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 
@@ -176,6 +177,23 @@ def safe_question_text(raw: str) -> str:
     s = re.sub(r"\n+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def safe_chat_html(text: str) -> str:
+    """Текст ОТ LLM для показа в Telegram с ``parse_mode='HTML'``.
+
+    Гарантия: что бы модель ни сгенерировала — HTML-теги, markdown, фрагмент
+    «кода» — Telegram покажет это как ОБЫЧНЫЙ ТЕКСТ и не интерпретирует как
+    разметку. Экранируем ``& < >`` (``html.escape``) и выкидываем control-символы
+    (кроме ``\\n``/``\\t``). Вывод LLM нигде в пайплайне не исполняется — только
+    пишется в файлы (через safe_*-санитайзеры) или показывается (через эту
+    функцию). Никаких eval/exec/инструментов у модели нет.
+    """
+    if not text:
+        return ""
+    s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    s = "".join(ch for ch in s if ch == "\n" or ch == "\t" or (ord(ch) >= 0x20 and ord(ch) != 0x7f))
+    return html.escape(s)
 
 
 def escape_raw_block(text: str) -> str:

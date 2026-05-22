@@ -21,6 +21,7 @@ from .llm import about_present, ask_next, process_answer
 from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
+    safe_chat_html,
     safe_user_text,
     slugify,
 )
@@ -207,7 +208,9 @@ async def _send_question(
     просто речь от первого лица.
     """
     if plain:
-        body = html.escape(text)
+        # Реакция/реплика от LLM: экранируем и нормализуем — любой «код»/разметка
+        # от модели уходит как обычный текст, Telegram его не интерпретирует.
+        body = safe_chat_html(text)
     else:
         body = _format_q(q_num, mode, domain, text)
     if suffix:
@@ -703,16 +706,27 @@ async def cmd_dailyall(message: Message, bot: Bot) -> None:
 async def cmd_ask(message: Message, command: CommandObject) -> None:
     if not _is_allowed(message):
         return
-    domain = (command.args or "").strip().lower() or None
-    if domain and not is_valid_telegram_command_arg(domain, max_len=50):
-        await message.answer("Аргумент не валиден.")
-        return
-    if domain and domain not in DOMAINS:
-        await message.answer(f"Не знаю тему «{domain}». Доступны: {', '.join(DOMAINS)}.")
-        return
-    if domain is None:
+    arg = (command.args or "").strip()
+    if not arg:
+        # Голый /ask — выбор темы кнопками.
         await message.answer("Выбери тему:", reply_markup=_ask_keyboard())
         return
+
+    domain: str | None = None
+    hint: str | None = None
+    if arg.lower() in DOMAINS:
+        # /ask <домен> — вопрос внутри названной темы.
+        domain = arg.lower()
+    else:
+        # /ask <свободный текст> — затравка/контекст для генерации вопроса; домен
+        # LLM подберёт сам. Текст санитизируем как пользовательский ввод.
+        hint, truncated = safe_user_text(arg, limit=2000)
+        if not hint:
+            await message.answer("Использование: /ask [тема или о чём спросить]")
+            return
+        if truncated:
+            await message.answer("⚠ Затравка была слишком длинной — обрезал.")
+
     uid = userctx.current_uid()
     if not ratelimit.try_acquire(uid):
         await message.answer(ratelimit.BUSY_MESSAGE)
@@ -720,7 +734,9 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
     try:
         session.start(mode="probe", domain=domain)
         _anchor_user_cmd(message)
-        await _send_next_question(message.bot, message.chat.id, domain=domain, show_thinking=True)
+        await _send_next_question(
+            message.bot, message.chat.id, domain=domain, hint=hint, show_thinking=True,
+        )
     finally:
         ratelimit.release(uid)
 
@@ -897,13 +913,16 @@ async def cmd_about(message: Message) -> None:
     await _stop_thinking(thinking)
     if not text:
         text = "Пока сказать почти нечего."
+    # Вывод LLM экранируем перед нарезкой — портрет уходит как обычный текст
+    # (parse_mode=HTML + html.escape), любой «код»/разметка не интерпретируется.
+    text = safe_chat_html(text)
     chunks = _split_for_telegram(text)
     for chunk in chunks[:-1]:
-        sent = await message.answer(chunk)
+        sent = await message.answer(chunk, parse_mode="HTML")
         s = session.get()
         if s is not None and sent is not None:
             s.add_message_id(int(sent.message_id))
-    await _session_reply(message, chunks[-1], anchor="(твой портрет)")
+    await _session_reply(message, chunks[-1], anchor="(твой портрет)", parse_mode="HTML")
 
 
 async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None = None) -> None:
@@ -1238,16 +1257,18 @@ async def _send_next_question(
     chat_id: int,
     domain: str | None = None,
     *,
+    hint: str | None = None,
     show_thinking: bool = False,
 ) -> None:
     s = session.get()
     if s is None:
         s = session.start(mode="probe", domain=domain)
 
-    # Если домен не указан — выбираем случайно из 10 (равномерно).
-    # Это даёт честное покрытие всех тем вместо того, чтобы LLM сам выбирал
-    # любимые домены при mode="ask domain=any".
-    if domain is None:
+    # Если домен не указан — выбираем случайно из 10 (равномерно). Это даёт честное
+    # покрытие всех тем вместо того, чтобы LLM сам выбирал любимые домены при
+    # domain=any. Но при наличии hint домен НЕ форсируем: LLM подберёт его под
+    # затравку человека (иначе случайный домен противоречил бы запросу).
+    if domain is None and hint is None:
         domain = random.choice(DOMAINS)
         log.info("random domain selected for main question: %s", domain)
 
@@ -1271,6 +1292,7 @@ async def _send_next_question(
             domain=_real_domain(domain),
             context_concepts="",
             recent_raw="",
+            hint=hint,
             mode=s.mode,
         )
     except Exception:
