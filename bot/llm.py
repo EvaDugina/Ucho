@@ -1,9 +1,10 @@
 """Обёртка над openai-совместимым API (Ollama).
 
-Три функции под три mode из system-prompt:
-- ask_next      → mode: ask
-- process_answer → mode: process
-- review_query  → mode: review
+Функции по режимам system-prompt:
+- ask_next        → mode: ask (главный вопрос)
+- process_answer  → mode: process (разбор ответа + реакция)
+- about_present   → отдельный промпт about.md (показать портрет)
+- summarize_session → отдельный промпт summarize.md (закрывающая реплика)
 """
 import json
 import logging
@@ -36,10 +37,10 @@ _client = AsyncOpenAI(
 # Промпты разбиты по режимам: общий base + addendum под каждый kind.
 _base_prompt = (PROMPTS_DIR / "base.md").read_text(encoding="utf-8")
 _summarize_prompt = (PROMPTS_DIR / "summarize.md").read_text(encoding="utf-8")
+_about_prompt = (PROMPTS_DIR / "about.md").read_text(encoding="utf-8")
 _MODE_PROMPTS = {
     "ask": (PROMPTS_DIR / "ask.md").read_text(encoding="utf-8"),
     "process": (PROMPTS_DIR / "process.md").read_text(encoding="utf-8"),
-    "review": (PROMPTS_DIR / "review.md").read_text(encoding="utf-8"),
 }
 
 
@@ -182,20 +183,17 @@ async def summarize_session(main_question: str, exchanges: list[dict]) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-async def review_query(query: str, catalog: str, history: Optional[list[dict]] = None) -> dict:
-    """Ответ на свободный запрос про базу. Returns {'type', 'answer', 'suggested_additions'}."""
-    user_msg = "\n\n".join([
-        "mode: review",
-        f"query: {query}",
-        f"catalog:\n{catalog or '(база пуста)'}",
-    ])
-
-    messages = [{"role": "system", "content": _system("review")}]
-    if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_msg})
-
-    data = await _chat_json(messages, temperature=0.4)
-    data.setdefault("answer", "")
-    data.setdefault("suggested_additions", [])
-    return data
+async def about_present(portrait: str) -> str:
+    """Показать пользователю его портрет (/about) — отформатированный текст от
+    1-го лица. portrait — это render_for_prompt() (компактная опись). Plain text.
+    """
+    messages = [
+        {"role": "system", "content": _about_prompt},
+        {"role": "user", "content": f"Портрет (твоя опись этого человека):\n{portrait}\n\nПокажи мне, каким ты меня видишь."},
+    ]
+    resp = await _client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=0.5,
+    )
+    return (resp.choices[0].message.content or "").strip()

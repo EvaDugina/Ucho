@@ -14,10 +14,10 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from . import about, graph, moc, qmap, ratelimit, session, sessions, userctx, users, vault
+from . import about, graph, moc, qmap, questions, ratelimit, session, sessions, userctx, users, vault
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .graph import Concept, Evidence
-from .llm import ask_next, process_answer, review_query, summarize_session
+from .llm import about_present, ask_next, process_answer
 from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
@@ -59,9 +59,12 @@ class AccessMiddleware(BaseMiddleware):
             users.set_consent(uid)
         # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
         # её можно продолжить reply на любое её сообщение). Команды-открыватели
-        # (/ask, /echo, /requestion, /review) затем заведут новую.
+        # (/ask, /echo, /requestion, /about) затем заведут новую.
+        # ИСКЛЮЧЕНИЕ — /pebble: проверка живости, не должна трогать сессию и
+        # прерывать генерацию реакции (см. cmd_pebble).
         if isinstance(event, Message) and (event.text or "").startswith("/"):
-            if session.close():
+            cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
+            if cmd != "pebble" and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)
 
@@ -214,6 +217,9 @@ async def _send_question(
         qmap.append(sent.message_id, q_num, text, domain)
     except Exception:
         log.exception("failed to record question in qmap (q_num=%s)", q_num)
+    # Главный вопрос (не реакция) → в кольцо вопросов для /history.
+    if not plain:
+        questions.record(q_num, domain, text)
     s = session.get()
     if s is not None:
         try:
@@ -249,6 +255,46 @@ def _open_anchored_session(entry: dict) -> None:
     s.record_assistant(text)
 
 
+def _anchor_user_cmd(message: Message) -> None:
+    """Записать сообщение-команду пользователя как первое в активной сессии.
+
+    Команда открывает сессию-обсуждение — её первое сообщение это команда
+    пользователя. Нужно, чтобы reply на любое сообщение этой сессии (в т.ч. на
+    саму команду) её резюмировал (см. reply-resume / `bot/sessions.py`).
+    """
+    s = session.get()
+    mid = getattr(message, "message_id", None)
+    if s is not None and mid:
+        s.add_message_id(int(mid))
+
+
+async def _session_reply(
+    message: Message,
+    text: str,
+    *,
+    anchor: str | None = None,
+    domain: str | None = None,
+    set_anchor: bool = True,
+    **answer_kw,
+) -> Message | None:
+    """Ответ команды В РАМКАХ активной сессии: записать message_id бота (для
+    reply-resume) и (если ``set_anchor``) сделать текст/``anchor`` якорем
+    следующего хода — тогда reply/продолжение пойдёт как обычный ответ → реакция.
+    """
+    sent = await message.answer(text, **answer_kw)
+    s = session.get()
+    if s is None:
+        return sent
+    if sent is not None and getattr(sent, "message_id", None):
+        s.add_message_id(int(sent.message_id))
+    if set_anchor:
+        dom = domain if domain in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
+        a = anchor if anchor is not None else text
+        session.set_question(a, dom, q_num=vault.next_q_num())
+        s.record_assistant(a)
+    return sent
+
+
 async def _accept_user_text(message: Message, raw: str) -> str | None:
     """Принять текст пользователя для записи/обработки.
 
@@ -271,37 +317,34 @@ async def _accept_user_text(message: Message, raw: str) -> str | None:
 
 # ---------- thinking / spinner ----------
 
-_THINKING_EMOJIS = ("🎰", "🎲", "🎯")
+# Один и тот же стикер всегда — 🎰 (slot-machine dice). Не выбираем случайно.
+_THINKING_EMOJI = "🎰"
 
 
-def _thinking_token() -> str:
-    return random.choice(_THINKING_EMOJIS)
+async def _start_thinking_chat(bot: Bot, chat_id: int) -> Message | None:
+    """Индикатор «думаю» по bot+chat_id: один стикер 🎰 + удаляемый текст «Думаю.».
 
-
-async def _start_thinking(message: Message, text: str | None = None) -> Message | None:
-    """Послать индикатор «думаю».
-
-    Гибрид: dice-стикер (анимация, Telegram запрещает его удалять) + текстовый
-    placeholder «…» (его удалим, когда ответ готов). Возвращает Message текстового
-    placeholder для последующего удаления — dice остаётся в чате как маркер
-    «здесь был ход размышления».
+    Стикер 🎰 (dice) Telegram удалять не даёт — остаётся как маркер хода мысли;
+    возвращаем Message текстового «Думаю.» для последующего удаления.
+    Показывается ТОЛЬКО при генерации главного вопроса (/ask) и портрета (/about).
     """
-    emoji = text if text in _THINKING_EMOJIS else _thinking_token()
     try:
-        await message.bot.send_chat_action(message.chat.id, "typing")
+        await bot.send_chat_action(chat_id, "typing")
     except Exception:
         pass
-    # 1. Анимированный dice — sendDice. Удалить нельзя, но анимация играет.
     try:
-        await message.answer_dice(emoji=emoji)
+        await bot.send_dice(chat_id, emoji=_THINKING_EMOJI)
     except Exception:
         log.exception("failed to send dice indicator")
-    # 2. Удаляемый текстовый placeholder.
     try:
-        return await message.answer("Думаю.")
+        return await bot.send_message(chat_id, "Думаю.")
     except Exception:
         log.exception("failed to send thinking placeholder")
         return None
+
+
+async def _start_thinking(message: Message) -> Message | None:
+    return await _start_thinking_chat(message.bot, message.chat.id)
 
 
 async def _stop_thinking(thinking: Message | None) -> None:
@@ -353,15 +396,6 @@ def _recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
 def _context_for_domain(domain: str | None) -> str:
     concepts = graph.find_concepts(domain=domain, limit=30)
     return graph.context_snapshot(concepts)
-
-
-def _catalog_text(max_chars: int = 12000) -> str:
-    items = graph.all_slugs()
-    if not items:
-        return "(база пуста)"
-    lines = [f"- [{x['domain']}] {x['slug']} ({x['name']}): {x['summary']}" for x in items]
-    text = "\n".join(lines)
-    return text[:max_chars]
 
 
 def _apply_processed(
@@ -517,26 +551,22 @@ def _apply_processed_inner(
 # ---------- commands ----------
 
 
-# Тело help собирается в cmd_help: основные секции → [Админ, если владелец] →
-# футер. Так блок «Админ» оказывается сразу после «Сервис», перед футером.
+# Тело help собирается в cmd_help: основные группы → [Админ, если владелец] →
+# /pebble → футер.
 _HELP_BODY = (
     "<b>Ухо</b> — карта узоров, которые я слышу.\n"
     "\n"
     "<b>Спросить себя</b>\n"
-    "<b>/ask</b> <i>[тема]</i> — вопрос; без темы покажу кнопки\n"
     "<b>/echo</b> <i>&lt;вопрос&gt;</i> — твой собственный вопрос\n"
-    "<b>/requestion</b> <i>N</i> — повторить вопрос №N\n"
-    "<b>/answer</b> <i>N &lt;текст&gt;</i> — ответить на вопрос №N (или reply на него)\n"
-    "\n"
-    "<b>Заметки и база</b>\n"
     "<b>/ucho</b> <i>&lt;текст&gt;</i> — свободная заметка → в граф\n"
-    "<b>/review</b> — разговор о своей базе знаний\n"
-    "<b>/history</b> — вся история вопросов и ответов\n"
+    "<b>/ask</b> <i>[тема]</i> — вопрос; без темы покажу кнопки\n"
+    "<b>/requestion</b> <i>N</i> — повторить выбранный вопрос №N\n"
+    "<b>/about</b> — каким я тебя вижу\n"
     "\n"
     "<b>Сервис</b>\n"
-    "<b>/pebble</b> — бот жив? → «буль.»\n"
     "<b>/start</b> — смыв: закрыть сессию (данные целы)\n"
-    "<b>/help</b> — этот список"
+    "<b>/help</b> — этот список\n"
+    "<b>/history</b> — последние вопросы"
 )
 
 _HELP_ADMIN = (
@@ -547,9 +577,13 @@ _HELP_ADMIN = (
     "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас"
 )
 
+_HELP_PEBBLE = "<b>/pebble</b> — бросить камень → «буль.»"
+
 _HELP_FOOTER = (
     f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
-    "Раз в день пришлю вопрос сам."
+    "На любое моё сообщение можно ответить через <b>reply</b> (смахни сообщение) — "
+    "продолжим с того места.\n"
+    "Я сам настигну тебя вопросом."
 )
 
 
@@ -575,7 +609,8 @@ async def cmd_help(message: Message) -> None:
         return
     parts = [_HELP_BODY]
     if _is_owner(message):
-        parts.append(_HELP_ADMIN)  # сразу после «Сервис», перед футером
+        parts.append(_HELP_ADMIN)  # после основных групп
+    parts.append(_HELP_PEBBLE)     # /pebble — отдельной группой, после админских
     parts.append(_HELP_FOOTER)
     await message.answer("\n\n".join(parts), parse_mode="HTML")
 
@@ -684,7 +719,8 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
         return
     try:
         session.start(mode="probe", domain=domain)
-        await _send_next_question(message.bot, message.chat.id, domain=domain)
+        _anchor_user_cmd(message)
+        await _send_next_question(message.bot, message.chat.id, domain=domain, show_thinking=True)
     finally:
         ratelimit.release(uid)
 
@@ -715,45 +751,33 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         return
     try:
         session.start(mode="probe", domain=domain)
-        await _send_next_question(callback.bot, chat_id, domain=domain)
+        await _send_next_question(callback.bot, chat_id, domain=domain, show_thinking=True)
     finally:
         ratelimit.release(uid)
 
 
-@router.message(Command("review"))
-async def cmd_review(message: Message) -> None:
-    if not _is_allowed(message):
-        return
-    session.start(mode="review")
-    await message.answer(
-        "Режим /review. Спрашивай по своей базе — найду концепты, обсудим связи и противоречия.\n"
-        "Закрыть: /start (смыв)."
-    )
-
-
 @router.message(Command("history"))
 async def cmd_history(message: Message) -> None:
+    """Последние 25 ГЛАВНЫХ вопросов (без ответов, без реакций/якорей).
+    Свою сессию НЕ открывает (закрыта middleware) — сообщение после /history без
+    reply уйдёт как /ucho."""
     if not _is_allowed(message):
         return
-    entries = vault.iter_history()
-    if not entries:
+    items = questions.recent(25)
+    if not items:
         await message.answer("История пуста. /ask чтобы начать.")
         return
-    lines = [f"📜 История: {len(entries)} вопрос(ов).", ""]
-    for e in entries:
-        q = e["question"]
-        a = e["answer"]
-        if len(q) > 180:
-            q = q[:180].rstrip() + "…"
-        if len(a) > 180:
-            a = a[:180].rstrip() + "…"
-        lines.append(f"*Q{e['n']}* · {e['date']} {e['time']} · {e['domain']}")
+    lines = [f"📜 Последние вопросы: {len(items)}.", ""]
+    for e in items:
+        q = e.get("text", "")
+        if len(q) > 200:
+            q = q[:200].rstrip() + "…"
+        ts = (e.get("ts") or "").replace("T", " ")[:16]
+        lines.append(f"*Q{e.get('n')}* · {ts} · {e.get('domain', '')}")
         lines.append(f"❓ {q}")
-        lines.append(f"💬 {a}")
         lines.append("")
     lines.append("Повторить вопрос: /requestion N")
-    text = "\n".join(lines)
-    for chunk in _split_for_telegram(text):
+    for chunk in _split_for_telegram("\n".join(lines)):
         await message.answer(chunk)
 
 
@@ -781,6 +805,7 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
     s = session.get()
     if s is None:  # на всякий случай
         return
+    _anchor_user_cmd(message)
     session.set_question(entry["question"], entry["domain"], q_num=new_n)
     s.main_question = entry["question"]
     s.main_q_num = new_n
@@ -792,49 +817,6 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
         q_num=new_n, mode="probe", domain=entry["domain"], text=entry["question"],
         suffix=f"\n<i>(повтор Q{n})</i>",
     )
-
-
-@router.message(Command("answer"))
-async def cmd_answer(message: Message, command: CommandObject) -> None:
-    """Ответить на ранее заданный вопрос Q<N> прямо в команде: `/answer N текст`.
-
-    Резолв N — по карте qmap (она держит и неотвеченные вопросы, которых нет в
-    raw). Открывает probe-сессию, заякоренную на Q<N>, и сразу прогоняет текст
-    как ответ. Только инлайн: без текста — подсказка.
-    """
-    if not _is_allowed(message):
-        return
-    arg = (command.args or "").strip()
-    parts = arg.split(maxsplit=1)
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Использование: /answer N <текст ответа>. Номер — из /history.")
-        return
-    try:
-        n = int(parts[0])
-    except ValueError:
-        await message.answer("Использование: /answer N <текст ответа>. Номер — из /history.")
-        return
-    if n <= 0 or n > 10**9:
-        await message.answer("Номер вне разумного диапазона.")
-        return
-    answer_text = parts[1].strip()
-    entry = qmap.find_by_q_num(n)
-    if entry is None:
-        await message.answer(
-            f"Q{n} не помню (вытеснен из недавних или не задавался). "
-            "/history покажет доступные, /requestion N задаст его заново."
-        )
-        return
-    uid = userctx.current_uid()
-    if not ratelimit.try_acquire(uid):
-        await message.answer(ratelimit.BUSY_MESSAGE)
-        return
-    try:
-        _open_anchored_session(entry)
-        await _handle_probe(message, answer_text)
-        vault.commit_all("answer")
-    finally:
-        ratelimit.release(uid)
 
 
 @router.message(Command("echo"))
@@ -858,6 +840,7 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
     s = session.get()
     if s is None:
         return
+    _anchor_user_cmd(message)
     session.set_question(text, USER_DOMAIN, q_num=new_n)
     s.main_question = text
     s.main_q_num = new_n
@@ -872,10 +855,55 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
-    """Бросить камушек: если бот жив — отвечает «буль.». Никакого LLM-вызова."""
+    """Бросить камень: бот жив → «буль.». Прозрачен для сессии — НЕ открывает и
+    НЕ закрывает её (исключён из close-on-command в AccessMiddleware), чтобы можно
+    было проверить бота, пока ждёшь реакцию, и эта реакция не оборвалась."""
     if not _is_allowed(message):
         return
     await message.answer("буль.")
+
+
+@router.message(Command("about"))
+async def cmd_about(message: Message) -> None:
+    """Показать пользователю его портрет (about_user.md) — отформатированный
+    отдельным промптом текст от 1-го лица. Пусто → честно скажем, что рано."""
+    if not _is_allowed(message):
+        return
+    # /about открывает сессию-обсуждение: можно ответить (reply) на портрет.
+    session.start(mode="probe", domain=None)
+    _anchor_user_cmd(message)
+    portrait = about.render_for_prompt(max_chars=4000)
+    if not portrait:
+        await _session_reply(
+            message,
+            "Я тебя ещё толком не распробовал — поговори со мной (/ask), и портрет нарастёт.",
+            anchor="(твой портрет)",
+        )
+        return
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    thinking = await _start_thinking(message)
+    try:
+        text = await about_present(portrait)
+    except Exception:
+        log.exception("about_present failed")
+        await _stop_thinking(thinking)
+        await message.answer("Не вышло собрать портрет словами. Попробуй позже.")
+        return
+    finally:
+        ratelimit.release(uid)
+    await _stop_thinking(thinking)
+    if not text:
+        text = "Пока сказать почти нечего."
+    chunks = _split_for_telegram(text)
+    for chunk in chunks[:-1]:
+        sent = await message.answer(chunk)
+        s = session.get()
+        if s is not None and sent is not None:
+            s.add_message_id(int(sent.message_id))
+    await _session_reply(message, chunks[-1], anchor="(твой портрет)")
 
 
 async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None = None) -> None:
@@ -893,6 +921,10 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
         await message.answer(ratelimit.BUSY_MESSAGE)
         return
     try:
+        # Заметка тоже открывает сессию-обсуждение (как /ucho): первое сообщение —
+        # сообщение пользователя; на reply/продолжение пойдёт обычная реакция.
+        session.start(mode="probe", domain=None)
+        _anchor_user_cmd(message)
         # 1. Verbatim в notes/ (человеческий скрэтчпад).
         when = datetime.now()
         try:
@@ -905,7 +937,7 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
         q_num = vault.next_q_num()
         note_question = "(свободная заметка)"
         context_concepts = _context_for_domain(None)
-        thinking = await _start_thinking(message)
+        # /ucho — без индикатора «Думаю» (он только для /ask и /about).
         try:
             result = await process_answer(
                 question=note_question,
@@ -917,11 +949,13 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
             )
         except Exception:
             log.exception("process_answer failed in note ingest")
-            await _stop_thinking(thinking)
             prefix = (note_prefix + ". ") if note_prefix else ""
-            await message.answer(f"{prefix}Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.")
+            await _session_reply(
+                message,
+                f"{prefix}Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.",
+                anchor=clean,
+            )
             return
-        await _stop_thinking(thinking)
 
         created = updated = 0
         try:
@@ -930,9 +964,12 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
             log.exception("apply_processed failed in note ingest")
         vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
         prefix = (note_prefix + ". ") if note_prefix else ""
-        await message.answer(
+        # Якорь обсуждения — текст заметки: продолжение пойдёт как ответ → реакция.
+        await _session_reply(
+            message,
             f"{prefix}Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
-            f"В граф: +{created} новых, ~{updated} обновлено."
+            f"В граф: +{created} новых, ~{updated} обновлено.",
+            anchor=clean,
         )
     finally:
         ratelimit.release(uid)
@@ -1026,27 +1063,6 @@ async def on_text(message: Message) -> None:
             )
         return
 
-    # /review: подтверждение предложенных добавлений
-    if s.mode == "review" and s.pending_review_additions and text.lower() in {"да", "yes", "ок", "+"}:
-        await _commit_review_additions(message)
-        return
-    if s.mode == "review" and s.pending_review_additions and text.lower() in {"нет", "no", "-"}:
-        s.pending_review_additions = []
-        session.persist()
-        await message.answer("Ок, не записал.")
-        return
-
-    if s.mode == "review":
-        uid = userctx.current_uid()
-        if not ratelimit.try_acquire(uid):
-            await message.answer(ratelimit.BUSY_MESSAGE)
-            return
-        try:
-            await _handle_review(message, text)
-        finally:
-            ratelimit.release(uid)
-        return
-
     # probe
     if not s.last_question:
         await message.answer("Сначала вопрос. Напиши /ask.")
@@ -1087,7 +1103,7 @@ async def _handle_probe(message: Message, text: str) -> None:
     real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
     context_concepts = _context_for_domain(real_hint)
 
-    thinking = await _start_thinking(message)
+    # Реакция считается молча (Q1: тишина) — без индикатора «Думаю».
     try:
         result = await process_answer(
             question=s.last_question,
@@ -1099,10 +1115,8 @@ async def _handle_probe(message: Message, text: str) -> None:
         )
     except Exception:
         log.exception("process_answer failed")
-        await _stop_thinking(thinking)
         await message.answer("Не получилось разобрать ответ. Сформулируй ещё раз или /start (смыв).")
         return
-    await _stop_thinking(thinking)
 
     try:
         _apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
@@ -1216,85 +1230,6 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         log.exception("recovery: failed to send reaction")
 
 
-async def _handle_review(message: Message, text: str) -> None:
-    s = session.get()
-    if s is None:
-        return
-    clean = await _accept_user_text(message, text)
-    if clean is None:
-        return
-    text = clean
-    s.record_user(text)
-    thinking = await _start_thinking(message)
-    try:
-        result = await review_query(
-            query=text,
-            catalog=_catalog_text(),
-            history=s.history[:-1],
-        )
-    except Exception:
-        log.exception("review_query failed")
-        await _stop_thinking(thinking)
-        await message.answer("Не получилось обработать запрос. Переформулируй или /start (смыв).")
-        return
-    await _stop_thinking(thinking)
-
-    answer = (result.get("answer") or "").strip() or "Не нашёл связного ответа в базе."
-    s.record_assistant(answer)
-    for chunk in _split_for_telegram(answer):
-        await message.answer(chunk)
-
-    additions = result.get("suggested_additions") or []
-    if additions:
-        s.pending_review_additions = additions
-        session.persist()
-        names = ", ".join(a.get("name") or a.get("slug") or "?" for a in additions)
-        await message.answer(f"Заметил новое: {names}.\nДобавить в базу? `да` / `нет`.")
-
-
-async def _commit_review_additions(message: Message) -> None:
-    s = session.get()
-    if s is None or not s.pending_review_additions:
-        return
-    asked_at = datetime.now()
-    raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}|review]]"
-    now_str = asked_at.strftime("%Y-%m-%d %H:%M")
-    added = 0
-    additions = list(s.pending_review_additions)
-    touched: set[str] = set()
-    try:
-        with vault.git_wrap("review_additions"):
-            for a in additions:
-                try:
-                    target_domain = a.get("domain", "everyday")
-                    if target_domain not in DOMAINS:
-                        target_domain = "everyday"
-                    concept = Concept(
-                        slug=a["slug"],
-                        name=a.get("name", a["slug"]),
-                        type=a.get("type", "claim"),
-                        domain=target_domain,
-                        summary=a.get("summary", ""),
-                        status="tentative",
-                        evidence=[Evidence(when=now_str, text=a.get("evidence", ""), raw_ref=raw_ref)],
-                    )
-                    if graph.save_concept(concept) is not None:
-                        added += 1
-                        touched.add(target_domain)
-                except Exception:
-                    log.exception("failed to add concept from review: %r", a)
-            for d in touched:
-                try:
-                    moc.rebuild_domain_moc(d)
-                except Exception:
-                    log.exception("failed to rebuild MOC for domain %s", d)
-    except Exception:
-        log.exception("review_additions transaction failed")
-    s.pending_review_additions = []
-    session.persist()
-    await message.answer(f"Записал {added} концептов.")
-
-
 # ---------- scheduler / ask helpers ----------
 
 
@@ -1302,6 +1237,8 @@ async def _send_next_question(
     bot: Bot,
     chat_id: int,
     domain: str | None = None,
+    *,
+    show_thinking: bool = False,
 ) -> None:
     s = session.get()
     if s is None:
@@ -1314,13 +1251,16 @@ async def _send_next_question(
         domain = random.choice(DOMAINS)
         log.info("random domain selected for main question: %s", domain)
 
-    # Никаких сообщений-индикаторов: пользователь должен получить РОВНО одно
-    # сообщение — сам вопрос. Активность показываем нативным «печатает…»
-    # (send_chat_action не создаёт сообщения и гаснет сам).
-    try:
-        await bot.send_chat_action(chat_id, "typing")
-    except Exception:
-        pass
+    # Индикатор «Думаю» (🎰 + текст) — только для /ask (show_thinking=True).
+    # Дневной вопрос молчит: лишь нативное «печатает…», ровно одно сообщение-вопрос.
+    thinking = None
+    if show_thinking:
+        thinking = await _start_thinking_chat(bot, chat_id)
+    else:
+        try:
+            await bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
 
     try:
         # Главный вопрос (/ask, дневной) генерим НЕ опираясь на текущую базу:
@@ -1335,9 +1275,11 @@ async def _send_next_question(
         )
     except Exception:
         log.exception("ask_next failed")
+        await _stop_thinking(thinking)
         await bot.send_message(chat_id, "Не вышло сформулировать вопрос. Попробуй ещё раз.")
         session.clear()
         return
+    await _stop_thinking(thinking)
 
     q_num = vault.next_q_num()
     session.set_question(result["question"], result["domain"], q_num=q_num)
