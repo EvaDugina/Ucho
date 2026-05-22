@@ -3,7 +3,7 @@
 ## brunelleschi_stage
 
 - **Стадия:** POC B
-- **Последнее обновление:** 2026-05-22
+- **Последнее обновление:** 2026-05-23
 
 ---
 
@@ -120,15 +120,25 @@ Psycho/
 ├── bot/                    Telegram-бот + ядро
 │   ├── main.py             точка входа
 │   ├── config.py           env, домены, пути
-│   ├── handlers.py         маршруты команд + _apply_processed
-│   ├── llm.py              обёртка над Ollama (ask/process/about)
+│   ├── handlers.py         маршруты команд + оркестрация ответа
+│   ├── middleware.py       AccessMiddleware (whitelist + userctx на update)
+│   ├── recovery.py         старт: pending-recovery + офлайн-бэклог
+│   ├── errors.py           иерархия исключений (Psycho/LLM/Vault/Validation)
+│   ├── llm.py              обёртка над Ollama (ask/process/about/classify_mood/analyze_psych)
+│   ├── services/
+│   │   └── answer_service.py  запись observations в граф (дедуп/MOC/git_wrap)
 │   ├── graph.py            Concept dataclass + рендер/парсер + dedup/resolve
 │   ├── vault.py            git_wrap, log, layout, raw, state
-│   ├── session.py          активная сессия с persistence (id, message_ids)
+│   ├── session.py          активная сессия с persistence (+ mood_trajectory)
 │   ├── sessions.py         кольцо последних 25 сессий (reply-resume)
 │   ├── questions.py        кольцо заданных главных вопросов (/history)
 │   ├── about.py            портрет носителя (personality/about.md + дельты)
 │   ├── mood_file.py        живой черновик настроения (personality/mood.md)
+│   ├── moods.py            шкала PAD + лица Иуды + session_mood/pick_bot_mood
+│   ├── lexicon.py          NRC-VAD (valence/arousal/dominance) по словам
+│   ├── emolex.py           NRC-EmoLex (эмоции Плутчика) по словам
+│   ├── sentiment_dvk.py    Dostoevsky-тональность (graceful-optional)
+│   ├── analysis.py         мульти-методный разбор (OWNER) + timeseries + график
 │   ├── qmap.py             карта message_id→вопрос
 │   ├── userctx.py          request-scoped текущий пользователь
 │   ├── users.py            whitelist + роли + consent
@@ -138,18 +148,18 @@ Psycho/
 │   ├── manifest.py         mtime drift detection
 │   ├── moc.py              per-domain MOC rebuild
 │   ├── selfcheck.py        механический self-check при старте
+│   ├── data/               вшитые лексиконы (nrc_vad_ru.tsv, nrc_emolex_ru.tsv)
 │   └── validation.py       safe_slug/user_text/etc.
 ├── prompts/                iuda + base + mood + ask/process + about + questions_examples
-├── scripts/
-│   └── migrate_domains.py  одноразовая миграция 4→10
+├── scripts/                build_lexicon.py, build_emolex.py, migrate_* (одноразовые)
 ├── docker-compose.yml      bot + ollama (GPU-проброс)
-├── Dockerfile              python:3.12-slim + git
-├── requirements.txt        зафиксированные версии
+├── Dockerfile              python:3.12-slim + git (+ dostoevsky --no-deps)
+├── requirements.txt        + requirements-base.txt / requirements-dev.txt
 ├── .env.example            пример конфига
 └── README.md
 ```
 
-В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `notes/` (свободные заметки `/ucho`), `_index.md`, `_state.json`. При каждом старте — `.psycho/startup-check.md`.
+В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/`, `profile/`, `notes/`, `personality/` (about.md + mood.md), `mood/` (граф настроений + timeseries + график; пишется по мере работы), `_index.md`, `_state.json`. При каждом старте — `.psycho/startup-check.md`.
 
 ---
 
