@@ -355,8 +355,7 @@ def ensure_layout() -> None:
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
     # Портрет (personality/about.md) + черновик настроения (personality/mood.md) —
     # пустые скелеты, заполняются live кодом и прозой/графом depersonalization. Импорт
-    # локальный: about/mood_file → atomic, без цикла с vault. ensure() мигрирует
-    # старый about_user.md, если он есть.
+    # локальный: about/mood_file → atomic, без цикла с vault.
     try:
         from . import about, mood_file
         about.ensure()

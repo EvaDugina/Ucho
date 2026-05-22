@@ -1,4 +1,4 @@
-"""Тесты разделения портрета и настроения по папке personality/ + миграция."""
+"""Тесты разделения портрета и настроения по папке personality/."""
 from __future__ import annotations
 
 from bot import about, mood_file, moods, userctx
@@ -24,38 +24,17 @@ def test_fresh_ensure_creates_both_without_mood_in_about():
     assert "mood_baseline" not in about.path().read_text(encoding="utf-8")
 
 
-def test_legacy_about_user_migrates():
+def test_set_current_writes_and_preserves_baseline():
     _fresh(50003)
-    legacy = userctx.user_root() / "about_user.md"
-    legacy.write_text(
-        "---\nregister: на ты\ntone: колкий\n"
-        'mood_baseline: "-0.3,-0.2,-0.1"\nbot_mood: ласка\n---\n\n'
-        "# Портрет пользователя\n\n## Характер\nзамкнут, ироничен\n",
+    # depersonalization выставил baseline и нарратив в теле mood.md
+    mp = mood_file.path()
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    mp.write_text(
+        "---\nupdated: '2026-05-23'\nmood_baseline: \"0.2,0.1,-0.1\"\nn: 0\n---\n\n"
+        "# Настроение\n\n## Анализ настроения\n\nЧеловек всю неделю в апатии, гаснет к вечеру.\n",
         encoding="utf-8",
     )
-    about.ensure()
-    mood_file.ensure()
-    ab = about.path().read_text(encoding="utf-8")
-    md = mood_file.path().read_text(encoding="utf-8")
-    # портрет перенесён, mood-полей в about нет
-    assert "register: на ты" in ab and "замкнут" in ab
-    assert "mood_baseline" not in ab
-    # mood-поля уехали в mood.md
-    assert "-0.3,-0.2,-0.1" in md and "ласка" in md
-    assert mood_file.baseline() == (-0.3, -0.2, -0.1)
-    # старый файл НЕ удалён (инвариант)
-    assert legacy.exists()
-
-
-def test_set_current_writes_and_preserves_baseline():
-    _fresh(50004)
-    legacy = userctx.user_root() / "about_user.md"
-    legacy.write_text('---\nmood_baseline: "0.2,0.1,-0.1"\n---\n\n# x\n', encoding="utf-8")
-    mood_file.ensure()
     assert mood_file.baseline() == (0.2, 0.1, -0.1)
-    # скилл depersonalization дописал нарратив в тело
-    p = mood_file.path()
-    p.write_text(p.read_text(encoding="utf-8") + "\nЧеловек всю неделю в апатии, гаснет к вечеру.\n", encoding="utf-8")
 
     mv = moods.session_mood(
         [{"sign": "-", "energy": "low", "dominance": "low", "quality": "грусть_тоска"}]
@@ -64,4 +43,4 @@ def test_set_current_writes_and_preserves_baseline():
     # снимок записан, prior сохранён, нарратив скилла НЕ затёрт
     assert mood_file.baseline() == (0.2, 0.1, -0.1)
     assert "вселение_уверенности" in mood_file.render_for_prompt()
-    assert "апатии, гаснет к вечеру" in p.read_text(encoding="utf-8")
+    assert "апатии, гаснет к вечеру" in mp.read_text(encoding="utf-8")

@@ -8,8 +8,6 @@ Capture-first (как и весь проект), разделение как в 
   выверенный граф настроений в `mood/`. Код тело сохраняет — нарратив скилла не затирается.
 
 `mood_baseline` (prior для `moods.session_mood`) хранится здесь.
-Миграция: mood-поля из старого `about_user.md` лениво переносятся сюда в `ensure()`.
-Старый файл бот не удаляет (инвариант) — чистят руками.
 """
 import logging
 import re
@@ -24,7 +22,6 @@ from .atomic import atomic_write_text
 log = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
-_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
 # Тело-скелет: H1 + пояснение + пустая секция анализа (её пишет depersonalization).
 _BODY = (
@@ -44,26 +41,6 @@ def path() -> Path:
     return _dir() / "mood.md"
 
 
-def _legacy_about() -> Path:
-    return userctx.user_root() / "about_user.md"
-
-
-def _legacy_mood_fields() -> dict:
-    """Достать mood-поля из старого about_user.md (для миграции). Нет → {}."""
-    legacy = _legacy_about()
-    if not legacy.exists():
-        return {}
-    try:
-        m = _FRONTMATTER_RE.match(legacy.read_text(encoding="utf-8"))
-        if not m:
-            return {}
-        fm = yaml.safe_load(m.group(1)) or {}
-        return {k: fm[k] for k in _MOOD_KEYS if isinstance(fm, dict) and fm.get(k)}
-    except Exception:
-        log.exception("read legacy mood fields failed (non-fatal)")
-        return {}
-
-
 def _write(fm: dict, body: str) -> None:
     head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
     content = f"---\n{head}\n---\n{body}"
@@ -73,8 +50,7 @@ def _write(fm: dict, body: str) -> None:
 
 
 def ensure() -> None:
-    """Создать `personality/mood.md`, если его нет. Переносит mood-поля из legacy
-    about_user.md (миграция). Идемпотентно."""
+    """Создать пустой скелет `personality/mood.md`, если его нет (идемпотентно)."""
     p = path()
     if p.exists():
         return
@@ -84,7 +60,6 @@ def ensure() -> None:
         "quality": "", "valence": "", "arousal": "", "dominance": "",
         "stability": "", "bot_mood": "", "mood_baseline": "", "n": 0,
     }
-    fm.update(_legacy_mood_fields())  # перенос prior/последнего лица, если были
     _write(fm, "\n" + _BODY)
 
 
@@ -132,15 +107,12 @@ def set_current(mood_vec: dict, bot_mood: str | None = None) -> None:
 
 def baseline() -> tuple[float, float, float]:
     """Prior (valence, arousal, dominance) из `mood_baseline` (пишет скилл).
-    Формат "v,a,d", back-compat "v,a" → d=0. Нет mood.md → пробуем legacy about.
-    Нет/мусор → (0,0,0)."""
+    Формат "v,a,d", back-compat "v,a" → d=0. Нет/мусор → (0,0,0)."""
     def _clamp(x: str) -> float:
         return max(-1.0, min(1.0, float(x)))
     try:
         fm, _ = _parse()
         raw = str(fm.get("mood_baseline") or "").strip()
-        if not raw:
-            raw = str(_legacy_mood_fields().get("mood_baseline") or "").strip()
         if not raw:
             return (0.0, 0.0, 0.0)
         parts = [p.strip() for p in raw.split(",")]

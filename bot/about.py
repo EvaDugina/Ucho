@@ -11,10 +11,6 @@
 Настроение вынесено в `personality/mood.md` (см. `bot/mood_file.py`) — здесь только
 портрет носителя, без mood-полей.
 
-Миграция: старый `about_user.md` в корне per-user лениво переносится в
-`personality/about.md` (mood-поля уезжают в mood.md через `mood_file`). Бот старый файл
-**не удаляет** (инвариант проекта) — его чистят руками в Obsidian.
-
 Файл инъецируется в системный промпт (`llm._system`). Пути — per-user через `userctx`.
 Любой сбой здесь не должен ронять обработку ответа — отсюда широкие try/except.
 """
@@ -46,8 +42,7 @@ _PROSE_KEYS = (
     "style", "passion", "letdown",
     "epistemics", "attachment", "routine",
 )
-# mood-поля больше НЕ живут в about — они в personality/mood.md (bot/mood_file.py).
-_LEGACY_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
+# Примечание: mood-поля живут в personality/mood.md (bot/mood_file.py), не здесь.
 
 # 14 секций портрета (порядок фиксирован; прозу заполняет depersonalization).
 _SECTIONS = (
@@ -76,11 +71,6 @@ def path() -> Path:
     return _dir() / "about.md"
 
 
-def _legacy_path() -> Path:
-    """Старое расположение портрета (до перехода на personality/)."""
-    return userctx.user_root() / "about_user.md"
-
-
 def _deltas_path() -> Path:
     return userctx.user_root() / "_user_deltas.jsonl"
 
@@ -99,59 +89,20 @@ def _skeleton() -> str:
     return f"---\n{head}\n---\n\n# Портрет пользователя\n\n{body}\n"
 
 
-def _migrate_from_legacy(legacy: Path) -> None:
-    """Перенести содержимое legacy `about_user.md` в `personality/about.md`,
-    выкинув mood-поля (их забирает mood_file). Старый файл НЕ удаляем."""
-    try:
-        m = _FRONTMATTER_RE.match(legacy.read_text(encoding="utf-8"))
-    except Exception:
-        log.exception("read legacy about failed")
-        m = None
-    if not m:
-        atomic_write_text(path(), _skeleton())
-        return
-    try:
-        fm = yaml.safe_load(m.group(1)) or {}
-    except yaml.YAMLError:
-        fm = {}
-    if not isinstance(fm, dict):
-        fm = {}
-    for k in _LEGACY_MOOD_KEYS:
-        fm.pop(k, None)
-    body = m.group(2)
-    head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
-    content = f"---\n{head}\n---\n{body}"
-    if not content.endswith("\n"):
-        content += "\n"
-    atomic_write_text(path(), content)
-
-
 def ensure() -> None:
-    """Создать `personality/about.md`, если его ещё нет (идемпотентно).
-
-    Если есть старый `about_user.md` — лениво мигрируем его содержимое. Иначе —
-    пустой скелет. Старый файл не трогаем (чистка — руками)."""
+    """Создать пустой скелет `personality/about.md`, если его ещё нет (идемпотентно)."""
     p = path()
     if p.exists():
         return
     _dir().mkdir(parents=True, exist_ok=True)
-    legacy = _legacy_path()
-    if legacy.exists():
-        _migrate_from_legacy(legacy)
-    else:
-        atomic_write_text(p, _skeleton())
+    atomic_write_text(p, _skeleton())
 
 
 def _parse() -> tuple[dict, str]:
-    """(frontmatter dict, body). Нет нового файла → читаем legacy (back-compat),
-    пока миграция не прошла. Совсем ничего → ({}, '')."""
+    """(frontmatter dict, body). Нет файла → ({}, '')."""
     p = path()
     if not p.exists():
-        legacy = _legacy_path()
-        if legacy.exists():
-            p = legacy
-        else:
-            return {}, ""
+        return {}, ""
     text = p.read_text(encoding="utf-8")
     m = _FRONTMATTER_RE.match(text)
     if not m:

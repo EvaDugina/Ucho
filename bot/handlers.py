@@ -737,7 +737,7 @@ async def cmd_pebble(message: Message) -> None:
 
 @router.message(Command("about"))
 async def cmd_about(message: Message) -> None:
-    """Показать пользователю его портрет (about_user.md) — отформатированный
+    """Показать пользователю его портрет (personality/about.md) — отформатированный
     отдельным промптом текст от 1-го лица. Пусто → честно скажем, что рано."""
     if not _is_allowed(message):
         return
