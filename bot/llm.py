@@ -320,29 +320,33 @@ async def process_answer(
     return data
 
 
-async def classify_mood(answer: str, portrait: str = "", vader: Optional[dict] = None) -> dict:
+async def classify_mood(answer: str, portrait: str = "", vad: Optional[dict] = None) -> dict:
     """Классифицировать настроение по последнему сообщению — категориально.
 
     Вызов-классификатор (дешёвый, низкая temp). Возвращает
-    `{sign, energy, direction, quality}`; всю математику (вектор по сессии,
-    устойчивость) считает код в `moods.session_mood`. Портрет — лишь фон.
-    `vader` — инструментальная оценка тональности (compound ∈ [-1..1]) как ПОДСКАЗКА;
-    LLM — арбитр, может перебить. Любой сбой → нейтральный вектор (не валит ответ).
+    `{sign, energy, direction, quality, dominance}`; всю математику (вектор по
+    сессии, устойчивость) считает код в `moods.session_mood`. Портрет — лишь фон.
+    `vad` — нативная русская VAD-оценка лексикона (valence/arousal/dominance ∈[-1..1])
+    как ПОДСКАЗКА; LLM — арбитр, может перебить. Любой сбой → нейтральный вектор.
     """
     sys = (
         "Ты классификатор настроения. По последнему сообщению человека определи его "
         "текущее состояние и верни СТРОГО JSON без текста снаружи:\n"
-        '{"sign":"+|0|-","energy":"high|normal|low","direction":"auto|hetero|neutral","quality":"<одно из списка>"}\n'
+        '{"sign":"+|0|-","energy":"high|normal|low","direction":"auto|hetero|neutral",'
+        '"quality":"<одно из списка>","dominance":"high|normal|low"}\n'
         "- sign — валентность: + хорошее, 0 нейтральное, - плохое.\n"
         "- energy — активация: high много сил/возбуждение, normal норма, low мало сил/вялость.\n"
         "- direction — на кого направлено: auto (на себя), hetero (на других/мир), neutral.\n"
         "- quality — фоновая эмоция, ОДНО из: " + ", ".join(moods.QUALITIES) + ".\n"
+        "- dominance — чувство контроля: high владеет ситуацией/доминирует/самоуверен, "
+        "normal норма, low придавлен/бессилен/не управляет происходящим.\n"
         "Опирайся в первую очередь на это сообщение; фон — лишь поправка."
     )
-    if isinstance(vader, dict) and vader.get("compound") is not None:
+    if isinstance(vad, dict) and vad.get("valence") is not None:
         sys += (
-            f"\n\nИнструментальная оценка тональности (VADER по англ. переводу): "
-            f"compound={vader['compound']} (диапазон -1..1). Это ПОДСКАЗКА, не приговор: "
+            "\n\nИнструментальная VAD-оценка (русский лексикон, диапазон -1..1): "
+            f"valence={vad.get('valence')}, arousal={vad.get('arousal')}, "
+            f"dominance={vad.get('dominance')}. Это ПОДСКАЗКА, не приговор: "
             "ты арбитр, можешь перебить (сарказм/ирония лексикону не видны)."
         )
     if portrait:

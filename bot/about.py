@@ -33,7 +33,7 @@ _FIELD_KEYS = ("register", "tone", "openness", "provocation_tolerance")
 # Прозаические поля дельты — копятся в журнал, прозу пишет weekly-review.
 _PROSE_KEYS = ("speech_note", "trigger", "motif", "fact", "rapport")
 # Поля настроения: пишет КОД (set_mood) и weekly (mood_baseline) — НЕ live-дельта LLM.
-# mood — текущий вектор (строка), bot_mood — последнее лицо, mood_baseline — prior "valence,arousal".
+# mood — текущий вектор (строка), bot_mood — последнее лицо, mood_baseline — prior "valence,arousal,dominance".
 _MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
 # 8 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
@@ -145,17 +145,26 @@ def set_mood(mood_vec: dict, bot_mood: str | None = None) -> None:
         log.exception("about.set_mood failed (non-fatal)")
 
 
-def baseline() -> tuple[float, float]:
-    """Prior (valence, arousal) из `mood_baseline` портрета (пишет weekly). Нет → (0,0)."""
+def baseline() -> tuple[float, float, float]:
+    """Prior (valence, arousal, dominance) из `mood_baseline` портрета (пишет weekly).
+
+    Формат — строка "v,a,d". Обратная совместимость: старый "v,a" → dominance=0.0.
+    Нет/мусор → (0,0,0).
+    """
+    def _clamp(x: str) -> float:
+        return max(-1.0, min(1.0, float(x)))
     try:
         fm, _ = _parse()
         raw = str(fm.get("mood_baseline") or "").strip()
         if not raw:
-            return (0.0, 0.0)
-        v, a = (x.strip() for x in raw.split(",", 1))
-        return (max(-1.0, min(1.0, float(v))), max(-1.0, min(1.0, float(a))))
+            return (0.0, 0.0, 0.0)
+        parts = [p.strip() for p in raw.split(",")]
+        v = _clamp(parts[0])
+        a = _clamp(parts[1]) if len(parts) > 1 else 0.0
+        d = _clamp(parts[2]) if len(parts) > 2 else 0.0
+        return (v, a, d)
     except Exception:
-        return (0.0, 0.0)
+        return (0.0, 0.0, 0.0)
 
 
 def _append_delta_log(delta: dict) -> None:

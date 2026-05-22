@@ -16,13 +16,13 @@ from aiogram.types import (
 from . import (
     about,
     graph,
+    lexicon,
     moods,
     qmap,
     questions,
     ratelimit,
     session,
     sessions,
-    translate,
     userctx,
     users,
     vault,
@@ -130,6 +130,33 @@ def _is_owner(message: Message) -> bool:
 
 def _is_allowed(message: Message) -> bool:
     return message.from_user is not None and users.is_allowed(message.from_user.id)
+
+
+_DIRECTION_RU = {"auto": "на себя", "hetero": "на других/мир", "neutral": "нейтрально"}
+
+
+def _format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str:
+    """Настроенческий анализ хода — отдельное сообщение владельцу (перед ответом).
+
+    Только числа/ярлыки из закрытых списков (без слов человека) → можно слать как
+    есть. Это НЕ вопрос: шлётся напрямую `message.answer`, мимо `_send_question`/qmap.
+    """
+    lines = [
+        "🎭 Настроение",
+        f"эмоция: {mv.get('quality', '—')}",
+        f"валентность: {mv.get('valence')} ({mv.get('sign')})",
+        f"энергия: {mv.get('energy')} (arousal {mv.get('arousal')})",
+        f"доминирование: {mv.get('dominance_label')} ({mv.get('dominance')})",
+        f"направленность: {_DIRECTION_RU.get(mv.get('direction'), mv.get('direction'))}",
+        f"устойчивость: {mv.get('stability')}",
+        f"лицо: {bot_mood or '—'}",
+    ]
+    if isinstance(vad, dict):
+        lines.append(
+            f"лексикон VAD: v={vad.get('valence')} a={vad.get('arousal')} "
+            f"d={vad.get('dominance')} (слов: {vad.get('n')})"
+        )
+    return "\n".join(lines)
 
 
 def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
@@ -965,21 +992,31 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     # Настроение: классифицируем последнее сообщение → копим траекторию сессии →
     # считаем вектор (recency + затухающий prior из портрета) → выбираем КОНТРАСТНОЕ
     # лицо → пишем в портрет. Сбой не валит обработку ответа.
+    # Анализ настроения — ТОЛЬКО для владельца (OWNER): это его персональный
+    # инструмент-инсайт. Для остальных доверенных лицо выбирает сама LLM (bot_mood=None).
     mood_vec = None
     bot_mood = None
-    vader = None
-    try:
-        # VADER — инструментальная подсказка тональности: переводим RU→EN локально
-        # (Argos, офлайн) и считаем compound. LLM в classify_mood — арбитр.
-        en = await translate.translate_ru_en(text)
-        vader = moods.vader_compound(en)
-        per_msg = await classify_mood(text, about.render_for_prompt(), vader=vader)
-        s.record_mood(per_msg)
-        mood_vec = moods.session_mood(s.mood_trajectory, about.baseline())
-        bot_mood = moods.pick_bot_mood(mood_vec)
-        about.set_mood(mood_vec, bot_mood)
-    except Exception:
-        log.exception("mood detection failed (non-fatal)")
+    vad = None
+    if _is_owner(message):
+        try:
+            # VAD — инструментальная подсказка: нативный русский лексикон (NRC-VAD),
+            # офлайн, без перевода. Даёт valence/arousal/dominance. LLM в classify_mood —
+            # арбитр (лексикон слеп к иронии). Нет совпадений слов → None.
+            vad = await lexicon.score(text)
+            per_msg = await classify_mood(text, about.render_for_prompt(), vad=vad)
+            s.record_mood(per_msg)
+            mood_vec = moods.session_mood(s.mood_trajectory, about.baseline())
+            bot_mood = moods.pick_bot_mood(mood_vec)
+            about.set_mood(mood_vec, bot_mood)
+            # Настроенческий анализ — отдельным сообщением ПЕРЕД основным ответом.
+            # Не вопрос → шлём напрямую, мимо _send_question/qmap. Сбой отправки не
+            # должен ломать ход: bot_mood уже посчитан и пойдёт в process_answer.
+            try:
+                await message.answer(_format_mood(mood_vec, bot_mood, vad))
+            except Exception:
+                log.exception("mood report send failed (non-fatal)")
+        except Exception:
+            log.exception("mood detection failed (non-fatal)")
 
     # Реакция считается молча (Q1: тишина) — без индикатора «Думаю».
     try:
@@ -1010,9 +1047,9 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     s.pending_answer = None
     session.persist()
 
-    # Журнал пары (настроение → лицо) + vader для графа Фазы D (weekly агрегирует).
+    # Журнал пары (настроение → лицо) + лексиконный VAD для графа Фазы D (weekly агрегирует).
     if mood_vec and bot_mood:
-        moods.log_turn(mood_vec, bot_mood, vader=vader)
+        moods.log_turn(mood_vec, bot_mood, vad=vad)
 
     # Реакция вместо кларифера: реплика-укол от 1-го лица, НЕ вопрос. Сессия
     # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
