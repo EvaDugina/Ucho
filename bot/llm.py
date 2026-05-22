@@ -1,13 +1,13 @@
 """Обёртка над openai-совместимым API (Ollama).
 
 Функции по режимам system-prompt:
-- ask_next        → mode: ask (главный вопрос)
+- ask_next        → mode: ask (главный вопрос; примеры стиля из questions_examples.md)
 - process_answer  → mode: process (разбор ответа + реакция)
 - about_present   → отдельный промпт about.md (показать портрет)
-- summarize_session → отдельный промпт summarize.md (закрывающая реплика)
 """
 import json
 import logging
+import random
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -34,14 +34,38 @@ _client = AsyncOpenAI(
     max_retries=1,
 )
 
-# Промпты разбиты по режимам: общий base + addendum под каждый kind.
+# Системный промпт JSON-режимов: персона (iuda) + механика графа (base) + addendum.
+# iuda.md — характер/голос/правила общения, нужен везде, где модель говорит человеку.
+# base.md — домены, концепты, формат JSON; нужен только там, где модель пишет в граф.
+_iuda_prompt = (PROMPTS_DIR / "iuda.md").read_text(encoding="utf-8")
 _base_prompt = (PROMPTS_DIR / "base.md").read_text(encoding="utf-8")
-_summarize_prompt = (PROMPTS_DIR / "summarize.md").read_text(encoding="utf-8")
 _about_prompt = (PROMPTS_DIR / "about.md").read_text(encoding="utf-8")
 _MODE_PROMPTS = {
     "ask": (PROMPTS_DIR / "ask.md").read_text(encoding="utf-8"),
     "process": (PROMPTS_DIR / "process.md").read_text(encoding="utf-8"),
 }
+
+
+def _load_question_examples() -> dict[str, list[str]]:
+    """Разобрать questions_examples.md в {domain: [вопрос, ...]}.
+
+    Формат файла: заголовок домена `## <domain>`, под ним список `- вопрос`.
+    Примеры подмешиваются в ask_next как эталон стиля по выбранной теме.
+    """
+    by_domain: dict[str, list[str]] = {}
+    cur: Optional[str] = None
+    text = (PROMPTS_DIR / "questions_examples.md").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        line = line.rstrip()
+        if line.startswith("## "):
+            cur = line[3:].strip()
+            by_domain[cur] = []
+        elif cur and line.startswith("- "):
+            by_domain[cur].append(line[2:].strip())
+    return by_domain
+
+
+_QUESTION_EXAMPLES = _load_question_examples()
 
 
 def _portrait_block() -> str:
@@ -55,13 +79,15 @@ def _portrait_block() -> str:
 
 
 def _system(kind: str) -> str:
-    """Системный промпт = общий base + addendum режима + портрет пользователя.
+    """Системный промпт = iuda (персона) + base (механика графа) + addendum + портрет.
 
-    kind ∈ {ask, process, review} — это РЕЖИМ ПРОМПТА, не mode сессии.
+    kind ∈ {ask, process} — это РЕЖИМ ПРОМПТА, не mode сессии.
     """
     addendum = _MODE_PROMPTS.get(kind, "")
-    base = f"{_base_prompt}\n\n{addendum}" if addendum else _base_prompt
-    return base + _portrait_block()
+    parts = [_iuda_prompt, _base_prompt]
+    if addendum:
+        parts.append(addendum)
+    return "\n\n".join(parts) + _portrait_block()
 
 
 async def _chat_json(messages: list[dict], temperature: float = 0.6) -> dict:
@@ -91,12 +117,25 @@ async def ask_next(
     if domain and domain not in DOMAINS:
         raise ValueError(f"unknown domain: {domain}")
 
+    # Эталон стиля по выбранной теме: несколько случайных примеров из
+    # questions_examples.md. Не копировать дословно — задают тон и хватку.
+    examples_block = ""
+    pool = _QUESTION_EXAMPLES.get(domain or "") if domain else None
+    if pool:
+        sample = random.sample(pool, min(5, len(pool)))
+        joined = "\n".join(f"- {q}" for q in sample)
+        examples_block = (
+            "question_examples (эталон стиля по теме — не копируй дословно, "
+            f"бери тон и хватку):\n{joined}"
+        )
+
     user_msg = "\n\n".join(
         x for x in [
             "mode: ask",
             f"domain: {domain or 'any'}",
             f"context_concepts:\n{context_concepts or '(база пуста)'}",
             f"recent_raw:\n{recent_raw}" if recent_raw else "",
+            examples_block,
         ] if x
     )
 
@@ -157,30 +196,6 @@ async def process_answer(
     data.setdefault("reaction", "")
     data.setdefault("user_delta", {})  # портрет пользователя (about.apply_delta)
     return data
-
-
-async def summarize_session(main_question: str, exchanges: list[dict]) -> str:
-    """Закрывающий комментарий после исчерпания клавиатуры вопросов.
-
-    exchanges — это session.history (последние реплики user/assistant).
-    Возвращает plain text без JSON.
-    """
-    closing_instruction = (
-        f"Главный вопрос был: «{main_question}». "
-        "Сессия закрывается — дай короткий комментарий о том, что прибавилось к портрету. "
-        "3–5 предложений, без вопросов."
-    )
-    messages = [
-        {"role": "system", "content": _summarize_prompt + _portrait_block()},
-        *exchanges,
-        {"role": "user", "content": closing_instruction},
-    ]
-    resp = await _client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.4,
-    )
-    return (resp.choices[0].message.content or "").strip()
 
 
 async def about_present(portrait: str) -> str:

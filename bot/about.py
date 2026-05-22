@@ -2,13 +2,13 @@
 
 Гибрид (capture-first):
 - **Live (Qwen, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
-  (см. `prompts/system.md`). Код обновляет машинные поля frontmatter
+  (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
   и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 8 секций live НЕ трогаем.**
 - **Weekly (Claude).** Скилл `weekly-review` раз в неделю переписывает прозу секций
   из накопленных дельт + `raw/` (Qwen 14B для связного портрета слаба).
 
-Файл инъецируется в системный промпт (`llm._system`/`summarize_session`), чтобы голос
+Файл инъецируется в системный промпт (`llm._system`), чтобы голос
 Иуды подстраивался под человека. Пути — per-user через `userctx` (как vault/session/qmap).
 Любой сбой здесь не должен ронять обработку ответа — отсюда широкие try/except.
 """
