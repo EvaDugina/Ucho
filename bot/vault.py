@@ -10,6 +10,7 @@ from typing import Iterator, Optional
 from . import userctx
 from .atomic import atomic_write_json, atomic_write_text
 from .config import DOMAINS, LOG_PATH, PSYCHO_META_DIR, VAULT_PATH
+from .errors import ValidationError, VaultError
 from .validation import escape_raw_block, safe_question_text, safe_user_text
 
 log = logging.getLogger(__name__)
@@ -246,6 +247,22 @@ def _git_reset_hard(sha: str) -> bool:
 # ---------- operation log ----------
 
 
+# Порог ротации log.md. Журнал append-only растёт без границ; при превышении
+# усекаем, оставляя хвост (свежие записи важнее древних).
+_LOG_MAX_BYTES = 1_000_000
+
+
+def _rotate_log_if_large() -> None:
+    """Усечь log.md, если он перерос порог: оставить последнюю половину."""
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+            text = LOG_PATH.read_text(encoding="utf-8")
+            tail = text[-(_LOG_MAX_BYTES // 2):]
+            atomic_write_text(LOG_PATH, "# Operation log (усечён)\n\n" + tail)
+    except Exception:
+        log.exception("log rotation failed")
+
+
 def append_log(level: str, op: str, details: str = "") -> None:
     """Append-only лог операций в ``<vault>/.psycho/log.md``.
 
@@ -255,6 +272,8 @@ def append_log(level: str, op: str, details: str = "") -> None:
         PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
         if not LOG_PATH.exists():
             LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
+        else:
+            _rotate_log_if_large()
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         line = f"[{ts}] {level.upper()} {op}"
         if details:
@@ -295,6 +314,14 @@ def git_wrap(op_name: str) -> Iterator[None]:
         if pre_sha:
             ok = _restore_scope(pre_sha, scope)
             append_log("error", op_name, f"rollback {'ok' if ok else 'FAILED'} to {pre_sha[:8]}")
+            if not ok:
+                # Откат не удался — состояние vault может быть неконсистентным.
+                # Эскалируем как доменный VaultError, чтобы это не выглядело как
+                # обычный сбой операции.
+                raise VaultError(
+                    f"{op_name}: операция упала и git-откат не удался — "
+                    "данные могут быть неконсистентны"
+                ) from exc
         raise
     else:
         _git_commit(f"psycho({label}): {op_name}", scope=scope)
@@ -443,10 +470,15 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
         f"**A:** {a_clean}\n"
         f"^Q{q_num}\n\n"
     )
-    if not path.exists():
-        path.write_text(f"# {date_str}\n\n", encoding="utf-8")
-    with path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    try:
+        if not path.exists():
+            path.write_text(f"# {date_str}\n\n", encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
+            f.write(block)
+    except OSError as exc:
+        # Запись ответа пользователя — источник правды; если диск отказал,
+        # это настоящий сбой хранилища, а не «ожидаемая» ошибка.
+        raise VaultError(f"append_raw failed for Q{q_num}: {exc}") from exc
     return path
 
 
@@ -467,16 +499,19 @@ def append_note(when: datetime, text: str) -> Path:
         append_log("warn", "note_truncated", f"{date_str} {time_str} length>limit")
     clean = escape_raw_block(clean)
     block = f"## {time_str}\n{clean}\n\n"
-    if not path.exists():
-        path.write_text(f"# Заметки · {date_str}\n\n", encoding="utf-8")
-    with path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    try:
+        if not path.exists():
+            path.write_text(f"# Заметки · {date_str}\n\n", encoding="utf-8")
+        with path.open("a", encoding="utf-8") as f:
+            f.write(block)
+    except OSError as exc:
+        raise VaultError(f"append_note failed for {date_str}: {exc}") from exc
     return path
 
 
 def append_profile(when: datetime, domain: str, fragment: str, raw_time: str) -> Path:
     if domain not in DOMAINS:
-        raise ValueError(f"unknown domain: {domain}")
+        raise ValidationError(f"unknown domain: {domain}")
     ensure_layout()
     date_str = when.strftime("%Y-%m-%d")
     path = profile_dir() / f"{domain}.md"
@@ -488,8 +523,11 @@ def append_profile(when: datetime, domain: str, fragment: str, raw_time: str) ->
         f"### {date_str}\n"
         f"- {fragment_clean} _(из [[raw/{date_str}|{raw_time}]])_\n\n"
     )
-    with path.open("a", encoding="utf-8") as f:
-        f.write(block)
+    try:
+        with path.open("a", encoding="utf-8") as f:
+            f.write(block)
+    except OSError as exc:
+        raise VaultError(f"append_profile failed for {domain}: {exc}") from exc
     return path
 
 

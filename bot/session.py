@@ -6,6 +6,7 @@
 поэтому публичный API (`get/start/clear/set_question/persist`) работает с
 сессией текущего пользователя без явной передачи uid.
 """
+import asyncio
 import json
 import logging
 import uuid
@@ -97,6 +98,26 @@ class Session:
 
 # uid → Session. Текущий uid берётся из userctx.
 _active: dict[int, "Session"] = {}
+
+# uid → asyncio.Lock. Сериализует await-растянутые мутации одной сессии.
+# Ответы в probe (_handle_probe) НЕ проходят single-flight ratelimit (он только
+# у /ask, /about, /ucho), поэтому два быстрых сообщения одного пользователя могут
+# переплестись на await-границах (classify_mood/process_answer) и испортить
+# порядок history/mood_trajectory. Лок по uid сериализует критическую секцию.
+_locks: dict[int, asyncio.Lock] = {}
+
+
+def lock_for(uid: Optional[int]) -> asyncio.Lock:
+    """Вернуть (создав при первом обращении) per-uid лок мутаций сессии.
+
+    None-uid (миграции/глобальные операции) делят общий лок под ключом -1.
+    """
+    key = uid if uid is not None else -1
+    lk = _locks.get(key)
+    if lk is None:
+        lk = asyncio.Lock()
+        _locks[key] = lk
+    return lk
 
 
 def _persist() -> None:

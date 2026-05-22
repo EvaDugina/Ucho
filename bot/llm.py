@@ -146,7 +146,10 @@ async def _chat_json(messages: list[dict], temperature: float = 0.6) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        log.error("LLM returned non-JSON: %r", raw[:500])
+        # Не светим тело ответа на INFO/ERROR: оно может отражать слова человека.
+        # Сам payload — только на DEBUG (включается осознанно, см. config.LOG_LEVEL).
+        log.error("LLM returned non-JSON (%d chars)", len(raw))
+        log.debug("LLM non-JSON payload: %r", raw[:500])
         raise LLMError("LLM returned non-JSON") from exc
 
 
@@ -175,7 +178,9 @@ def normalize_observations(raw) -> list[dict]:
     ``services.answer_service.apply_processed``.
     """
     out: list[dict] = []
+    total = 0
     for o in raw or []:
+        total += 1
         if not isinstance(o, dict):
             continue
         try:
@@ -185,6 +190,20 @@ def normalize_observations(raw) -> list[dict]:
         if not m.name.strip():
             continue
         out.append(m.model_dump())
+    dropped = total - len(out)
+    if dropped:
+        # Потеря данных пользователя должна быть видна в vault-журнале, а не
+        # тонуть только в stderr: weekly-review/разработчик увидит, что часть
+        # наблюдений LLM не прошла контракт.
+        log.warning("normalize_observations dropped %d of %d observation(s)", dropped, total)
+        try:
+            vault.append_log(
+                "warn",
+                "process_observations_dropped",
+                f"отброшено {dropped} из {total} наблюдений LLM (не прошли контракт)",
+            )
+        except Exception:
+            log.exception("failed to log dropped observations")
     return out
 
 
@@ -237,7 +256,9 @@ async def ask_next(
 
     data = await _chat_json(messages, temperature=0.8)
     if "question" not in data or "domain" not in data:
-        raise ValueError(f"malformed ask payload: {data}")
+        # Контракт ответа модели нарушен — это сбой LLM, а не баг кода: хэндлер
+        # ловит LLMError и отвечает нейтрально (см. handlers._send_next_question).
+        raise LLMError(f"malformed ask payload: keys={list(data)[:10]}")
     if data["domain"] not in DOMAINS:
         bad = data["domain"]
         log.warning("LLM returned unknown domain %r, falling back to 'everyday'", bad)

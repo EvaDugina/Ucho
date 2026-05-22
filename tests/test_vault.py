@@ -1,10 +1,14 @@
 """Юнит-тесты хранилища: сквозная нумерация, атомарная запись, git-транзакция."""
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from bot import graph, vault
 from bot.atomic import atomic_write_text
+from bot.config import LOG_PATH
+from bot.errors import ValidationError, VaultError
 from bot.graph import Concept
 
 
@@ -48,3 +52,30 @@ def test_git_wrap_rolls_back_on_error(as_user):
             raise RuntimeError("boom")
     # untracked-файл, созданный в провалившейся транзакции, должен быть вычищен
     assert not graph._path_for("rollme", "ethics").exists()
+
+
+def test_append_raw_wraps_oserror_in_vaulterror(as_user):
+    # Подсовываем директорию вместо файла дня → path.open("a") даёт
+    # IsADirectoryError (OSError) → код заворачивает её в доменный VaultError.
+    when = datetime.now()
+    vault.raw_dir().mkdir(parents=True, exist_ok=True)
+    (vault.raw_dir() / f"{when.strftime('%Y-%m-%d')}.md").mkdir()
+    with pytest.raises(VaultError):
+        vault.append_raw(1, when, "ethics", "вопрос", "ответ")
+
+
+def test_append_profile_unknown_domain_raises_validationerror(as_user):
+    with pytest.raises(ValidationError):
+        vault.append_profile(datetime.now(), "not-a-domain", "фрагмент", "12:00")
+
+
+def test_log_rotation_truncates(as_user, monkeypatch):
+    # Понижаем порог и заваливаем журнал: ротация держит размер ограниченным,
+    # но свежая запись остаётся на месте.
+    monkeypatch.setattr(vault, "_LOG_MAX_BYTES", 2_000)
+    for _ in range(400):
+        vault.append_log("info", "spam", "x" * 50)
+    vault.append_log("warn", "last_marker", "конец")
+    size = LOG_PATH.stat().st_size
+    assert size < 10_000  # не вырос до ~24 KB всех записей
+    assert "last_marker" in LOG_PATH.read_text(encoding="utf-8")

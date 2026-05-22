@@ -33,6 +33,9 @@ ALLOWED_TELEGRAM_IDS = tuple(
 
 # Уровень логирования (stderr/docker logs). Из env, чтобы поднять до DEBUG без
 # пересборки образа. Невалидное значение → INFO (см. main.py).
+# ВНИМАНИЕ: на уровне DEBUG в логи попадает персональный контент (например,
+# сырой ответ LLM в llm._chat_json). На INFO и выше код контент не пишет —
+# только метаданные (uid, q_num, длины). DEBUG включать осознанно и не на проде.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))

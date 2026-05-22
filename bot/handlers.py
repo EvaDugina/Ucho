@@ -28,6 +28,7 @@ from . import (
     vault,
 )
 from .config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
+from .errors import LLMError
 from .llm import about_present, ask_next, classify_mood, process_answer
 from .services.answer_service import apply_processed
 from .validation import (
@@ -729,8 +730,10 @@ async def cmd_about(message: Message) -> None:
     thinking = await _start_thinking(message)
     try:
         text = await about_present(portrait)
-    except Exception:
-        log.exception("about_present failed")
+    except LLMError:
+        # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
+        # не глушим: уходят в глобальный @dp.errors().
+        log.warning("about_present LLM error")
         await _stop_thinking(thinking)
         await message.answer("Не вышло собрать портрет словами. Попробуй позже.")
         return
@@ -792,8 +795,10 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
                 history=None,
                 mode="probe",
             )
-        except Exception:
-            log.exception("process_answer failed in note ingest")
+        except LLMError:
+            # Ожидаемый сбой модели → заметка уже сохранена, честно говорим про
+            # разбор. Прочие исключения (баги) уходят в глобальный @dp.errors().
+            log.warning("process_answer LLM error in note ingest")
             prefix = (note_prefix + ". ") if note_prefix else ""
             await _session_reply(
                 message,
@@ -928,6 +933,15 @@ async def on_text(message: Message) -> None:
 
 
 async def _handle_probe(message: Message, text: str) -> None:
+    # Сериализуем ответы одного пользователя: probe НЕ проходит single-flight
+    # ratelimit (он только у /ask, /about, /ucho), поэтому два быстрых сообщения
+    # иначе переплелись бы на await-границах (classify_mood/process_answer) и
+    # испортили бы порядок history/mood_trajectory.
+    async with session.lock_for(userctx.current_uid()):
+        await _handle_probe_locked(message, text)
+
+
+async def _handle_probe_locked(message: Message, text: str) -> None:
     s = session.get()
     if s is None:
         return
@@ -978,8 +992,11 @@ async def _handle_probe(message: Message, text: str) -> None:
             history=s.history[:-1],
             mode=s.mode,
         )
-    except Exception:
-        log.exception("process_answer failed")
+    except LLMError:
+        # Ожидаемый сбой модели → нейтральная фраза, pending_answer остаётся —
+        # recovery дожмёт на следующем старте. Прочие исключения (баги) не
+        # глушим: уходят в глобальный @dp.errors().
+        log.warning("process_answer LLM error")
         await message.answer("Не получилось разобрать ответ. Сформулируй ещё раз или /start (смыв).")
         return
 
@@ -1068,8 +1085,10 @@ async def _send_next_question(
             bot_mood=bot_mood,
             mode=s.mode,
         )
-    except Exception:
-        log.exception("ask_next failed")
+    except LLMError:
+        # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
+        # не глушим: уходят в глобальный @dp.errors().
+        log.warning("ask_next LLM error")
         await _stop_thinking(thinking)
         await bot.send_message(chat_id, "Не вышло сформулировать вопрос. Попробуй ещё раз.")
         session.clear()
