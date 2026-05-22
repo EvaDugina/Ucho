@@ -4,7 +4,7 @@ import random
 import re
 from datetime import datetime, timedelta
 
-from aiogram import BaseMiddleware, Bot, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -14,7 +14,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from . import graph, moc, qmap, ratelimit, session, userctx, users, vault
+from . import about, graph, moc, qmap, ratelimit, session, sessions, userctx, users, vault
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .graph import Concept, Evidence
 from .llm import ask_next, process_answer, review_query, summarize_session
@@ -57,6 +57,12 @@ class AccessMiddleware(BaseMiddleware):
             except Exception:
                 log.exception("failed to send consent disclaimer to %s", uid)
             users.set_consent(uid)
+        # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
+        # её можно продолжить reply на любое её сообщение). Команды-открыватели
+        # (/ask, /echo, /requestion, /review) затем заведут новую.
+        if isinstance(event, Message) and (event.text or "").startswith("/"):
+            if session.close():
+                log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)
 
 _DOMAIN_LABELS = {
@@ -79,9 +85,6 @@ TG_MSG_LIMIT = 4000  # запас от 4096
 # домен не получает хинт, чтобы он сам выбрал реальный домен для концептов.
 USER_DOMAIN = "user"
 USER_DOMAIN_LABEL = "пользовательский"
-
-# В режиме probe — главный вопрос плюс не более N поясняющих, затем закрывающий комментарий.
-MAX_CLARIFIERS = 1
 
 # Заголовок вопроса в сообщении бота: "Q<N> · [mode ·] <domain>" (см. _format_q).
 _Q_HEAD_RE = re.compile(r"^Q(\d+)\s*·\s")
@@ -120,27 +123,6 @@ def _parse_question_message(text: str | None) -> dict | None:
     if not body:
         return None
     return {"q_num": q_num, "domain": domain, "text": body}
-
-
-# Сигналы того, что пользователь отвергает саму рамку вопроса (а не отвечает по
-# существу) — например, не принимает навязанное «противоречие». Ловим их, чтобы
-# не долбить ещё одним поясняющим по той же рамке: закрываем сессию комментарием,
-# а следующий вопрос (дневной / /ask) зайдёт с другой темы.
-_FRAME_REJECTION_MARKERS = (
-    "не противоречие",
-    "нет противоречия",
-    "не вижу противоречи",
-    "не считаю это противоречи",
-    "никак не объясняю",
-    "нечего объяснять",
-    "нечего тут объяснять",
-    "не буду объяснять",
-)
-
-
-def _rejects_frame(text: str) -> bool:
-    low = text.lower()
-    return any(m in low for m in _FRAME_REJECTION_MARKERS)
 
 
 def _ask_keyboard() -> InlineKeyboardMarkup:
@@ -211,15 +193,20 @@ async def _send_question(
     domain: str,
     text: str,
     suffix: str = "",
+    plain: bool = False,
 ) -> Message | None:
-    """Отправить вопрос И записать его в qmap (message_id→вопрос).
+    """Отправить сообщение сессии И записать его в qmap + в message_ids сессии.
 
-    Единая точка отправки вопроса: гарантирует, что КАЖДЫЙ заданный вопрос
-    (главный, кларифер, /echo, /requestion, recovery) попадает в карту и потому
-    отвечаем через reply / `/answer N` — даже если останется без ответа (raw
-    тогда пуст, карта — единственный его след). См. [[qmap]].
+    Единая точка отправки реплики бота в обсуждении (главный вопрос, реакция,
+    /echo, /requestion, recovery): гарантирует, что message_id попадает в qmap
+    (для `/answer N` и реконструкции) и в `message_ids` активной сессии (для
+    reply-resume). ``plain=True`` — реплика-реакция: без заголовка «Q<n> · domain»,
+    просто речь от первого лица.
     """
-    body = _format_q(q_num, mode, domain, text)
+    if plain:
+        body = html.escape(text)
+    else:
+        body = _format_q(q_num, mode, domain, text)
     if suffix:
         body += suffix
     sent = await bot.send_message(chat_id, body, parse_mode="HTML")
@@ -227,6 +214,12 @@ async def _send_question(
         qmap.append(sent.message_id, q_num, text, domain)
     except Exception:
         log.exception("failed to record question in qmap (q_num=%s)", q_num)
+    s = session.get()
+    if s is not None:
+        try:
+            s.add_message_id(sent.message_id)
+        except Exception:
+            log.exception("failed to record message_id in session")
     return sent
 
 
@@ -413,6 +406,10 @@ def _apply_processed_inner(
 ) -> tuple[int, int]:
     observations = result.get("observations") or []
 
+    # Портрет пользователя: дёшево применить live-дельту (речь/тон/триггеры).
+    # Внутри своя обработка ошибок — граф не пострадает, даже если портрет упадёт.
+    about.apply_delta(result.get("user_delta") or {})
+
     # Домен raw-блока — детерминированно от кода: домен сессии (в нём задан
     # вопрос). Для свободной заметки (/ucho, session_domain=None) — из первого
     # валидного наблюдения, иначе everyday. LLM raw-доменом больше не управляет.
@@ -563,12 +560,13 @@ async def cmd_start(message: Message) -> None:
         log.info("ignored /start from non-owner user_id=%s", message.from_user.id if message.from_user else None)
         return
     vault.ensure_layout()
-    had_session = session.get() is not None
+    # Активную сессию уже закрыл AccessMiddleware (любая команда закрывает её,
+    # снапшот ушёл в кольцо — можно продолжить reply). Здесь только подтверждаем.
     session.clear()
-    if had_session:
-        await message.answer("Смыто — сессия закрыта. Данные целы.\nСписок команд — /help.")
-    else:
-        await message.answer("Активной сессии не было. Данные целы.\nСписок команд — /help.")
+    await message.answer(
+        "Смыто — сессия закрыта (если была). Данные целы; продолжить разговор можно "
+        "reply на любое его сообщение.\nСписок команд — /help."
+    )
 
 
 @router.message(Command("help"))
@@ -968,9 +966,23 @@ async def on_text(message: Message) -> None:
     s = session.get()
     text = (message.text or "").strip()
 
-    # reply на сообщение-вопрос → ответить именно на него (возможно — на прошлый,
-    # оставшийся без ответа). Резолвим по карте message_id→вопрос.
+    # reply на сообщение сессии → продолжить именно ту сессию (даже закрытую, в
+    # пределах последних 25). Если reply на сообщение текущей активной сессии —
+    # просто продолжаем её. Иначе ищем в кольце и резюмируем.
     if message.reply_to_message is not None:
+        rid = message.reply_to_message.message_id
+        if s is not None and rid in (s.message_ids or []):
+            pass  # reply внутри текущей сессии — обычный ход
+        else:
+            sid = sessions.find_by_message_id(rid)
+            if sid is not None and session.resume(sid) is not None:
+                s = session.get()
+                vault.append_log("info", "session_resumed", f"sid={sid[:8]} by reply")
+
+    # Фолбэк: reply на старый вопрос вне кольца — резолвим по карте message_id→вопрос.
+    if message.reply_to_message is not None and (
+        s is None or message.reply_to_message.message_id not in (s.message_ids or [])
+    ):
         entry = qmap.find_by_message_id(message.reply_to_message.message_id)
         if entry is None:
             # qmap не знает это сообщение (вопрос задан до qmap / карта потерялась).
@@ -1102,50 +1114,18 @@ async def _handle_probe(message: Message, text: str) -> None:
     s.pending_answer = None
     session.persist()
 
-    debate = (result.get("debate_message") or "").strip()
-    close = bool(result.get("close_session"))
-
-    # Лимит поясняющих: после MAX_CLARIFIERS отвеченных пояснений (или если LLM
-    # сама решила закрыть) — закрывающий комментарий вместо нового вопроса.
-    # Плюс: если пользователь отверг саму рамку вопроса — не долбим поясняющим.
-    rejected = _rejects_frame(text)
-    if rejected:
-        vault.append_log(
-            "info", "frame_rejected",
-            f"Q{s.current_q_num}: закрываю сессию вместо поясняющего",
-        )
-    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS or rejected
-
-    if force_close_with_summary or close:
-        thinking2 = await _start_thinking(message)
-        try:
-            comment = await summarize_session(
-                main_question=s.main_question or s.last_question,
-                exchanges=list(s.history),
-            )
-        except Exception:
-            log.exception("summarize_session failed")
-            comment = "Сессия закрыта."
-        await _stop_thinking(thinking2)
-        if comment:
-            for chunk in _split_for_telegram(comment):
-                await message.answer(chunk)
-        session.clear()
-        return
-
-    if not debate:
-        debate = "Понял, продолжим — что скажешь дальше?"
-
-    # Новый поясняющий вопрос — счётчик +1
+    # Реакция вместо кларифера: реплика-укол от 1-го лица, НЕ вопрос. Сессия
+    # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
+    # становится «якорем» следующего хода (её q_num, её message_id в сессии).
+    reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
+    s.record_assistant(reaction)
     new_n = vault.next_q_num()
-    s.record_assistant(debate)
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(debate, next_domain, q_num=new_n)
-    s.clarifier_count += 1
+    session.set_question(reaction, next_domain, q_num=new_n)
     session.persist()
     await _send_question(
         message.bot, message.chat.id,
-        q_num=new_n, mode=s.mode, domain=next_domain, text=debate,
+        q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
     )
 
 
@@ -1220,44 +1200,20 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     s.pending_answer = None
     session.persist()
 
-    debate = (result.get("debate_message") or "").strip()
-    close = bool(result.get("close_session"))
-    force_close_with_summary = s.clarifier_count >= MAX_CLARIFIERS or _rejects_frame(text)
-
-    if force_close_with_summary or close:
-        try:
-            comment = await summarize_session(
-                main_question=s.main_question or question,
-                exchanges=list(s.history),
-            )
-        except Exception:
-            log.exception("recovery: summarize_session failed")
-            comment = "Сессия закрыта."
-        if comment:
-            for chunk in _split_for_telegram(comment):
-                try:
-                    await bot.send_message(uid, chunk)
-                except Exception:
-                    log.exception("recovery: failed to send summary chunk")
-        session.clear()
-        return
-
-    if not debate:
-        debate = "Понял, продолжим — что скажешь дальше?"
-
+    # Реакция (как в _handle_probe): реплика-укол, сессия остаётся открытой.
+    reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
+    s.record_assistant(reaction)
     new_n = vault.next_q_num()
-    s.record_assistant(debate)
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(debate, next_domain, q_num=new_n)
-    s.clarifier_count += 1
+    session.set_question(reaction, next_domain, q_num=new_n)
     session.persist()
     try:
         await _send_question(
             bot, uid,
-            q_num=new_n, mode=s.mode, domain=next_domain, text=debate,
+            q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
         )
     except Exception:
-        log.exception("recovery: failed to send next question")
+        log.exception("recovery: failed to send reaction")
 
 
 async def _handle_review(message: Message, text: str) -> None:
@@ -1405,3 +1361,94 @@ async def send_daily_question(bot: Bot, uid: int) -> None:
         return
     session.start(mode="probe", domain=None)
     await _send_next_question(bot, uid, domain=None)
+
+
+# ---------- офлайн-бэклог (сообщения, пришедшие пока бот лежал) ----------
+
+
+async def process_offline_backlog(bot: Bot, dp: Dispatcher) -> None:
+    """Слить бэклог Telegram ДО старта поллинга и обработать офлайн-сообщения.
+
+    Текстовые сообщения (не команды) от доверенных группируем по uid и склеиваем
+    в ОДИН ответ → один итоговый комментарий Иуды (а не ответ на каждое). Команды
+    и прочие апдейты переигрываем по одной через dispatcher. Слив через get_updates
+    с продвижением offset ack-ает апдейты на сервере — start_polling их не переотдаст.
+    """
+    drained: list = []
+    offset: int | None = None
+    try:
+        while True:
+            batch = await bot.get_updates(offset=offset, timeout=0, limit=100)
+            if not batch:
+                break
+            drained.extend(batch)
+            offset = batch[-1].update_id + 1
+    except Exception:
+        log.exception("offline backlog: get_updates failed")
+        return
+    if not drained:
+        return
+
+    text_by_uid: dict[int, list[Message]] = {}
+    other: list = []
+    for u in drained:
+        m = getattr(u, "message", None)
+        txt = (m.text or "").strip() if (m is not None and m.text) else ""
+        uid = m.from_user.id if (m is not None and m.from_user) else None
+        if txt and not txt.startswith("/") and uid is not None and users.is_allowed(uid):
+            text_by_uid.setdefault(uid, []).append(m.as_(bot))
+        else:
+            other.append(u)
+
+    log.info(
+        "offline backlog: %d updates, %d user(s) with text, %d other",
+        len(drained), len(text_by_uid), len(other),
+    )
+
+    for uid, msgs in text_by_uid.items():
+        try:
+            await _process_offline_user(bot, uid, msgs)
+        except Exception:
+            log.exception("offline backlog failed for uid=%s", uid)
+
+    # Команды / стейл-апдейты — переиграть штатно, в порядке прихода.
+    for u in other:
+        try:
+            await dp.feed_update(bot, u)
+        except Exception:
+            log.exception("offline backlog: feed_update failed")
+
+
+async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None:
+    """Склеить офлайн-сообщения одного пользователя в один ответ."""
+    userctx.set_user(uid)
+    vault.ensure_layout()
+    combined = "\n\n".join((m.text or "").strip() for m in msgs if m.text).strip()
+    if not combined:
+        return
+    carrier = msgs[-1]  # реальный Message (с привязанным ботом) — для answer/typing
+    try:
+        await bot.send_message(
+            uid, f"Пока меня не было, ты прислал {len(msgs)} сообщ. — отвечаю разом."
+        )
+    except Exception:
+        log.exception("offline backlog: notify failed for uid=%s", uid)
+
+    s = session.get()
+    if s is not None and s.mode == "probe" and s.last_question:
+        if not ratelimit.try_acquire(uid):
+            return
+        try:
+            # Склеенный ответ как один ход → одна реакция; сессия остаётся открытой.
+            await _handle_probe(carrier, combined)
+            vault.commit_all("offline batch")
+        finally:
+            ratelimit.release(uid)
+    else:
+        # Нет активной probe-сессии — склеить в заметку (тоже один итог).
+        clean = await _accept_user_text(carrier, combined)
+        if clean is not None:
+            await _ingest_note(
+                carrier, clean,
+                note_prefix="Пока меня не было — склеил сообщения в заметку",
+            )

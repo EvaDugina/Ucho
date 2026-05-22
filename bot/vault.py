@@ -324,6 +324,13 @@ def ensure_layout() -> None:
         idx.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
+    # Портрет пользователя (about_user.md) — пустой скелет, заполняется live-дельтами
+    # бота и прозой weekly-review. Импорт локальный: about → atomic, без цикла с vault.
+    try:
+        from . import about
+        about.ensure()
+    except Exception:
+        log.exception("failed to ensure about_user.md")
     _ensure_user_graph_settings()
     ensure_git_repo()
 

@@ -8,12 +8,13 @@
 """
 import json
 import logging
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
-from . import userctx
+from . import sessions, userctx
 from .atomic import atomic_write_json
 from .config import VAULT_PATH
 
@@ -42,6 +43,13 @@ class Session:
     clarifier_count: int = 0
     # Двухфазный коммит ответа: ставится ДО process_answer, чистится ПОСЛЕ.
     pending_answer: Optional[str] = None
+    # Идентичность сессии и id всех её сообщений бота — для reply-resume (кольцо).
+    id: str = ""
+    message_ids: list[int] = field(default_factory=list)
+
+    def add_message_id(self, mid: int) -> None:
+        self.message_ids.append(int(mid))
+        _persist()
 
     def record_assistant(self, text: str) -> None:
         if not text:
@@ -133,9 +141,20 @@ def get() -> Optional["Session"]:
     return _active.get(uid) if uid is not None else None
 
 
+def _snapshot_to_ring(s: Optional["Session"]) -> None:
+    """Сохранить непустую сессию в кольцо (для последующего reply-resume)."""
+    if s is None or not (s.history or s.message_ids) or not s.id:
+        return
+    try:
+        sessions.snapshot(s.to_dict())
+    except Exception:
+        log.exception("failed to snapshot session to ring")
+
+
 def start(mode: Mode, domain: Optional[str] = None) -> "Session":
     uid = userctx.current_uid()
-    s = Session(mode=mode, domain=domain)
+    _snapshot_to_ring(_active.get(uid) if uid is not None else None)
+    s = Session(mode=mode, domain=domain, id=uuid.uuid4().hex)
     if uid is not None:
         _active[uid] = s
     _persist()
@@ -143,10 +162,40 @@ def start(mode: Mode, domain: Optional[str] = None) -> "Session":
 
 
 def clear() -> None:
+    """Убрать активную сессию без снапшота (для аварийного сброса)."""
     uid = userctx.current_uid()
     if uid is not None:
         _active.pop(uid, None)
     _persist()
+
+
+def close() -> bool:
+    """Закрыть активную сессию: снапшот в кольцо + очистка. True, если была."""
+    uid = userctx.current_uid()
+    s = _active.get(uid) if uid is not None else None
+    if s is None:
+        return False
+    _snapshot_to_ring(s)
+    if uid is not None:
+        _active.pop(uid, None)
+    _persist()
+    return True
+
+
+def resume(session_id: str) -> Optional["Session"]:
+    """Сделать активной сессию из кольца (текущую сперва снапшотим)."""
+    uid = userctx.current_uid()
+    snap = sessions.load(session_id)
+    if snap is None:
+        return None
+    cur = _active.get(uid) if uid is not None else None
+    if cur is not None and cur.id != session_id:
+        _snapshot_to_ring(cur)
+    s = Session.from_dict(snap)
+    if uid is not None:
+        _active[uid] = s
+    _persist()
+    return s
 
 
 def set_question(question: str, domain: str, q_num: Optional[int] = None) -> None:

@@ -11,7 +11,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from . import vault
+from . import about, vault
 from .config import (
     DOMAINS,
     LLM_TIMEOUT,
@@ -33,15 +33,34 @@ _client = AsyncOpenAI(
     max_retries=1,
 )
 
-_system_prompt = (PROMPTS_DIR / "system.md").read_text(encoding="utf-8")
-_review_addendum = (PROMPTS_DIR / "review.md").read_text(encoding="utf-8")
+# Промпты разбиты по режимам: общий base + addendum под каждый kind.
+_base_prompt = (PROMPTS_DIR / "base.md").read_text(encoding="utf-8")
 _summarize_prompt = (PROMPTS_DIR / "summarize.md").read_text(encoding="utf-8")
+_MODE_PROMPTS = {
+    "ask": (PROMPTS_DIR / "ask.md").read_text(encoding="utf-8"),
+    "process": (PROMPTS_DIR / "process.md").read_text(encoding="utf-8"),
+    "review": (PROMPTS_DIR / "review.md").read_text(encoding="utf-8"),
+}
 
 
-def _system(mode: str) -> str:
-    if mode == "review":
-        return f"{_system_prompt}\n\n{_review_addendum}"
-    return _system_prompt
+def _portrait_block() -> str:
+    """Блок «# Кто перед тобой» из per-user about_user.md (или '')."""
+    try:
+        p = about.render_for_prompt()
+    except Exception:
+        log.exception("about.render_for_prompt failed")
+        return ""
+    return f"\n\n# Кто перед тобой\n{p}" if p else ""
+
+
+def _system(kind: str) -> str:
+    """Системный промпт = общий base + addendum режима + портрет пользователя.
+
+    kind ∈ {ask, process, review} — это РЕЖИМ ПРОМПТА, не mode сессии.
+    """
+    addendum = _MODE_PROMPTS.get(kind, "")
+    base = f"{_base_prompt}\n\n{addendum}" if addendum else _base_prompt
+    return base + _portrait_block()
 
 
 async def _chat_json(messages: list[dict], temperature: float = 0.6) -> dict:
@@ -80,7 +99,7 @@ async def ask_next(
         ] if x
     )
 
-    messages = [{"role": "system", "content": _system(mode)}]
+    messages = [{"role": "system", "content": _system("ask")}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_msg})
@@ -116,7 +135,8 @@ async def process_answer(
 
     Returns dict с ключами:
         observations: [{domain, type, name, summary, quote}],
-        debate_message, question_type, close_session
+        reaction (реплика-укол от 1-го лица, НЕ вопрос),
+        user_delta (портрет пользователя).
     """
     user_msg = "\n\n".join([
         "mode: process",
@@ -126,16 +146,15 @@ async def process_answer(
         f"context_concepts:\n{context_concepts or '(база пуста)'}",
     ])
 
-    messages = [{"role": "system", "content": _system(mode)}]
+    messages = [{"role": "system", "content": _system("process")}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_msg})
 
     data = await _chat_json(messages, temperature=0.5)
     data.setdefault("observations", [])
-    data.setdefault("debate_message", "")
-    data.setdefault("question_type", "")
-    data.setdefault("close_session", False)
+    data.setdefault("reaction", "")
+    data.setdefault("user_delta", {})  # портрет пользователя (about.apply_delta)
     return data
 
 
@@ -151,7 +170,7 @@ async def summarize_session(main_question: str, exchanges: list[dict]) -> str:
         "3–5 предложений, без вопросов."
     )
     messages = [
-        {"role": "system", "content": _summarize_prompt},
+        {"role": "system", "content": _summarize_prompt + _portrait_block()},
         *exchanges,
         {"role": "user", "content": closing_instruction},
     ]

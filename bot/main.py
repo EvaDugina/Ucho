@@ -85,9 +85,21 @@ async def main() -> None:
     await _setup_commands(bot)
     scheduler = start_scheduler(bot)
 
-    # Recovery несработавшего LLM-цикла — по каждому пользователю с pending.
+    # Recovery несработавшего LLM-цикла — синхронно (await), ДО склейки офлайн-
+    # бэклога: прерванный ответ дожимается и может задать новый вопрос, на который
+    # затем лягут офлайн-сообщения. (Раньше был create_task — гонка с поллингом.)
     for uid in pending_uids:
-        asyncio.create_task(handlers.process_pending_on_startup(bot, uid))
+        try:
+            await handlers.process_pending_on_startup(bot, uid)
+        except Exception:
+            log.exception("pending recovery failed for uid=%s", uid)
+
+    # Сообщения, пришедшие пока контейнер лежал, — обработать склеенными в один
+    # ответ (один итоговый комментарий), ДО старта обычного поллинга.
+    try:
+        await handlers.process_offline_backlog(bot, dp)
+    except Exception:
+        log.exception("offline backlog processing failed")
 
     log.info("bot starting polling…")
     try:
