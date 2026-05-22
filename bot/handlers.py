@@ -4,70 +4,28 @@ import random
 import re
 from datetime import datetime, timedelta
 
-from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    TelegramObject,
 )
 
-from . import about, graph, moc, moods, qmap, questions, ratelimit, session, sessions, translate, userctx, users, vault
-from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
-from .graph import Concept, Evidence
+from . import about, graph, moods, qmap, questions, ratelimit, session, sessions, translate, userctx, users, vault
+from .config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
 from .llm import about_present, ask_next, classify_mood, process_answer
+from .services.answer_service import apply_processed
 from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
     safe_chat_html,
     safe_user_text,
-    slugify,
 )
 
 log = logging.getLogger(__name__)
 router = Router()
-
-_CONSENT_TEXT = (
-    "Это личный бот-собеседник. Он задаёт вопросы и складывает твои ответы в "
-    "психо-философский портрет (граф концептов) в локальной базе владельца — "
-    "ничего не уходит в облако. Доступ к твоей базе есть у владельца этого бота. "
-    "Продолжая пользоваться, ты соглашаешься. Команды — /help."
-)
-
-
-class AccessMiddleware(BaseMiddleware):
-    """Гейт доступа + установка request-scoped пользователя.
-
-    На КАЖДЫЙ update (message/callback): берёт user_id, проверяет whitelist
-    (не в списке → молча роняем), выставляет userctx (per-user маршрутизация
-    данных), один раз показывает disclaimer о приватности новым гостям.
-    """
-
-    async def __call__(self, handler, event: TelegramObject, data: dict):
-        user = data.get("event_from_user")
-        uid = user.id if user is not None else None
-        if uid is None or not users.is_allowed(uid):
-            return  # не в whitelist — тишина
-        userctx.set_user(uid)
-        # Disclaimer один раз для гостей (не владельца).
-        if not users.is_owner(uid) and not users.has_consent(uid):
-            try:
-                await event.bot.send_message(uid, _CONSENT_TEXT)
-            except Exception:
-                log.exception("failed to send consent disclaimer to %s", uid)
-            users.set_consent(uid)
-        # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
-        # её можно продолжить reply на любое её сообщение). Команды-открыватели
-        # (/ask, /echo, /requestion, /about) затем заведут новую.
-        # ИСКЛЮЧЕНИЕ — /pebble: проверка живости, не должна трогать сессию и
-        # прерывать генерацию реакции (см. cmd_pebble).
-        if isinstance(event, Message) and (event.text or "").startswith("/"):
-            cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
-            if cmd != "pebble" and session.close():
-                log.info("session closed by command for uid=%s", uid)
-        return await handler(event, data)
 
 _DOMAIN_LABELS = {
     "ethics": "Этика",
@@ -401,156 +359,6 @@ def _context_for_domain(domain: str | None) -> str:
     return graph.context_snapshot(concepts)
 
 
-def _apply_processed(
-    result: dict,
-    q_num: int,
-    asked_at: datetime,
-    original_question: str,
-    original_answer: str,
-    session_domain: str | None = None,
-) -> tuple[int, int]:
-    """Записать в raw и применить анализ LLM к графу. Возвращает (created, updated).
-
-    Запись и идентичность — целиком на коде: raw пишется дословно (реальные
-    Q/A + домен сессии), slug выводит код из имени (`slugify`), create-vs-update
-    решает дедуп. LLM присылает только `observations` + следующий вопрос —
-    он анализирует, код кладёт в БД. Транзакция через git_wrap.
-    """
-    with vault.git_wrap(f"apply_processed Q{q_num}"):
-        return _apply_processed_inner(
-            result, q_num, asked_at, original_question, original_answer, session_domain
-        )
-
-
-def _verbatim_quote(quote: str | None, answer: str) -> str:
-    """Цитата для evidence — дословный фрагмент ответа. Если LLM перефразировал
-    (нет как подстрока при схлопнутых пробелах) — фолбэк на отрывок самого
-    ответа. Гарантия: evidence — реальные слова человека, не выдумка модели."""
-    a = answer.strip()
-    q = (quote or "").strip()
-    if q and " ".join(q.split()).lower() in " ".join(a.split()).lower():
-        return q
-    return a[:300]
-
-
-def _apply_processed_inner(
-    result: dict,
-    q_num: int,
-    asked_at: datetime,
-    original_question: str,
-    original_answer: str,
-    session_domain: str | None = None,
-) -> tuple[int, int]:
-    observations = result.get("observations") or []
-
-    # Портрет пользователя: дёшево применить live-дельту (речь/тон/триггеры).
-    # Внутри своя обработка ошибок — граф не пострадает, даже если портрет упадёт.
-    about.apply_delta(result.get("user_delta") or {})
-
-    # Домен raw-блока — детерминированно от кода: домен сессии (в нём задан
-    # вопрос). Для свободной заметки (/ucho, session_domain=None) — из первого
-    # валидного наблюдения, иначе everyday. LLM raw-доменом больше не управляет.
-    raw_domain = session_domain if session_domain in DOMAINS else None
-    if raw_domain is None:
-        raw_domain = next((o.get("domain") for o in observations if o.get("domain") in DOMAINS), None)
-    if raw_domain is None:
-        raw_domain = "everyday"
-
-    # raw — дословно Q + A (источник правды); профиль — дословный ответ человека.
-    vault.append_raw(
-        q_num=q_num,
-        when=asked_at,
-        domain=raw_domain,
-        question=original_question,
-        answer=original_answer,
-    )
-    vault.append_profile(
-        when=datetime.now(),
-        domain=raw_domain,
-        fragment=original_answer,
-        raw_time=asked_at.strftime("%H:%M"),
-    )
-
-    # Obsidian-native: ссылка на конкретный Q-блок (^Q<n>) — клик в концепте
-    # ведёт в точное место raw.
-    raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}#^Q{q_num}]]"
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    session_marker = f"chat · {now_str}"
-    touched_domains: set[str] = set()
-    created = updated = 0
-
-    # Каждое наблюдение LLM → код решает: дубль (дописать evidence) или новый
-    # черновик. slug код выводит сам из имени; LLM slug/create-vs-update не шлёт.
-    for obs in observations:
-        try:
-            name = (obs.get("name") or "").strip()
-            if not name:
-                continue
-            domain = obs.get("domain") if obs.get("domain") in DOMAINS else raw_domain
-            summary = obs.get("summary") or ""
-            quote = _verbatim_quote(obs.get("quote"), original_answer)
-            slug = slugify(name)
-
-            # Дедуп (всё в коде): по имени/алиасу → по существующему slug-файлу →
-            # по Jaccard на summary. Совпало — обновляем, иначе новый draft.
-            existing = graph.resolve_slug(name, domain=domain)
-            if not existing and slug:
-                existing = graph.resolve_slug(slug, domain=domain)
-            if not existing and summary:
-                similar = graph.find_similar_concept(summary, domain)
-                if similar is not None:
-                    existing = similar.slug
-                    vault.append_log(
-                        "info", "dedup_jaccard",
-                        f"obs {name!r} overlaps {similar.slug!r} ≥0.7 → update",
-                    )
-
-            if existing:
-                graph.append_evidence(existing, Evidence(when=now_str, text=quote, raw_ref=raw_ref))
-                if name.lower() != existing.lower():
-                    graph.add_alias(existing, name)
-                updated += 1
-                touched_domains.add(domain)
-                continue
-
-            if not slug:
-                vault.append_log("warn", "bad_obs_name", f"name={name!r} → пустой slug, пропуск")
-                continue
-            # capture-first: создаём ЧЕРНОВИК (status=draft). Связи/конфликты
-            # строит weekly-review, не бот.
-            concept = Concept(
-                slug=slug,
-                name=name,
-                type=obs.get("type", "claim"),
-                domain=domain,
-                summary=summary,
-                status="draft",
-                evidence=[Evidence(when=now_str, text=quote, raw_ref=raw_ref)],
-                source_session=session_marker,
-            )
-            if graph.save_concept(concept) is not None:
-                created += 1
-                touched_domains.add(domain)
-        except Exception:
-            log.exception("failed to apply observation %r", obs)
-
-    # Пересобрать MOC для затронутых доменов (атомарно, внутри git_wrap).
-    for d in touched_domains:
-        try:
-            moc.rebuild_domain_moc(d)
-        except Exception:
-            log.exception("failed to rebuild MOC for domain %s", d)
-
-    # Вопрос отвечен — пометим в карте. Повторный reply/answer на него теперь
-    # пойдёт как Q-повтор (новый q_num). No-op для q_num не из карты (/ucho).
-    try:
-        qmap.mark_answered(q_num)
-    except Exception:
-        log.exception("failed to mark q_num=%s answered in qmap", q_num)
-
-    return created, updated
-
-
 # ---------- commands ----------
 
 
@@ -687,18 +495,18 @@ async def cmd_dailyall(message: Message, bot: Bot) -> None:
     sent = skipped = failed = 0
     for uid in sorted(targets):
         try:
-            userctx.set_user(uid)
-            if session.get() is not None:
+            # send_daily_question сам дедупит по дню (общий маркер с cron/догоном)
+            # и не пропускает из-за активной сессии/прошлых ответов.
+            if await send_daily_question(bot, uid):
+                sent += 1
+            else:
                 skipped += 1
-                continue
-            await send_daily_question(bot, uid)
-            sent += 1
         except Exception:
             failed += 1
             log.exception("dailyall failed for uid=%s", uid)
     userctx.set_user(message.from_user.id)
     await message.answer(
-        f"Разослал. Отправлено: {sent}, пропущено (активная сессия): {skipped}, ошибок: {failed}."
+        f"Разослал. Отправлено: {sent}, пропущено (уже было сегодня): {skipped}, ошибок: {failed}."
     )
 
 
@@ -978,7 +786,7 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
 
         created = updated = 0
         try:
-            created, updated = _apply_processed(result, q_num, when, note_question, clean)
+            created, updated = apply_processed(result, q_num, when, note_question, clean)
         except Exception:
             log.exception("apply_processed failed in note ingest")
         vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
@@ -1158,7 +966,7 @@ async def _handle_probe(message: Message, text: str) -> None:
         return
 
     try:
-        _apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
+        apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
     except Exception:
         log.exception("apply_processed failed")
 
@@ -1248,7 +1056,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         return  # pending_answer сохранён — повторим в следующий раз.
 
     try:
-        _apply_processed(result, q_num, s.asked_at, question, text, session_domain=real_hint)
+        apply_processed(result, q_num, s.asked_at, question, text, session_domain=real_hint)
     except Exception:
         log.exception("recovery: apply_processed failed")
         vault.append_log("error", "pending_answer_apply_failed", f"Q{q_num} apply_processed raised")
@@ -1351,14 +1159,23 @@ async def _send_next_question(
     )
 
 
-async def send_daily_question(bot: Bot, uid: int) -> None:
-    """Точка входа для scheduler-а — дневной вопрос конкретному пользователю."""
+async def send_daily_question(bot: Bot, uid: int) -> bool:
+    """Дневной вопрос пользователю — раз в день. True если отправлен, False если
+    пропущен (уже был сегодня).
+
+    Дедуп по дате (`vault.daily_already_sent`/`mark_daily_sent`, общий маркер для
+    cron, `/dailyall` и догона после простоя) — за день уходит ровно один. Активная
+    сессия и прошлые ответы НЕ блокируют: дневной вопрос всё равно приходит (как
+    `/ask`; текущая сессия уйдёт в кольцо через `session.start`).
+    """
     userctx.set_user(uid)
-    if session.get() is not None:
-        log.info("daily skipped: session already active for uid=%s", uid)
-        return
+    if vault.daily_already_sent(DAILY_TZ):
+        log.info("daily skipped: already sent today uid=%s", uid)
+        return False
     session.start(mode="probe", domain=None)
     await _send_next_question(bot, uid, domain=None)
+    vault.mark_daily_sent(DAILY_TZ)
+    return True
 
 
 # ---------- офлайн-бэклог (сообщения, пришедшие пока бот лежал) ----------

@@ -6,7 +6,8 @@ from aiogram.types import BotCommand, BotCommandScopeChat
 
 from . import handlers, selfcheck, session, userctx, users, vault
 from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
-from .handlers import AccessMiddleware, router
+from .handlers import router
+from .middleware import AccessMiddleware
 from .scheduler import start_scheduler
 
 logging.basicConfig(
@@ -99,6 +100,14 @@ async def main() -> None:
         await handlers.process_offline_backlog(bot, dp)
     except Exception:
         log.exception("offline backlog processing failed")
+
+    # Догон дневного вопроса: если бот лежал в час рассылки — дослать сегодняшний
+    # (не за прошлые дни). Дедуп по дате внутри send_daily_question.
+    try:
+        from .scheduler import catch_up_daily
+        await catch_up_daily(bot)
+    except Exception:
+        log.exception("catch_up_daily failed")
 
     log.info("bot starting polling…")
     try:
