@@ -18,13 +18,13 @@ log = logging.getLogger("psycho.main")
 
 # Команды, видимые при наборе «/». Базовый набор — для всех доверенных.
 BOT_COMMANDS = [
-    BotCommand(command="ask", description="Задать вопрос: /ask [тема или о чём]"),
-    BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
+    BotCommand(command="pebble", description="Бросить камень"),
     BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
+    BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
+    BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
+    BotCommand(command="requestion", description="Повторить выбранный вопрос N"),
     BotCommand(command="about", description="Каким я тебя вижу"),
     BotCommand(command="history", description="Последние вопросы"),
-    BotCommand(command="requestion", description="Повторить выбранный вопрос N"),
-    BotCommand(command="pebble", description="Бросить камень"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Кнопка смыва"),
 ]
