@@ -1,5 +1,6 @@
-aiogram==3.13.1
-openai==1.59.5
-APScheduler==3.10.4
-python-dotenv==1.0.1
-PyYAML==6.0.2
+# Дополнительные / новые зависимости (быстрый слой). Базовые тяжёлые ядро-либы —
+# в requirements-base.txt (ставятся раньше и кэшируются отдельно).
+# Инструментальный сигнал тональности (Фаза E): VADER (англ. лексикон) + локальный
+# офлайн-перевод RU→EN Argos Translate (модель ru→en ставится в Dockerfile на build).
+vaderSentiment==3.3.2
+argostranslate==1.9.6

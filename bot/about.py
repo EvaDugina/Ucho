@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from . import userctx
+from . import moods, userctx
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -32,6 +32,9 @@ _DELTAS_MAX = 200  # кольцо журнала дельт (старое выт
 _FIELD_KEYS = ("register", "tone", "openness", "provocation_tolerance")
 # Прозаические поля дельты — копятся в журнал, прозу пишет weekly-review.
 _PROSE_KEYS = ("speech_note", "trigger", "motif", "fact", "rapport")
+# Поля настроения: пишет КОД (set_mood) и weekly (mood_baseline) — НЕ live-дельта LLM.
+# mood — текущий вектор (строка), bot_mood — последнее лицо, mood_baseline — prior "valence,arousal".
+_MOOD_KEYS = ("mood", "bot_mood", "mood_baseline")
 
 # 8 секций портрета (порядок фиксирован; прозу заполняет weekly-review).
 _SECTIONS = (
@@ -62,6 +65,9 @@ def _skeleton() -> str:
         "tone": "",
         "openness": "",
         "provocation_tolerance": "",
+        "mood": "",
+        "bot_mood": "",
+        "mood_baseline": "",
     }
     head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
     body = "\n".join(f"## {s}\n" for s in _SECTIONS)
@@ -115,6 +121,43 @@ def apply_delta(delta: dict) -> None:
         log.exception("about.apply_delta failed (non-fatal)")
 
 
+def set_mood(mood_vec: dict, bot_mood: str | None = None) -> None:
+    """Записать текущее настроение пользователя (и выбранное лицо) в портрет.
+
+    Пишет КОД детерминированно (не LLM-дельта). `mood` — компактная строка вектора
+    из `moods.mood_label`. Никогда не роняет вызывающий код.
+    """
+    if not isinstance(mood_vec, dict):
+        return
+    try:
+        ensure()
+        fm, body = _parse()
+        fm["mood"] = moods.mood_label(mood_vec)
+        if bot_mood:
+            fm["bot_mood"] = str(bot_mood)
+        fm["updated"] = datetime.now().strftime("%Y-%m-%d")
+        head = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False).strip()
+        content = f"---\n{head}\n---\n{body}"
+        if not content.endswith("\n"):
+            content += "\n"
+        atomic_write_text(path(), content)
+    except Exception:
+        log.exception("about.set_mood failed (non-fatal)")
+
+
+def baseline() -> tuple[float, float]:
+    """Prior (valence, arousal) из `mood_baseline` портрета (пишет weekly). Нет → (0,0)."""
+    try:
+        fm, _ = _parse()
+        raw = str(fm.get("mood_baseline") or "").strip()
+        if not raw:
+            return (0.0, 0.0)
+        v, a = (x.strip() for x in raw.split(",", 1))
+        return (max(-1.0, min(1.0, float(v))), max(-1.0, min(1.0, float(a))))
+    except Exception:
+        return (0.0, 0.0)
+
+
 def _append_delta_log(delta: dict) -> None:
     """Сохранить непустые поля дельты строкой в `_user_deltas.jsonl` (кольцо)."""
     kept = {
@@ -138,7 +181,10 @@ def render_for_prompt(max_chars: int = 1500) -> str:
     уходит только строка машинных полей, чтобы не жечь токены пустыми заголовками.
     """
     fm, body = _parse()
-    fields = [f"{k}: {fm[k]}" for k in _FIELD_KEYS if str(fm.get(k) or "").strip()]
+    # В промпт идут машинные поля + текущее настроение/лицо (mood_baseline — нет,
+    # это prior для расчёта в коде, а не для персоны).
+    render_keys = (*_FIELD_KEYS, "mood", "bot_mood")
+    fields = [f"{k}: {fm[k]}" for k in render_keys if str(fm.get(k) or "").strip()]
 
     sections: list[str] = []
     title: str | None = None

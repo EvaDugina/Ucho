@@ -61,12 +61,14 @@
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
 - `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (raw дословно + домен сессии → profile → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC; плюс `about.apply_delta`); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это weekly-review. На ответ — **реакция** (реплика-укол, не вопрос), сессия остаётся открытой; уточняющих вопросов бот не задаёт. Хелпер `_send_question()` — единая точка отправки вопроса/реакции (`plain` отделяет реакцию от главного вопроса; главный пишется в `questions` для `/history`), пишет `message_id` в `qmap` и в `message_ids` сессии. Команды (кроме `/pebble`) закрывают активную сессию в `AccessMiddleware`; `ask/echo/ucho/about/requestion` открывают новую. Reply: `on_text` сперва резюмирует сессию из кольца (`sessions.find_by_message_id`), иначе фолбэк на `qmap`/реконструкцию/заметку.
 - `bot/qmap.py` — персистентная карта `message_id→вопрос` (`users/<uid>/_qmap.json`, кольцо на 50). Источник правды по заданным вопросам, **включая неотвеченные** (в `raw/` их нет — блок пишется только при ответе). API: `append` / `find_by_message_id` / `find_by_q_num` / `mark_answered` (вызывается из `_apply_processed_inner` после записи raw). `message_id` стабилен между рестартами → reply резолвится надёжно.
-- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` + `about_present` (портрет; `iuda.md` + `about.md`), фолбэк-логирование. `ask_next` подмешивает в user-сообщение примеры стиля по теме из `questions_examples.md`. Клиент с `timeout=LLM_TIMEOUT` + `max_retries=1` (не висим ~600 c при зависшей Ollama).
+- `bot/llm.py` — обёртка openai-клиента, режимы `ask` / `process` + `about_present` (портрет; `iuda.md` + `about.md`) + `classify_mood` (вектор настроения). Системный промпт = `iuda` + `base` + `mood.md` + addendum + `user_prompt` + портрет. `ask_next`/`process_answer` принимают `bot_mood` (лицо). Реплики Иуды (reaction/question/about) чистятся `strip_extra_punctuation`. Фолбэк-логирование, `timeout=LLM_TIMEOUT` + `max_retries=1`.
+- `bot/moods.py` — настроение и лица. `QUALITIES`/`BOT_MOODS` (закрытые списки), `classify_mood`-результат → `session_mood` (recency-взвешенный вектор по сессии + затухающий prior + устойчивость), `pick_bot_mood` (контраст + per-user `mood/_mood_map.json`), `log_turn` (`_mood_log.jsonl`, с `vader_compound`), `vader_compound` (VADER по англ. переводу). Граф `mood/` и карту строит weekly-review.
+- `bot/translate.py` — RU→EN локально/офлайн через Argos Translate (`run_in_executor`, ленивый init, LRU-кэш). Только для инструментального VADER-сигнала; перевод не хранится; сбой → `""` (VADER пропускается). Модель ru→en ставится в `Dockerfile` на build-стадии (рантайм без сети).
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на общий GPU): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id, `append_profile`, `append_note` (свободные заметки `/ucho` в `notes/`), `iter_history`. `_ensure_user_graph_settings` сидит `users/<uid>/.obsidian/graph.json` из шаблона `bot/assets/graph.json` новому юзеру (идемпотентно — существующий не трогает).
 - `bot/assets/graph.json` — шаблон настроек графа Obsidian для папки пользователя (фильтр только `concepts` + скрытие MOC через `-file:<DOMAIN>` + без сирот, `showTags`, цветовые группы по доменам, серые узлы-теги). Копируется в каждый новый `users/<uid>/.obsidian/`.
-- `bot/session.py` — активная сессия, `_session.json` через atomic write, `from_dict` отбрасывает неизвестные поля.
+- `bot/session.py` — активная сессия, `_session.json` через atomic write, `from_dict` отбрасывает неизвестные поля. Поле `mood_trajectory` — per-message векторы настроения за сессию (сброс на новый главный вопрос).
 - `bot/scheduler.py` — APScheduler с cron-триггером.
 - `bot/atomic.py` — `atomic_write_text` / `atomic_write_json` (tmp + fsync + os.replace).
 - `bot/manifest.py` — `record(path)` / `check_drift(path)` через `.psycho/manifest.json`.
@@ -77,7 +79,7 @@
 - `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `safe_chat_html` (экранирование вывода LLM для Telegram) / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
 - `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `about.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима (`ask`/`process`) + портрет; `about.md`/`summarize.md` — отдельные standalone-промпты. JSON-контракт строгий. (`review.md` удалён вместе с режимом review.)
 - `bot/sessions.py` — кольцо последних 25 сессий (`_sessions.json`): `snapshot`/`load`/`find_by_message_id` для reply-resume.
-- `bot/about.py` — портрет пользователя (`about_user.md` + `_user_deltas.jsonl`): `apply_delta` (live), `render_for_prompt` (инъекция в системный промпт), `ensure`.
+- `bot/about.py` — портрет пользователя (`about_user.md` + `_user_deltas.jsonl`): `apply_delta` (live), `render_for_prompt` (инъекция в системный промпт), `ensure`, `set_mood` (текущий вектор/лицо в портрет), `baseline` (prior настроения из `mood_baseline`). Поля `mood`/`bot_mood`/`mood_baseline` пишет код/weekly, не live-дельта LLM.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
 - `scripts/migrate_to_multiuser.py` — одноразовый перенос корня владельца → `users/<owner>/` (dry-run + `--apply` под git_wrap, с post-верификацией). Выполнен; можно удалить.
 
@@ -130,7 +132,7 @@ Psycho/
 │   ├── moc.py              per-domain MOC rebuild
 │   ├── selfcheck.py        механический self-check при старте
 │   └── validation.py       safe_slug/user_text/etc.
-├── prompts/                iuda + base + ask/process + about + questions_examples
+├── prompts/                iuda + base + mood + ask/process + about + questions_examples
 ├── scripts/
 │   └── migrate_domains.py  одноразовая миграция 4→10
 ├── docker-compose.yml      bot + ollama (GPU-проброс)
@@ -331,6 +333,8 @@ PoC B техчасть считается принятой, когда:
 - **2026-05-20:** парсер концептов поддерживает два формата (callouts + старый H2) — нужно для миграции и для того, чтобы ручные правки в Obsidian в любом из стилей не теряли данные.
 - **2026-05-20:** dedup через Jaccard на биграммах токенов (порог 0.7), не BM25. Граф ≤ сотни узлов, простой алгоритм достаточен, BM25-индекс — оверкилл для PoC B.
 - **2026-05-20:** валидация ввода — Defence-in-depth: на границе Telegram (`_accept_user_text`), на входе в vault (`escape_raw_block` в `append_raw`), на входе в граф (`safe_slug` в `save_concept`/`add_relation`/`append_evidence`), на выходе в Telegram (`html.escape` в `_format_q`).
+- **2026-05-22:** многоликий Иуда (`bot/moods.py`). Двухвызовный пайплайн: `classify_mood` (категории) + код-математика `session_mood` (recency по сессии, затухающий prior из `about.mood_baseline`, устойчивость через дисперсию) → `pick_bot_mood` (контраст или per-user `_mood_map.json`). Лицо (`bot_mood`) — в `process_answer`/`ask_next` + `prompts/mood.md`. Журнал `_mood_log.jsonl`; граф `mood/`, `_mood_map.json`, `user_prompt.md` (инжект `_user_prompt_block`) строит weekly-review. Реплики Иуды чистятся `strip_extra_punctuation` (только `. , ?`). Портрет — без роли владелец/гость.
+- **2026-05-22:** инструментальный сигнал тональности VADER (`vaderSentiment`, pip) + локальный офлайн-перевод RU→EN Argos Translate (`bot/translate.py`, модель ru→en в `Dockerfile` на build). `classify_mood` получает `vader.compound` как подсказку (LLM-арбитр перебивает иронию); `vader_compound` пишется в `_mood_log.jsonl`. Без новых контейнеров, без облака (hard-правило приватности соблюдено).
 - **2026-05-22:** иерархия доверия user < system + вывод LLM как текст. Пользовательский ввод фенсится маркерами данных (`_fence_user`), правило доверия — в `base.md`; вывод LLM экранируется на выходе в Telegram (`safe_chat_html`). У модели нет инструментов/`eval`/`shell` — она только генерирует текст по входным параметрам, вся запись и идентичность на коде.
 
 ### Технический долг

@@ -46,6 +46,18 @@ class Session:
     # Идентичность сессии и id всех её сообщений бота — для reply-resume (кольцо).
     id: str = ""
     message_ids: list[int] = field(default_factory=list)
+    # Траектория настроения за сессию (per-message векторы classify_mood).
+    # Сессия растянута во времени → копим, последнее сообщение весит больше
+    # (recency в moods.session_mood). Новый главный вопрос = новая сессия = сброс.
+    mood_trajectory: list[dict] = field(default_factory=list)
+
+    def record_mood(self, per_msg: dict) -> None:
+        if not isinstance(per_msg, dict) or not per_msg:
+            return
+        self.mood_trajectory.append(per_msg)
+        if len(self.mood_trajectory) > 40:
+            self.mood_trajectory = self.mood_trajectory[-40:]
+        _persist()
 
     def add_message_id(self, mid: int) -> None:
         self.message_ids.append(int(mid))

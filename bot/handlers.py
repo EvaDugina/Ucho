@@ -14,10 +14,10 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from . import about, graph, moc, qmap, questions, ratelimit, session, sessions, userctx, users, vault
+from . import about, graph, moc, moods, qmap, questions, ratelimit, session, sessions, translate, userctx, users, vault
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .graph import Concept, Evidence
-from .llm import about_present, ask_next, process_answer
+from .llm import about_present, ask_next, classify_mood, process_answer
 from .validation import (
     MAX_USER_TEXT,
     is_valid_telegram_command_arg,
@@ -586,7 +586,7 @@ _HELP_FOOTER = (
     f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
     "На любое моё сообщение можно ответить через <b>reply</b> (смахни сообщение) — "
     "продолжим с того места.\n\n"
-    "<i>Я сам настигну тебя вопросом.</i>"
+    "<i>Я сам настигну тебя своим вопросом.</i>"
 )
 
 
@@ -1122,6 +1122,25 @@ async def _handle_probe(message: Message, text: str) -> None:
     real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
     context_concepts = _context_for_domain(real_hint)
 
+    # Настроение: классифицируем последнее сообщение → копим траекторию сессии →
+    # считаем вектор (recency + затухающий prior из портрета) → выбираем КОНТРАСТНОЕ
+    # лицо → пишем в портрет. Сбой не валит обработку ответа.
+    mood_vec = None
+    bot_mood = None
+    vader = None
+    try:
+        # VADER — инструментальная подсказка тональности: переводим RU→EN локально
+        # (Argos, офлайн) и считаем compound. LLM в classify_mood — арбитр.
+        en = await translate.translate_ru_en(text)
+        vader = moods.vader_compound(en)
+        per_msg = await classify_mood(text, about.render_for_prompt(), vader=vader)
+        s.record_mood(per_msg)
+        mood_vec = moods.session_mood(s.mood_trajectory, about.baseline())
+        bot_mood = moods.pick_bot_mood(mood_vec)
+        about.set_mood(mood_vec, bot_mood)
+    except Exception:
+        log.exception("mood detection failed (non-fatal)")
+
     # Реакция считается молча (Q1: тишина) — без индикатора «Думаю».
     try:
         result = await process_answer(
@@ -1129,6 +1148,7 @@ async def _handle_probe(message: Message, text: str) -> None:
             answer=text,
             domain_hint=real_hint,
             context_concepts=context_concepts,
+            bot_mood=bot_mood,
             history=s.history[:-1],
             mode=s.mode,
         )
@@ -1146,6 +1166,10 @@ async def _handle_probe(message: Message, text: str) -> None:
     # больше не должен пытаться повторить эту реплику, иначе задвоит граф.
     s.pending_answer = None
     session.persist()
+
+    # Журнал пары (настроение → лицо) + vader для графа Фазы D (weekly агрегирует).
+    if mood_vec and bot_mood:
+        moods.log_turn(mood_vec, bot_mood, vader=vader)
 
     # Реакция вместо кларифера: реплика-укол от 1-го лица, НЕ вопрос. Сессия
     # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
@@ -1283,6 +1307,15 @@ async def _send_next_question(
         except Exception:
             pass
 
+    # Лицо для вопроса: вектор настроения из сессии (или prior из портрета, если
+    # сессия свежая) → контрастное лицо. Сбой не мешает задать вопрос.
+    bot_mood = None
+    try:
+        mv = moods.session_mood(getattr(s, "mood_trajectory", []) or [], about.baseline())
+        bot_mood = moods.pick_bot_mood(mv)
+    except Exception:
+        log.exception("ask mood pick failed (non-fatal)")
+
     try:
         # Главный вопрос (/ask, дневной) генерим НЕ опираясь на текущую базу:
         # без context_concepts и recent_raw — свежий, «случайный» вопрос по теме,
@@ -1293,6 +1326,7 @@ async def _send_next_question(
             context_concepts="",
             recent_raw="",
             hint=hint,
+            bot_mood=bot_mood,
             mode=s.mode,
         )
     except Exception:

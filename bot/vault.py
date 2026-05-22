@@ -311,6 +311,8 @@ def ensure_layout() -> None:
     """
     raw_dir().mkdir(parents=True, exist_ok=True)
     profile_dir().mkdir(parents=True, exist_ok=True)
+    # Папка графа настроений (узлы quality/лица + _mood_map.json); строит weekly-review.
+    (userctx.user_root() / "mood").mkdir(parents=True, exist_ok=True)
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
     for domain in DOMAINS:
         f = profile_dir() / f"{domain}.md"
