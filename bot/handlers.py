@@ -1020,7 +1020,8 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
                         text, s.history[:-1], mood_vec=mood_vec, vad=vad,
                     )
                     await message.answer(analysis.format_report(mood_vec, bot_mood, results))
-                    analysis.log_analysis(len(text), results)
+                    analysis.append_point(len(text), results)  # durable ряд для графиков
+                    analysis.rebuild_chart()                   # обновить заметку-график (Obsidian Charts)
                 else:
                     await message.answer(_format_mood(mood_vec, bot_mood, vad))
             except Exception:

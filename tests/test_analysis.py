@@ -31,3 +31,22 @@ def test_format_report_full():
     assert "грусть" in s  # эмоция EmoLex переведена на русский
     # после чисел есть текстовые пояснения
     assert "негатив" in s and "тревога" in s.lower()
+
+
+def test_aggregate_daily_groups_and_averages():
+    points = [
+        {"ts": "2026-05-22T10:00:00", "pad": {"valence": -0.4, "arousal": 0.0, "dominance": -0.2}},
+        {"ts": "2026-05-22T18:00:00", "pad": {"valence": -0.6, "arousal": 0.2, "dominance": -0.4}},
+        {"ts": "2026-05-23T09:00:00", "pad": {"valence": 0.5, "arousal": 0.3, "dominance": 0.1}},
+        {"ts": "2026-05-23T12:00:00", "pad": None},  # без PAD — игнор
+        {"ts": "bad", "foo": 1},                      # мусор — игнор
+    ]
+    labels, series = analysis.aggregate_daily(points)
+    assert labels == ["2026-05-22", "2026-05-23"]
+    assert series["valence"] == [-0.5, 0.5]  # среднее по дню
+    assert len(series["arousal"]) == 2 and len(series["dominance"]) == 2
+
+
+def test_aggregate_daily_empty():
+    labels, series = analysis.aggregate_daily([])
+    assert labels == [] and series["valence"] == []

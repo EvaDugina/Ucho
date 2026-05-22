@@ -2,7 +2,9 @@
 
 Гоняет НЕСКОЛЬКО независимых методов на один ответ человека (в контексте сессии),
 складывает их выводы в один отчёт (шлётся владельцу ПЕРЕД основным ответом) и пишет
-их рядом в `_analysis_log.jsonl` — чтобы потом на практике выбрать самые точные.
+их рядом в durable-ряд `mood/timeseries/YYYY-MM.jsonl` — чтобы потом на практике
+выбрать самые точные методы и строить графики колебаний настроения (день/неделя/
+месяц/сезон/год). Заметку-график `mood/График настроения.md` рисует плагин Obsidian Charts.
 
 Методы (провайдеры):
 - **pad** — текущий пайплайн настроения (Qwen-классификатор + код): эмоция + V/A/D.
@@ -25,11 +27,12 @@ from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-_LOG_MAX = 200  # кольцо журнала сравнения
+_CHART_DAYS = 180  # сколько последних дней показывать на графике
+_CHART_NOTE = "График настроения.md"
 
 
-def _log_path():
-    return userctx.user_root() / "_analysis_log.jsonl"
+def _ts_dir():
+    return userctx.user_root() / "mood" / "timeseries"
 
 
 async def run_all(
@@ -202,19 +205,111 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
     return "\n".join(L)
 
 
-def log_analysis(text_len: int, results: dict) -> None:
-    """Дописать выводы всех методов в `_analysis_log.jsonl` (кольцо) для сравнения.
-    Слова человека НЕ пишем — только длину сообщения и числовые выводы методов."""
+_METHOD_KEYS = ("pad", "vad_lex", "emolex", "dostoevsky", "ocean", "panas")
+
+
+def append_point(text_len: int, results: dict) -> None:
+    """Дописать точку временного ряда в `mood/timeseries/YYYY-MM.jsonl`.
+
+    Durable append-only (НЕ кольцо, НЕ ротируется) — основа для графиков колебания
+    настроения за день/неделю/месяц/сезон/год. Помесячная партиция держит файлы
+    мелкими. Пишем выводы ВСЕХ методов (для сравнения трендов методов во времени).
+    Слова человека НЕ сохраняем — только длину сообщения и числа.
+    """
     try:
         from datetime import datetime
+        now = datetime.now()
         entry = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            "ts": now.isoformat(timespec="seconds"),
             "len": text_len,
-            **{k: results.get(k) for k in ("pad", "vad_lex", "emolex", "dostoevsky", "ocean", "panas")},
+            **{k: results.get(k) for k in _METHOD_KEYS},
         }
-        p = _log_path()
+        d = _ts_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{now:%Y-%m}.jsonl"
         lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
         lines.append(json.dumps(entry, ensure_ascii=False))
-        atomic_write_text(p, "\n".join(lines[-_LOG_MAX:]) + "\n")
+        atomic_write_text(p, "\n".join(lines) + "\n")
     except Exception:
-        log.exception("log_analysis failed (non-fatal)")
+        log.exception("append_point failed (non-fatal)")
+
+
+def _read_recent_points(days: int) -> list[dict]:
+    """Прочитать точки ряда за последние `days` дней (по всем помесячным файлам)."""
+    from datetime import datetime, timedelta
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+    out: list[dict] = []
+    d = _ts_dir()
+    if not d.exists():
+        return out
+    for f in sorted(d.glob("*.jsonl")):
+        try:
+            for line in f.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                pt = json.loads(line)
+                if isinstance(pt, dict) and (pt.get("ts") or "") >= cutoff:
+                    out.append(pt)
+        except Exception:
+            log.exception("read timeseries file failed: %s (non-fatal)", f)
+    return out
+
+
+def aggregate_daily(points: list[dict]) -> tuple[list[str], dict[str, list]]:
+    """Дневное среднее PAD (valence/arousal/dominance) по точкам ряда. Чистая функция.
+
+    Returns (labels=отсортированные даты YYYY-MM-DD, {valence:[...], arousal:[...],
+    dominance:[...]}). Дни без PAD пропускаются.
+    """
+    from collections import defaultdict
+    axes = ("valence", "arousal", "dominance")
+    buckets: dict[str, dict[str, list]] = defaultdict(lambda: {a: [] for a in axes})
+    for pt in points:
+        pad = pt.get("pad")
+        ts = pt.get("ts")
+        if not isinstance(pad, dict) or not ts:
+            continue
+        day = ts[:10]
+        for a in axes:
+            v = pad.get(a)
+            if isinstance(v, (int, float)):
+                buckets[day][a].append(v)
+    labels = sorted(buckets)
+    series: dict[str, list] = {a: [] for a in axes}
+    for day in labels:
+        for a in axes:
+            xs = buckets[day][a]
+            series[a].append(round(sum(xs) / len(xs), 3) if xs else None)
+    return labels, series
+
+
+def rebuild_chart(days: int = _CHART_DAYS) -> None:
+    """Перегенерировать `mood/График настроения.md` — заметку с блоком Obsidian
+    Charts (рендерит community-плагин «Obsidian Charts»; Python для рисования не нужен).
+    Дневное среднее PAD за последние `days` дней. Вызывается после `append_point`.
+    """
+    try:
+        labels, series = aggregate_daily(_read_recent_points(days))
+        if not labels:
+            return
+        block = [
+            "```chart",
+            "type: line",
+            f"labels: {json.dumps(labels, ensure_ascii=False)}",
+            "series:",
+            f"  - title: валентность\n    data: {json.dumps(series['valence'])}",
+            f"  - title: энергия\n    data: {json.dumps(series['arousal'])}",
+            f"  - title: доминирование\n    data: {json.dumps(series['dominance'])}",
+            "```",
+        ]
+        body = (
+            "# График настроения\n\n"
+            "Дневное среднее PAD (валентность/энергия/доминирование, ∈[-1..1]) по "
+            f"последним {days} дням. Источник — `mood/timeseries/`.\n"
+            "Требует community-плагин **Obsidian Charts** (иначе блок ниже не отрисуется).\n\n"
+            + "\n".join(block) + "\n"
+        )
+        atomic_write_text(userctx.user_root() / "mood" / _CHART_NOTE, body)
+    except Exception:
+        log.exception("rebuild_chart failed (non-fatal)")
