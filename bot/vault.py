@@ -382,6 +382,31 @@ def next_q_num() -> int:
     return state["last_q_num"]
 
 
+# ---------- учёт дневного вопроса (раз в день на пользователя) ----------
+
+
+def _today_str(tz_name: str) -> str:
+    """Сегодняшняя дата YYYY-MM-DD в зоне рассылки (DAILY_TZ). Сбой tz → локально."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+def daily_already_sent(tz_name: str) -> bool:
+    """Дневной вопрос ТЕКУЩЕГО пользователя уже отправлен сегодня? (`_state.json`)."""
+    return _load_state().get("last_daily_date") == _today_str(tz_name)
+
+
+def mark_daily_sent(tz_name: str) -> None:
+    """Отметить, что дневной вопрос отправлен сегодня (общий маркер для cron, /dailyall
+    и догона после простоя — чтобы за день ушёл ровно один)."""
+    state = _load_state()
+    state["last_daily_date"] = _today_str(tz_name)
+    _save_state(state)
+
+
 # ---------- запись ----------
 
 
