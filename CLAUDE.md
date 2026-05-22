@@ -50,9 +50,11 @@ PY
 - **Qwen 14B локально (live, в контейнере)** только *захватывает*: режимы `ask` /
   `process` + `about_present` (портрет). В `process` создаёт лишь черновые концепты
   (`status: draft`) с evidence — **без связей и конфликтов**.
-- **Claude (вручную раз в неделю, НЕ в контейнере)** *собирает граф*: скилл
-  `.claude/skills/weekly-review/` делает промоушн draft→stable, дедуп/слияние, связи,
-  реальные противоречия, переписывает `profile/` и MOC. Qwen 14B для этого слаба.
+- **Claude (вручную, НЕ в контейнере)** *собирает выверенные документы* двумя скиллами:
+  `.claude/skills/reconcista/` — граф знаний (промоушн draft→stable, дедуп/слияние, связи,
+  реальные противоречия, `profile/`, MOC, теги, digest); `.claude/skills/depersonalization/`
+  — портрет носителя (`personality/about.md`), анализ настроения (`personality/mood.md`),
+  граф `mood/`, `user_prompt.md`. Qwen 14B для этого слаба.
 
 **Хранилище — файлы, не БД.** Граф живёт в Obsidian-vault как Markdown:
 `raw/` (сырые Q&A), `concepts/<domain>/<slug>.md` (узлы графа), `profile/`, `notes/`.
@@ -88,9 +90,9 @@ log, users.json) и `.git/` — **глобальные** на корне, НЕ p
   (главный, кларифер, `/echo`, `/requestion`, recovery). Только она пишет в `qmap`.
   Отправляешь вопрос мимо неё — reply/`/answer N` на него не разрезолвятся.
 - **Не меняй `slug` во frontmatter существующих концептов** — сломаешь wikilink-связи.
-- **`stable`-концепты (выверены weekly-review) имеют русский `slug`=имя файла=заголовок.**
+- **`stable`-концепты (выверены reconcista) имеют русский `slug`=имя файла=заголовок.**
   `safe_slug` бота принимает только ASCII — это намеренный write-barrier: бот физически
-  не может перезаписать `stable`. Новые цитаты к ним доносит weekly-review из `raw/`.
+  не может перезаписать `stable`. Новые цитаты к ним доносит reconcista из `raw/`.
 - **Один git-коммит = данные одного пользователя** (поддерево `users/<uid>/`). `.psycho/`
   выведена из-под git. Пары коммитов `psycho(<uid>): before <op>` / `psycho(<uid>): <op>`.
 - **Бот никогда не удаляет файлы** в vault — чистка только руками в Obsidian.
