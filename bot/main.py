@@ -2,7 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from . import handlers, selfcheck, session, userctx, users, vault
 from .config import OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
@@ -81,6 +81,15 @@ async def main() -> None:
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
     dp.include_router(router)
+
+    @dp.errors()
+    async def _on_error(event: ErrorEvent) -> bool:
+        # Глобальная сеть безопасности: что не поймал локальный try/except в
+        # хэндлере — логируем здесь (трейс в stderr + .psycho/log.md через
+        # logging), наружу пользователю трейс НЕ выпускаем. Возвращаем True —
+        # помечаем апдейт обработанным, чтобы aiogram не дублировал трейс.
+        log.error("unhandled error on update: %r", event.exception, exc_info=event.exception)
+        return True
 
     await _setup_commands(bot)
     scheduler = start_scheduler(bot)

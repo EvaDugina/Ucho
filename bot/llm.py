@@ -11,8 +11,10 @@ import random
 from typing import Optional
 
 from openai import AsyncOpenAI
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import about, moods, vault
+from .errors import LLMError
 from .validation import strip_extra_punctuation
 from .config import (
     DOMAINS,
@@ -126,19 +128,64 @@ def _system(kind: str) -> str:
 
 
 async def _chat_json(messages: list[dict], temperature: float = 0.6) -> dict:
-    """Вызов LLM с принудительным JSON-выводом."""
-    resp = await _client.chat.completions.create(
-        model=OPENAI_MODEL,
-        response_format={"type": "json_object"},
-        messages=messages,
-        temperature=temperature,
-    )
+    """Вызов LLM с принудительным JSON-выводом.
+
+    Сбой запроса (таймаут/упавшая Ollama) и неразбираемый ответ заворачиваются в
+    ``LLMError`` — вызывающий хэндлер ловит её и отвечает нейтральной фразой.
+    """
+    try:
+        resp = await _client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            messages=messages,
+            temperature=temperature,
+        )
+    except Exception as exc:
+        raise LLMError(f"LLM request failed: {exc}") from exc
     raw = resp.choices[0].message.content or ""
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
         log.error("LLM returned non-JSON: %r", raw[:500])
-        raise
+        raise LLMError("LLM returned non-JSON") from exc
+
+
+class _ObservationModel(BaseModel):
+    """Контракт одного наблюдения из process-ответа LLM (Qwen).
+
+    Лишние поля игнорируем, отсутствующие — дефолтим. ``name`` обязателен и
+    непустой: наблюдение без имени бесполезно для графа (slug выводится из имени).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    domain: Optional[str] = None
+    type: str = "claim"
+    summary: str = ""
+    quote: Optional[str] = None
+
+
+def normalize_observations(raw) -> list[dict]:
+    """Провалидировать список наблюдений LLM по контракту, отбросив мусор.
+
+    Хрупкий JSON от 14B-модели (наблюдение не dict, нет ``name``, кривые типы)
+    отсеивается здесь — РАНО, а не падает позже в сервис-слое. Возвращает список
+    чистых dict-ов (ключи name/domain/type/summary/quote), пригодных для
+    ``services.answer_service.apply_processed``.
+    """
+    out: list[dict] = []
+    for o in raw or []:
+        if not isinstance(o, dict):
+            continue
+        try:
+            m = _ObservationModel(**o)
+        except ValidationError:
+            continue
+        if not m.name.strip():
+            continue
+        out.append(m.model_dump())
+    return out
 
 
 async def ask_next(
@@ -241,7 +288,9 @@ async def process_answer(
     messages.append({"role": "user", "content": user_msg})
 
     data = await _chat_json(messages, temperature=0.5)
-    data.setdefault("observations", [])
+    # Контракт наблюдений валидируем сразу (pydantic): мусорные/безымянные
+    # отсеиваются здесь, а не падают позже в сервис-слое.
+    data["observations"] = normalize_observations(data.get("observations"))
     data.setdefault("reaction", "")
     data.setdefault("user_delta", {})  # портрет пользователя (about.apply_delta)
     # Реплику Иуды чистим от лишней пунктуации (стиль персоны). observations/quote
