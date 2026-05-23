@@ -41,6 +41,7 @@ async def run_all(
     *,
     mood_vec: dict | None,
     vad: dict | None,
+    session_context: str = "",
 ) -> dict:
     """Запустить все методы конкурентно. `mood_vec`/`vad` уже посчитаны пайплайном
     настроения — переиспользуем, не дублируем вызовы. Возвращает {метод: результат|None}.
@@ -48,7 +49,9 @@ async def run_all(
     loop = asyncio.get_event_loop()
     emolex_fut = loop.run_in_executor(None, emolex.score_sync, text)
     dvk_fut = loop.run_in_executor(None, sentiment_dvk.score_sync, text)
-    psych_fut = asyncio.ensure_future(llm.analyze_psych(text, history))
+    psych_fut = asyncio.ensure_future(
+        llm.analyze_psych(text, history, session_context=session_context)
+    )
 
     emolex_r, dvk_r, psych_r = await asyncio.gather(
         emolex_fut, dvk_fut, psych_fut, return_exceptions=True,

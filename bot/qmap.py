@@ -52,8 +52,9 @@ def _save(entries: list[dict]) -> None:
         log.exception("failed to persist qmap")
 
 
-def append(message_id: int, q_num: int, text: str, domain: str) -> None:
+def append(message_id: int, q_num: int, text: str, domain: str, at: datetime | None = None) -> None:
     """Записать только что отправленный вопрос. answered=False."""
+    when = at if isinstance(at, datetime) else datetime.now()
     entries = _load()
     entries.append({
         "message_id": int(message_id),
@@ -61,7 +62,7 @@ def append(message_id: int, q_num: int, text: str, domain: str) -> None:
         "text": text,
         "domain": domain,
         "answered": False,
-        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ts": when.isoformat(timespec="seconds"),
     })
     _save(entries)
 

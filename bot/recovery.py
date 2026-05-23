@@ -59,6 +59,9 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     real_hint = handlers._real_domain(s.last_domain) or handlers._real_domain(s.domain)
     context_concepts = handlers._context_for_domain(real_hint)
+    if not s.history or s.history[-1].get("role") != "user" or s.history[-1].get("content") != text:
+        s.record_user(text)
+    session_context = s.render_transcript()
 
     try:
         result = await process_answer(
@@ -66,7 +69,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             answer=text,
             domain_hint=real_hint,
             context_concepts=context_concepts,
-            history=s.history[:-1] if s.history else None,
+            session_context=session_context,
             mode=s.mode,
         )
     except Exception:
@@ -94,7 +97,6 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     # Реакция (как в _handle_probe): реплика-укол, сессия остаётся открытой.
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
-    s.record_assistant(reaction)
     new_n = vault.next_q_num()
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
     session.set_question(reaction, next_domain, q_num=new_n)

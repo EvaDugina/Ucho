@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from bot import graph, vault
+from bot import graph, userctx, vault
 from bot.atomic import atomic_write_text
 from bot.config import LOG_PATH
 from bot.errors import ValidationError, VaultError
@@ -41,6 +41,41 @@ def test_git_wrap_commits_on_success(as_user):
     assert graph._path_for("proba", "ethics").exists()
     log_out = vault._git("log", "--oneline", "-5").stdout
     assert "unit_commit" in log_out
+
+
+def test_commit_all_commits_only_current_user_scope(as_user):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    uid1 = as_user
+    uid2 = uid1 + 10_000
+
+    note1 = userctx.user_root() / "notes" / "one.md"
+    note1.parent.mkdir(parents=True, exist_ok=True)
+    note1.write_text("user one\n", encoding="utf-8")
+    userctx.set_user(uid2)
+    vault.ensure_layout()
+    note2 = userctx.user_root() / "notes" / "two.md"
+    note2.parent.mkdir(parents=True, exist_ok=True)
+    note2.write_text("user two\n", encoding="utf-8")
+
+    userctx.set_user(uid1)
+    sha = vault.commit_all("scope isolation")
+    assert sha
+
+    changed = [
+        line.strip()
+        for line in vault._git("show", "--name-only", "--format=", sha).stdout.splitlines()
+        if line.strip()
+    ]
+    assert changed
+    assert all(line.startswith(f"users/{uid1}/") for line in changed)
+    assert not any(line.startswith(f"users/{uid2}/") for line in changed)
+
+    other_status = vault._git(
+        "status", "--short", "--untracked-files=all", "--", f"users/{uid2}"
+    ).stdout
+    assert "two.md" in other_status
 
 
 def test_git_wrap_rolls_back_on_error(as_user):

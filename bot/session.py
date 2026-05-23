@@ -11,18 +11,78 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo
 
 from . import sessions, userctx
 from .atomic import atomic_write_json
-from .config import VAULT_PATH
+from .config import DAILY_TZ, VAULT_PATH
 
 log = logging.getLogger(__name__)
 
 Mode = Literal["probe", "review"]
-MAX_HISTORY = 6  # последние N пар user/assistant в LLM-контексте
+SESSION_TRANSCRIPT_MAX_CHARS = 24_000
+_TRUNCATION_MARKER = "[TRUNCATED_OLDER_SESSION_MESSAGES]"
+
+
+def _display_tz():
+    try:
+        return ZoneInfo(DAILY_TZ)
+    except Exception:
+        if DAILY_TZ == "Europe/Moscow":
+            return timezone(timedelta(hours=3))
+        return None
+
+
+def _coerce_dt(value: object | None, fallback: Optional[datetime] = None) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            dt = fallback or datetime.now()
+    else:
+        dt = fallback or datetime.now()
+    tz = _display_tz()
+    if dt.tzinfo is not None and tz is not None:
+        return dt.astimezone(tz)
+    return dt
+
+
+def _ts_iso(value: object | None = None, fallback: Optional[datetime] = None) -> str:
+    return _coerce_dt(value, fallback=fallback).isoformat(timespec="seconds")
+
+
+def _ts_prompt(value: object | None, fallback: Optional[datetime] = None) -> str:
+    return _coerce_dt(value, fallback=fallback).strftime("%Y:%m:%d %H:%M")
+
+
+def _history_entry(role: str, text: str, at: object | None = None) -> dict:
+    return {"role": role, "content": text, "ts": _ts_iso(at)}
+
+
+def _normalize_history(items: object, fallback: Optional[datetime]) -> list[dict]:
+    out: list[dict] = []
+    if not isinstance(items, list):
+        return out
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in ("assistant", "user"):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        out.append({
+            "role": role,
+            "content": content,
+            "ts": _ts_iso(item.get("ts") or item.get("timestamp"), fallback=fallback),
+        })
+    return out
 
 
 def _session_file() -> Path:
@@ -64,23 +124,52 @@ class Session:
         self.message_ids.append(int(mid))
         _persist()
 
-    def record_assistant(self, text: str) -> None:
+    def record_assistant(self, text: str, at: object | None = None) -> None:
         if not text:
             return
-        self.history.append({"role": "assistant", "content": text})
+        self.history.append(_history_entry("assistant", text, at=at))
         self._trim()
         _persist()
 
-    def record_user(self, text: str) -> None:
+    def record_user(self, text: str, at: object | None = None) -> None:
         if not text:
             return
-        self.history.append({"role": "user", "content": text})
+        self.history.append(_history_entry("user", text, at=at))
         self._trim()
         _persist()
 
     def _trim(self) -> None:
-        if len(self.history) > MAX_HISTORY * 2:
-            self.history = self.history[-MAX_HISTORY * 2:]
+        # В runtime больше не режем активную сессию: LLM получает транскрипт
+        # целиком через render_transcript(), а там есть отдельный safety-limit.
+        return
+
+    def render_transcript(self, max_chars: int = SESSION_TRANSCRIPT_MAX_CHARS) -> str:
+        """Текст текущей сессии для LLM: время, роль, весь текст, последняя реплика.
+
+        Формат времени для промпта намеренно человеческий и фиксированный:
+        ``YYYY:MM:DD HH:MM``. Если старая история была без ``ts``, используем
+        ``asked_at`` как честный fallback вместо выдумывания порядка во времени.
+        """
+        entries = _normalize_history(self.history, fallback=self.asked_at)
+        if not entries:
+            return ""
+        lines: list[str] = []
+        last_idx = len(entries) - 1
+        for idx, h in enumerate(entries):
+            role = h["role"]
+            marker = ""
+            if idx == last_idx:
+                marker = " [LAST_USER_MESSAGE]" if role == "user" else " [LAST_MESSAGE]"
+            lines.append(f"[{_ts_prompt(h.get('ts'), fallback=self.asked_at)}] {role}{marker}: {h['content']}")
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+        marker = _TRUNCATION_MARKER + "\n"
+        keep = max(0, max_chars - len(marker))
+        tail = text[-keep:] if keep else ""
+        if "\n" in tail:
+            tail = tail.split("\n", 1)[1]
+        return marker + tail
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -93,6 +182,7 @@ class Session:
         d = {k: v for k, v in d.items() if k in valid}
         ts = d.get("asked_at")
         d["asked_at"] = datetime.fromisoformat(ts) if ts else datetime.now()
+        d["history"] = _normalize_history(d.get("history"), fallback=d["asked_at"])
         return cls(**d)
 
 

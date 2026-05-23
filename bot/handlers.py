@@ -223,7 +223,7 @@ async def _send_question(
         body += suffix
     sent = await bot.send_message(chat_id, body, parse_mode="HTML")
     try:
-        qmap.append(sent.message_id, q_num, text, domain)
+        qmap.append(sent.message_id, q_num, text, domain, at=getattr(sent, "date", None))
     except Exception:
         log.exception("failed to record question in qmap (q_num=%s)", q_num)
     # Главный вопрос (не реакция) → в кольцо вопросов для /history.
@@ -235,6 +235,10 @@ async def _send_question(
             s.add_message_id(sent.message_id)
         except Exception:
             log.exception("failed to record message_id in session")
+        try:
+            s.record_assistant(text, at=getattr(sent, "date", None))
+        except Exception:
+            log.exception("failed to record assistant message in session")
     return sent
 
 
@@ -261,7 +265,7 @@ def _open_anchored_session(entry: dict) -> None:
     s.main_q_num = q_num
     s.clarifier_count = 0
     session.persist()
-    s.record_assistant(text)
+    s.record_assistant(text, at=entry.get("ts"))
 
 
 def _anchor_user_cmd(message: Message) -> None:
@@ -300,7 +304,7 @@ async def _session_reply(
         dom = domain if domain in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
         a = anchor if anchor is not None else text
         session.set_question(a, dom, q_num=vault.next_q_num())
-        s.record_assistant(a)
+        s.record_assistant(html.unescape(text or ""), at=getattr(sent, "date", None))
     return sent
 
 
@@ -683,7 +687,6 @@ async def cmd_requestion(message: Message, command: CommandObject) -> None:
     s.main_q_num = new_n
     s.clarifier_count = 0
     session.persist()
-    s.record_assistant(entry["question"])
     await _send_question(
         message.bot, message.chat.id,
         q_num=new_n, mode="probe", domain=entry["domain"], text=entry["question"],
@@ -718,7 +721,6 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
     s.main_q_num = new_n
     s.clarifier_count = 0
     session.persist()
-    s.record_assistant(text)
     await _send_question(
         message.bot, message.chat.id,
         q_num=new_n, mode="probe", domain=USER_DOMAIN, text=text,
@@ -780,6 +782,7 @@ async def cmd_about(message: Message) -> None:
         s = session.get()
         if s is not None and sent is not None:
             s.add_message_id(int(sent.message_id))
+            s.record_assistant(html.unescape(chunk), at=getattr(sent, "date", None))
     await _session_reply(message, chunks[-1], anchor="(твой портрет)", parse_mode="HTML")
 
 
@@ -802,6 +805,12 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
         # сообщение пользователя; на reply/продолжение пойдёт обычная реакция.
         session.start(mode="probe", domain=None)
         _anchor_user_cmd(message)
+        s = session.get()
+        if s is not None:
+            s.record_user(clean, at=getattr(message, "date", None))
+            session_context = s.render_transcript()
+        else:
+            session_context = ""
         # 1. Verbatim в notes/ (человеческий скрэтчпад).
         when = datetime.now()
         try:
@@ -821,7 +830,7 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
                 answer=clean,
                 domain_hint=None,
                 context_concepts=context_concepts,
-                history=None,
+                session_context=session_context,
                 mode="probe",
             )
         except LLMError:
@@ -987,7 +996,8 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     # старте process_pending_on_startup дожмёт обработку.
     s.pending_answer = text
     session.persist()
-    s.record_user(text)
+    s.record_user(text, at=getattr(message, "date", None))
+    session_context = s.render_transcript()
     real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
     context_concepts = _context_for_domain(real_hint)
 
@@ -1005,7 +1015,9 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             # офлайн, без перевода. Даёт valence/arousal/dominance. LLM в classify_mood —
             # арбитр (лексикон слеп к иронии). Нет совпадений слов → None.
             vad = await lexicon.score(text)
-            per_msg = await classify_mood(text, about.render_for_prompt(), vad=vad)
+            per_msg = await classify_mood(
+                text, about.render_for_prompt(), vad=vad, session_context=session_context
+            )
             s.record_mood(per_msg)
             mood_vec = moods.session_mood(s.mood_trajectory, mood_file.baseline())
             bot_mood = moods.pick_bot_mood(mood_vec)
@@ -1018,7 +1030,7 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             try:
                 if ANALYSIS_ENABLED:
                     results = await analysis.run_all(
-                        text, s.history[:-1], mood_vec=mood_vec, vad=vad,
+                        text, None, mood_vec=mood_vec, vad=vad, session_context=session_context,
                     )
                     await message.answer(analysis.format_report(mood_vec, bot_mood, results))
                     analysis.append_point(len(text), results)  # durable ряд для графиков
@@ -1038,7 +1050,7 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             domain_hint=real_hint,
             context_concepts=context_concepts,
             bot_mood=bot_mood,
-            history=s.history[:-1],
+            session_context=session_context,
             mode=s.mode,
         )
     except LLMError:
@@ -1067,7 +1079,6 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
     # становится «якорем» следующего хода (её q_num, её message_id в сессии).
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
-    s.record_assistant(reaction)
     new_n = vault.next_q_num()
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
     session.set_question(reaction, next_domain, q_num=new_n)
@@ -1151,7 +1162,6 @@ async def _send_next_question(
     s.main_q_num = q_num
     s.clarifier_count = 0
     session.persist()
-    s.record_assistant(result["question"])
     await _send_question(
         bot, chat_id,
         q_num=q_num, mode=s.mode, domain=result["domain"], text=result["question"],
