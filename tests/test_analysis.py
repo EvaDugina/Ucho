@@ -33,6 +33,18 @@ def test_format_report_full():
     assert "негатив" in s and "тревога" in s.lower()
 
 
+def test_append_report_writes_knowledge_note(as_user):
+    report = "🧪 Анализ ответа — методы (число → пояснение)\n\n▸ PAD\nнет данных"
+    analysis.append_report(q_num=42, text_len=123, report=report)
+
+    files = sorted((analysis.userctx.user_root() / "mood" / "analysis").glob("*.md"))
+    assert len(files) == 1
+    text = files[0].read_text(encoding="utf-8")
+    assert "# Анализ методов" in text
+    assert "Q42" in text and "len=123" in text
+    assert "Анализ ответа — методы" in text
+
+
 def test_aggregate_daily_groups_and_averages():
     points = [
         {"ts": "2026-05-22T10:00:00", "pad": {"valence": -0.4, "arousal": 0.0, "dominance": -0.2}},

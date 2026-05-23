@@ -1,8 +1,8 @@
 """Сравнение методов оценки настроения/состояния по сообщению (OWNER-тестирование).
 
 Гоняет НЕСКОЛЬКО независимых методов на один ответ человека (в контексте сессии),
-складывает их выводы в один отчёт (шлётся владельцу ПЕРЕД основным ответом) и пишет
-их рядом в durable-ряд `mood/timeseries/YYYY-MM.jsonl` — чтобы потом на практике
+складывает их выводы в Markdown-отчёт `mood/analysis/YYYY-MM-DD.md` и пишет
+числа рядом в durable-ряд `mood/timeseries/YYYY-MM.jsonl` — чтобы потом на практике
 выбрать самые точные методы и строить графики колебаний настроения (день/неделя/
 месяц/сезон/год). Заметку-график `mood/График настроения.md` рисует плагин Obsidian Charts.
 
@@ -33,6 +33,10 @@ _CHART_NOTE = "График настроения.md"
 
 def _ts_dir():
     return userctx.user_root() / "mood" / "timeseries"
+
+
+def _analysis_dir():
+    return userctx.user_root() / "mood" / "analysis"
 
 
 async def run_all(
@@ -139,11 +143,11 @@ def _level01_ru(x) -> str:
 
 
 def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) -> str:
-    """Единое сообщение-сравнение методов для владельца (перед основным ответом).
+    """Единый Markdown-отчёт сравнения методов.
 
     После каждого вычисленного числа — текстовая расшифровка (числа без пояснений
-    мало о чём говорят). Только числа/ярлыки (без слов человека) → шлём напрямую,
-    мимо `_send_question`/qmap (это не вопрос).
+    мало о чём говорят). Только числа/ярлыки (без слов человека) → можно безопасно
+    писать в vault без сохранения дословного пользовательского текста.
     """
     L = ["🧪 Анализ ответа — методы (число → пояснение)"]
 
@@ -206,6 +210,28 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
         L.append("нет данных")
 
     return "\n".join(L)
+
+
+def append_report(q_num: int | None, text_len: int, report: str) -> None:
+    """Дописать человекочитаемый отчёт методов в `mood/analysis/YYYY-MM-DD.md`.
+
+    Это knowledge-base след для depersonalization/ручного чтения. В чат отчёт не
+    отправляется: пользователю уходит только основная реакция Иуды.
+    """
+    try:
+        from datetime import datetime
+        now = datetime.now()
+        d = _analysis_dir()
+        p = d / f"{now:%Y-%m-%d}.md"
+        if p.exists():
+            body = p.read_text(encoding="utf-8").rstrip() + "\n\n"
+        else:
+            body = f"# Анализ методов · {now:%Y-%m-%d}\n\n"
+        q_label = f"Q{q_num}" if q_num is not None else "Q?"
+        body += f"## {now:%H:%M} · {q_label} · len={text_len}\n\n{report.strip()}\n"
+        atomic_write_text(p, body)
+    except Exception:
+        log.exception("append_report failed (non-fatal)")
 
 
 _METHOD_KEYS = ("pad", "vad_lex", "emolex", "dostoevsky", "ocean", "panas")

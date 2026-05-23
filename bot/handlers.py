@@ -1022,9 +1022,9 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             mood_vec = moods.session_mood(s.mood_trajectory, mood_file.baseline())
             bot_mood = moods.pick_bot_mood(mood_vec)
             mood_file.set_current(mood_vec, bot_mood)
-            # Разбор — отдельным сообщением ПЕРЕД основным ответом. Не вопрос →
-            # шлём напрямую, мимо _send_question/qmap. Сбой отправки не должен ломать
-            # ход: bot_mood уже посчитан и пойдёт в process_answer.
+            # Мульти-методный разбор пишем в vault, не в чат: это knowledge-base
+            # след для depersonalization/ручного чтения. Сбой записи не должен
+            # ломать ход: bot_mood уже посчитан и пойдёт в process_answer.
             # ANALYSIS_ENABLED → мульти-методное сравнение (OWNER-тестирование);
             # иначе — базовый разбор настроения.
             try:
@@ -1032,7 +1032,8 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
                     results = await analysis.run_all(
                         text, None, mood_vec=mood_vec, vad=vad, session_context=session_context,
                     )
-                    await message.answer(analysis.format_report(mood_vec, bot_mood, results))
+                    report = analysis.format_report(mood_vec, bot_mood, results)
+                    analysis.append_report(s.current_q_num, len(text), report)
                     analysis.append_point(len(text), results)  # durable ряд для графиков
                     analysis.rebuild_chart()                   # обновить заметку-график (Obsidian Charts)
                 else:
