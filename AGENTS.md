@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Что это
 
@@ -17,7 +17,7 @@ Telegram-бот «Ухо» (персона «Иуда из Кариота»), к
 ## Запуск и разработка
 
 Всё исполняется в Docker — локальный запуск скриптов/тестов вне контейнера запрещён
-(см. глобальный `~/.claude/CLAUDE.md`). Бот + Ollama поднимаются вместе:
+(см. глобальный `~/.Codex/AGENTS.md`). Бот + Ollama поднимаются вместе:
 
 ```powershell
 docker compose up -d                 # поднять bot + ollama
@@ -50,9 +50,9 @@ PY
 - **Qwen 14B локально (live, в контейнере)** только *захватывает*: режимы `ask` /
   `process` + `about_present` (портрет). В `process` создаёт лишь черновые концепты
   (`status: draft`) с evidence — **без связей и конфликтов**.
-- **Claude (вручную, НЕ в контейнере)** *собирает выверенные документы* двумя скиллами:
-  `.claude/skills/reconcista/` — граф знаний (промоушн draft→stable, дедуп/слияние, связи,
-  реальные противоречия, `profile/`, MOC, теги, digest); `.claude/skills/depersonalization/`
+- **Codex (вручную, НЕ в контейнере)** *собирает выверенные документы* двумя скиллами:
+  `.Codex/skills/reconcista/` — граф знаний (промоушн draft→stable, дедуп/слияние, связи,
+  реальные противоречия, `profile/`, MOC, теги, digest); `.Codex/skills/depersonalization/`
   — портрет носителя (`personality/about.md`), анализ настроения (`personality/mood.md`),
   психометрика (`personality/profile.md`), soft skills (`personality/softskills.md`),
   граф `mood/`, `user_prompt.md`. Qwen 14B для этого слаба.
