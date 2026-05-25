@@ -523,7 +523,7 @@ _HELP_ADMIN = (
     "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
     "<b>/users</b> — список доверенных\n"
     "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас\n"
-    "<b>/like</b> / <b>/fav</b> — отметить reply-реплику Иуды"
+    "<b>/like</b> — отметить reply-реплику Иуды"
 )
 
 _HELP_PEBBLE = "<b>/pebble</b> — бросить камень → «буль.»"
@@ -1082,7 +1082,7 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
     await _ingest_note(message, clean)
 
 
-@router.message(Command("like", "fav"))
+@router.message(Command("like"))
 async def cmd_like(message: Message) -> None:
     """Отметить reply-реплику Иуды как понравившуюся / снять отметку."""
     if not _is_owner(message):

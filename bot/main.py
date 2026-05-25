@@ -37,7 +37,6 @@ ADMIN_COMMANDS = [
     BotCommand(command="users", description="Список доверенных"),
     BotCommand(command="dailyall", description="Разослать дневной вопрос всем сейчас"),
     BotCommand(command="like", description="Отметить reply-реплику Иуды"),
-    BotCommand(command="fav", description="То же, что /like"),
 ]
 
 
