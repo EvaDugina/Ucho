@@ -13,7 +13,7 @@ import logging
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from . import session, userctx, users
+from . import inbox, session, userctx, users
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +39,23 @@ class AccessMiddleware(BaseMiddleware):
         if uid is None or not users.is_allowed(uid):
             return  # не в whitelist — тишина
         userctx.set_user(uid)
+        current = session.get()
         if isinstance(event, Message):
-            text = event.text or ""
-            kind = "command" if text.startswith("/") else ("text" if text else event.content_type)
+            text = event.text or event.caption or ""
+            kind = "command" if text.startswith("/") else ("text" if event.text else event.content_type)
+            reply_mid = event.reply_to_message.message_id if event.reply_to_message else None
+            inbox.append(
+                kind=kind,
+                text=text,
+                at=getattr(event, "date", None),
+                message_id=event.message_id,
+                chat_id=event.chat.id if event.chat else None,
+                reply_to_message_id=reply_mid,
+                session_id=getattr(current, "id", None),
+                session_mode=getattr(current, "mode", None),
+                q_num=getattr(current, "current_q_num", None),
+                domain=getattr(current, "last_domain", None) or getattr(current, "domain", None),
+            )
             log.info(
                 "incoming message: uid=%s kind=%s message_id=%s text_len=%s",
                 uid,
@@ -50,6 +64,17 @@ class AccessMiddleware(BaseMiddleware):
                 len(text),
             )
         elif isinstance(event, CallbackQuery):
+            inbox.append(
+                kind="callback",
+                text=event.data or "",
+                at=getattr(event.message, "date", None),
+                message_id=getattr(event.message, "message_id", None),
+                chat_id=event.message.chat.id if event.message and event.message.chat else uid,
+                session_id=getattr(current, "id", None),
+                session_mode=getattr(current, "mode", None),
+                q_num=getattr(current, "current_q_num", None),
+                domain=getattr(current, "last_domain", None) or getattr(current, "domain", None),
+            )
             log.info("incoming callback: uid=%s data=%s", uid, event.data or "")
         # Disclaimer один раз для гостей (не владельца).
         if not users.is_owner(uid) and not users.has_consent(uid):

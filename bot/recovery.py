@@ -9,17 +9,135 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
-from . import handlers, ratelimit, session, userctx, users, vault
+from . import handlers, inbox, ratelimit, session, userctx, users, vault
 from .config import DOMAINS
 from .errors import LLMError
 from .llm import process_answer
 from .services.answer_service import apply_processed
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class InboxRecovery:
+    uid: int
+    action: Literal["pending", "notify_saved"]
+    q_num: int | None
+    message_id: int | None
+
+
+def _parse_dt(value: object | None) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def _has_bot_message_after(s: session.Session, entry: dict) -> bool:
+    """Был ли уже ответ бота после inbox-сообщения."""
+    mid = entry.get("message_id")
+    if mid is not None:
+        try:
+            user_mid = int(mid)
+            if any(int(bot_mid) > user_mid for bot_mid in (s.message_ids or [])):
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    user_ts = _parse_dt(entry.get("ts"))
+    if user_ts is None:
+        return False
+    for h in s.history or []:
+        if h.get("role") != "assistant":
+            continue
+        assistant_ts = _parse_dt(h.get("ts") or h.get("timestamp"))
+        if assistant_ts is not None and assistant_ts > user_ts:
+            return True
+    return False
+
+
+def mark_unanswered_inbox_as_pending(restored: list[tuple[int, session.Session]]) -> list[InboxRecovery]:
+    """Найти входящие user-ответы без bot-ответа и подготовить recovery.
+
+    Сценарий: Telegram update уже дошёл до middleware и попал в durable inbox,
+    но процесс умер до `_handle_probe_locked`/`pending_answer` или до отправки
+    реакции. На старте восстанавливаем такой ход, если сессия ещё открыта.
+    """
+    recoveries: list[InboxRecovery] = []
+    for uid, s in restored:
+        userctx.set_user(uid)
+        if s.mode != "probe" or not s.last_question or s.pending_answer:
+            continue
+        entry = inbox.latest_text_for_session(s.id)
+        if entry is None or _has_bot_message_after(s, entry):
+            continue
+        text = (entry.get("text") or "").strip()
+        if not text:
+            continue
+        q_num = entry.get("q_num") if isinstance(entry.get("q_num"), int) else s.current_q_num
+        message_id = entry.get("message_id") if isinstance(entry.get("message_id"), int) else None
+        if q_num is not None and vault.find_question(int(q_num)) is not None:
+            vault.append_log(
+                "warn",
+                "inbox_unanswered_already_saved",
+                f"Q{q_num} mid={message_id} len={len(text)}",
+            )
+            recoveries.append(InboxRecovery(uid, "notify_saved", int(q_num), message_id))
+            continue
+        s.pending_answer = text
+        session.persist()
+        vault.append_log(
+            "warn",
+            "inbox_unanswered_recovered",
+            f"Q{q_num} mid={message_id} len={len(text)}",
+        )
+        log.warning("recovered unanswered inbox message: uid=%s q=%s mid=%s", uid, q_num, message_id)
+        recoveries.append(InboxRecovery(uid, "pending", int(q_num) if q_num is not None else None, message_id))
+    return recoveries
+
+
+async def notify_saved_without_reply(bot: Bot, rec: InboxRecovery) -> None:
+    """Ответить, если user-ответ уже попал в raw, но bot-реплика не ушла."""
+    userctx.set_user(rec.uid)
+    s = session.get()
+    if s is None:
+        return
+    q_label = f"Q{rec.q_num}" if rec.q_num is not None else "прошлый ответ"
+    text = (
+        f"Я вижу твой ответ на {q_label}: он уже сохранён, но моя реплика "
+        "сорвалась при рестарте. Продолжим отсюда."
+    )
+    new_n = vault.next_q_num()
+    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
+    session.set_question(text, next_domain, q_num=new_n)
+    session.persist()
+    try:
+        await handlers._send_question(
+            bot,
+            rec.uid,
+            q_num=new_n,
+            mode=s.mode,
+            domain=next_domain,
+            text=text,
+            plain=True,
+        )
+    except Exception:
+        log.exception("recovery: failed to notify saved unanswered inbox")
 
 
 async def process_pending_on_startup(bot: Bot, uid: int) -> None:

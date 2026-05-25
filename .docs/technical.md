@@ -56,7 +56,7 @@
 - **Потоки данных:**
   - Пользователь шлёт сообщение → handler → LLM (через OpenRouter) → парсинг JSON (`observations` — только анализ) → код пишет в vault: raw дословно, slug из имени, дедуп решает create/update → атомарная запись через `git_wrap` → MOC rebuild.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа. Дедуп по дате (`vault.daily_already_sent`/`mark_daily_sent`, поле `last_daily_date` в `_state.json`) — один дневной на пользователя в день, общий для cron / `/dailyall` / догона. При старте `scheduler.catch_up_daily` досылает сегодняшний дневной, если бот лежал в час рассылки (за прошлые дни — нет). Активная сессия/прошлые ответы не блокируют дневной.
-  - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore()` + (при `pending_answer`) `process_pending_on_startup`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
+  - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore()` + durable inbox scan: если последний user-ответ попал в `raw/inbox/`, но бот не успел ответить и сессия открыта, он поднимается в `pending_answer` или получает служебную реплику. После этого — `process_pending_on_startup`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
 - **Внешние зависимости:** Telegram Bot API + OpenRouter API. Секреты только в `.env`.
 
 **Модули и ответственность:**
@@ -87,6 +87,7 @@
 - `prompts/base.md` (общий: персона, голос **от 1-го лица без самоназывания**, домены, концепты, формат) + `prompts/ask.md` / `process.md` / `about.md` / `summarize.md` / `seeds.md` — промпты по режимам. `llm._system(kind)` = base + addendum режима (`ask`/`process`) + портрет; `about.md`/`summarize.md` — отдельные standalone-промпты. JSON-контракт строгий. (`review.md` удалён вместе с режимом review.)
 - `bot/sessions.py` — кольцо последних 25 сессий (`_sessions.json`): `snapshot`/`load`/`find_by_message_id` для reply-resume.
 - `bot/session_log.py` — машинный append-only журнал всех сообщений активной сессии в `raw/sessions/<session_id>.jsonl`: user/assistant, даты Telegram, kind, message_id, q_num, domain, bot_mood.
+- `bot/inbox.py` — самый ранний durable append-only журнал входящих сообщений доверенных пользователей в `raw/inbox/YYYY-MM-DD.jsonl`: полный текст, Telegram `message_id`, reply, снимок активной сессии и Q-номера. Пишется в middleware до handler/LLM/raw, чтобы ответ пользователя не терялся при рестарте между получением update и обработкой.
 - `bot/face_actions.py` — per-user action records для админских кнопок лиц: `_face_actions.json`, `_mood_feedback.jsonl`, `_liked_replies.json`, `_liked_replies_log.jsonl`.
 - `bot/about.py` — портрет носителя (`personality/about.md` + `_user_deltas.jsonl`): `apply_delta` (live машинные поля + журнал), `render_for_prompt` (инъекция в системный промпт), `ensure` (создаёт пустой скелет). Настроения здесь нет.
 - `bot/mood_file.py` — живой черновик настроения `personality/mood.md` (capture-first): `set_current` (код пишет снимок из `moods`: эмоция/V/A/D/устойчивость/лицо), `baseline` (prior `mood_baseline` "v,a,d", back-compat "v,a"; пишет depersonalization), `render_for_prompt` (короткая строка настроения в промпт персоны), `ensure` (пустой скелет). Тело-нарратив анализа настроения пишет depersonalization (код тело сохраняет). Выверенный граф настроений — в `mood/`.
@@ -98,6 +99,7 @@
 - **Концепт** (`concepts/<domain>/<slug>.md`): frontmatter `type/domain/slug/created/updated/status/supports/contradicts/derived_from/related/aliases` (+ `tags` у выверенных), тело — callouts `[!summary]/[!quote]/[!question]/[!contradiction]/[!source]`. `status`: `draft` (создан ботом live, ascii-slug, без связей) → `stable` (выверен Claude в reconcista). Промежуточные `tentative`/`contested`. У `stable` `slug` = имя файла = **русский заголовок** (наглядные узлы графа), все ссылки ведут по русскому имени; старый ascii-slug — в `aliases` (якорь дедупа). `tags` (ставит reconcista, бот их не трогает): доменный `<DOMAIN>` CAPS + сквозные русские темы из реестра `<base>/_tags.md` — второе измерение графа.
 - **Raw-блок** (`raw/YYYY-MM-DD.md`): `## Q<N> · HH:MM · <domain>`, `**Q:** …`, `**A:** …`, `^Q<N>` block-id на отдельной строке.
 - **Session raw-log** (`raw/sessions/<session_id>.jsonl`): машинный append-only журнал активной сессии, по одной строке на сообщение: `{ts, session_id, role, kind, message_id, reply_to_message_id, q_num, domain, bot_mood, text}`. `ts` берётся из Telegram `message.date`/`sent.date`, fallback — текущее время; порядок строк — порядок обработки событий.
+- **Inbox raw-log** (`raw/inbox/YYYY-MM-DD.jsonl`): append-only журнал входящих user-событий до обработки: `{ts, uid, chat_id, message_id, reply_to_message_id, kind, session_id, session_mode, q_num, domain, text, text_len}`. Это аварийный источник для восстановления user-ответа, если процесс умер до `pending_answer`/реакции.
 - **Manifest** (`.psycho/manifest.json`): `{version, files: {<rel-path>: {mtime_ns, size}}}`.
 - **State** (`_state.json`): `{last_q_num: int}`.
 - **Session** (`_session.json`): `Session` dataclass сериализован, включая `mode`, `domain`, `last_question`, `history` (`[{role, content, ts}]`, где `ts` — ISO, а в LLM-рендере время `YYYY:MM:DD HH:MM`), `pending_answer` (двухфазный коммит), `id` (uuid сессии) и `message_ids` (все сообщения бота сессии — для reply-resume).
@@ -138,6 +140,7 @@ Psycho/
 │   ├── session.py          активная сессия с persistence (+ mood_trajectory)
 │   ├── sessions.py         кольцо последних 25 сессий (reply-resume)
 │   ├── session_log.py      raw/sessions/<session_id>.jsonl (полный лог сообщений)
+│   ├── inbox.py            raw/inbox/YYYY-MM-DD.jsonl (ранний лог входящих user-сообщений)
 │   ├── face_actions.py     action records лиц, feedback маски, понравившиеся ответы
 │   ├── questions.py        кольцо заданных главных вопросов (/history)
 │   ├── about.py            портрет носителя (personality/about.md + дельты)
@@ -167,7 +170,7 @@ Psycho/
 └── README.md
 ```
 
-В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/` (включая `raw/sessions/` по мере работы), `profile/`, `notes/`, `personality/` (бот создаёт только `about.md` + `mood.md`; `profile.md` и `softskills.md` создаёт скилл depersonalization), `mood/` (граф настроений + timeseries + график; пишется по мере работы), `_index.md`, `_state.json`. Админские реакции дополнительно создают `_face_actions.json`, `_mood_feedback.jsonl`, `_liked_replies.json`, `_liked_replies_log.jsonl`. При каждом старте — `.psycho/startup-check.md`.
+В самом vault при первом запуске создаются: `.git/`, `.gitignore`, `.psycho/manifest.json`, `.psycho/log.md`, `concepts/<domain>/`, `raw/` (включая `raw/inbox/` и `raw/sessions/` по мере работы), `profile/`, `notes/`, `personality/` (бот создаёт только `about.md` + `mood.md`; `profile.md` и `softskills.md` создаёт скилл depersonalization), `mood/` (граф настроений + timeseries + график; пишется по мере работы), `_index.md`, `_state.json`. Админские реакции дополнительно создают `_face_actions.json`, `_mood_feedback.jsonl`, `_liked_replies.json`, `_liked_replies_log.jsonl`. При каждом старте — `.psycho/startup-check.md`.
 
 ---
 
@@ -312,7 +315,7 @@ PoC B техчасть считается принятой, когда:
 - **Capture-first:** OpenRouter live-модель только захватывает — `process` отдаёт `observations` + `reaction` + `user_delta`; запись/идентичность (raw дословно, slug из имени, дедуп, верификация цитаты) на коде. Связи, реальные противоречия, промоушн `draft→stable`, доменные `profile/` и MOC — Claude вручную (`reconcista`); портрет, настроение, `personality/profile.md` и `personality/softskills.md` — `depersonalization`.
 - **Портрет носителя** `personality/about.md` (`bot/about.py`): live-дельты в frontmatter + журнал, инъекция в системный промпт; прозу 20 секций пишет depersonalization. `/about` показывает портрет словами. Настроение — в `personality/mood.md` (`bot/mood_file.py`), пишется кодом каждый ход. `personality/profile.md` и `personality/softskills.md` — выверенные документы depersonalization; бот их не создаёт и не подмешивает напрямую в live-промпт.
 - **Команды:** `/ask /echo /ucho /about /requestion /history /pebble /start /help` + админ (`/adduser`/`/removeuser`/`/users`/`/dailyall`/`/like`). `/history` — последние 25 главных вопросов (`bot/questions.py`). Индикатор «Думаю» — один стикер 🎰, только для `/ask` и `/about`.
-- **Надёжность:** двухфазный коммит ответа (`Session.pending_answer`) + recovery на старте; склейка офлайн-сообщений per-user до поллинга (`process_offline_backlog`); реконструкция reply из тела сообщения как фолбэк к `qmap`/кольцу сессий.
+- **Надёжность:** ранний durable inbox (`raw/inbox/`) для каждого user-сообщения; двухфазный коммит ответа (`Session.pending_answer`) + recovery на старте; склейка офлайн-сообщений per-user до поллинга (`process_offline_backlog`); реконструкция reply из тела сообщения как фолбэк к `qmap`/кольцу сессий.
 
 **Сверх POC B (оставлено осознанно):**
 

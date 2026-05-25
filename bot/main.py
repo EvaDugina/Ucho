@@ -73,6 +73,11 @@ async def main() -> None:
 
     # Восстановление сессий всех пользователей + список pending для recovery.
     restored = session.restore_all()
+    try:
+        inbox_recoveries = recovery.mark_unanswered_inbox_as_pending(restored)
+    except Exception:
+        log.exception("inbox unanswered recovery scan failed")
+        inbox_recoveries = []
     pending_uids = [uid for uid, s in restored if s.pending_answer]
     for uid in pending_uids:
         log.info("pending_answer detected for uid=%s — recovery will run after startup", uid)
@@ -101,6 +106,13 @@ async def main() -> None:
     # Recovery несработавшего LLM-цикла — синхронно (await), ДО склейки офлайн-
     # бэклога: прерванный ответ дожимается и может задать новый вопрос, на который
     # затем лягут офлайн-сообщения. (Раньше был create_task — гонка с поллингом.)
+    for rec in inbox_recoveries:
+        if rec.action != "notify_saved":
+            continue
+        try:
+            await recovery.notify_saved_without_reply(bot, rec)
+        except Exception:
+            log.exception("inbox saved-without-reply recovery failed for uid=%s", rec.uid)
     for uid in pending_uids:
         try:
             await recovery.process_pending_on_startup(bot, uid)
