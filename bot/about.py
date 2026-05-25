@@ -1,14 +1,14 @@
-"""Портрет пользователя (per-user): `personality/about.md` + журнал дельт.
+"""Портрет пользователя (per-user): `03_personality/about.md` + журнал дельт.
 
 Гибрид (capture-first):
 - **Live (OpenRouter, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
-  и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
+  и дописывает сырую дельту в `03_personality/deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
 - **Manual strong pass.** Скилл `depersonalization` переписывает прозу секций
-  из накопленных дельт + `raw/`; live-модель связную прозу 20 секций не ведёт.
+  из накопленных дельт + `00_raw/`; live-модель связную прозу 20 секций не ведёт.
 
-Настроение вынесено в `personality/mood.md` (см. `bot/mood_file.py`) — здесь только
+Настроение вынесено в `03_personality/mood.md` (см. `bot/mood_file.py`) — здесь только
 портрет носителя, без mood-полей.
 
 Файл инъецируется в системный промпт (`llm._system`). Пути — per-user через `userctx`.
@@ -46,7 +46,7 @@ _PROSE_KEYS = (
     "epistemics", "attachment", "routine",
     "limits", "power", "selfhood", "finitude", "roots", "vocation",
 )
-# Примечание: mood-поля живут в personality/mood.md (bot/mood_file.py), не здесь.
+# Примечание: mood-поля живут в 03_personality/mood.md (bot/mood_file.py), не здесь.
 
 # 20 секций портрета (порядок фиксирован; прозу заполняет depersonalization).
 _SECTIONS = (
@@ -74,7 +74,7 @@ _SECTIONS = (
 
 
 def _dir() -> Path:
-    return userctx.user_root() / "personality"
+    return userctx.user_root() / "03_personality"
 
 
 def path() -> Path:
@@ -82,7 +82,7 @@ def path() -> Path:
 
 
 def _deltas_path() -> Path:
-    return userctx.user_root() / "_user_deltas.jsonl"
+    return _dir() / "deltas.jsonl"
 
 
 def _skeleton() -> str:
@@ -100,7 +100,7 @@ def _skeleton() -> str:
 
 
 def ensure() -> None:
-    """Создать пустой скелет `personality/about.md`, если его ещё нет (идемпотентно)."""
+    """Создать пустой скелет `03_personality/about.md`, если его ещё нет (идемпотентно)."""
     p = path()
     if p.exists():
         return
@@ -149,7 +149,7 @@ def apply_delta(delta: dict) -> None:
 
 
 def _append_delta_log(delta: dict) -> None:
-    """Сохранить непустые поля дельты строкой в `_user_deltas.jsonl` (кольцо)."""
+    """Сохранить непустые поля дельты строкой в `03_personality/deltas.jsonl` (кольцо)."""
     kept = {
         k: delta[k].strip()
         for k in (*_FIELD_KEYS, *_PROSE_KEYS)

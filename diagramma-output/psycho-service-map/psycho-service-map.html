@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Psycho service-map</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --text: #1d1d1f;
+      --muted: #666b73;
+      --line: #d7d9dd;
+      --accent: #2457c5;
+      --accent-text: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15171a;
+        --panel: #202329;
+        --text: #f0f2f5;
+        --muted: #a9b0ba;
+        --line: #373c44;
+        --accent: #8bb1ff;
+        --accent-text: #101318;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+      line-height: 1.25;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 36px;
+      padding: 7px 11px;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
+    main {
+      display: grid;
+      gap: 18px;
+      padding: 24px;
+    }
+    .legend {
+      justify-self: center;
+      max-width: min(100%, 1100px);
+      text-align: center;
+    }
+    .legend-title {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0;
+      margin-bottom: 9px;
+      text-transform: uppercase;
+    }
+    .legend-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      justify-content: center;
+    }
+    .legend-item {
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      display: inline-flex;
+      gap: 8px;
+      min-height: 32px;
+      padding: 6px 10px;
+    }
+    .legend-marker {
+      border-radius: 999px;
+      display: inline-block;
+      flex: 0 0 auto;
+      height: 10px;
+      width: 10px;
+    }
+    .legend-text {
+      color: var(--muted);
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      justify-content: center;
+      line-height: 1.25;
+    }
+    .legend-text strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .viewport, details {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .viewport {
+      min-height: 420px;
+      overflow: auto;
+      padding: 24px;
+    }
+    #diagram {
+      display: flex;
+      min-width: max-content;
+      align-items: center;
+      justify-content: center;
+    }
+    #diagram svg {
+      max-width: none;
+      height: auto;
+    }
+    .error {
+      max-width: 980px;
+      white-space: pre-wrap;
+      color: #b42318;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    details {
+      padding: 14px 16px;
+    }
+    summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      color: var(--text);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    @media (max-width: 720px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .actions {
+        justify-content: flex-start;
+      }
+      main {
+        padding: 14px;
+      }
+      .viewport {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Psycho service-map</h1>
+    <div class="actions">
+      <button class="primary" id="download-png" disabled>Скачать PNG</button>
+      <button id="download-svg" disabled>Скачать SVG</button>
+      <button id="download-mmd">Скачать Mermaid</button>
+    </div>
+  </header>
+  <main>
+    <section class="legend" aria-label="Легенда">
+      <div class="legend-title">Легенда</div>
+      <div class="legend-items">
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#2457c5"></span>
+          <span class="legend-text"><strong>Client</strong><span>Telegram/Obsidian users</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#14866d"></span>
+          <span class="legend-text"><strong>Service</strong><span>bot and live pipeline</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#b45500"></span>
+          <span class="legend-text"><strong>Storage</strong><span>vault stage artifacts and git safety net</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#8a4cc2"></span>
+          <span class="legend-text"><strong>External</strong><span>Telegram and OpenRouter</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#b42318"></span>
+          <span class="legend-text"><strong>Manual</strong><span>strong-model skills</span></span>
+        </div>
+      </div>
+    </section>
+    <section class="viewport">
+      <div id="diagram" aria-label="Psycho service-map"></div>
+    </section>
+    <details>
+      <summary>Mermaid source</summary>
+      <pre><code>flowchart LR
+  subgraph Client[&quot;Client&quot;]
+    Owner[&quot;Владелец в Telegram&quot;]
+    Trusted[&quot;Доверенный пользователь&quot;]
+    Obsidian[&quot;Obsidian UI и Graph View&quot;]
+  end
+
+  subgraph External[&quot;External&quot;]
+    Telegram[&quot;Telegram Bot API&quot;]
+    OpenRouter[&quot;OpenRouter API\nQwen primary, DeepSeek fallback&quot;]
+  end
+
+  subgraph App[&quot;Application&quot;]
+    Bot[&quot;Psycho bot container\naiogram handlers&quot;]
+    Router[&quot;LLM routing\nJSON/text calls, fallback, warnings&quot;]
+    Capture[&quot;Capture-first pipeline\n00_raw -&gt; 01_mood -&gt; 02/03&quot;]
+    Skills[&quot;Manual strong-model skills\nreconcista, depersonalization&quot;]
+  end
+
+  subgraph Data[&quot;Data&quot;]
+    Vault[(&quot;Obsidian vault\nusers/&lt;uid&gt;&quot;)]
+    Raw[(&quot;00_raw\nsessions, qna, notes&quot;)]
+    Mood[(&quot;01_mood\nevents, analysis, timeseries&quot;)]
+    Graph[(&quot;02_concepts, 02_profile, 02_digest&quot;)]
+    Persona[(&quot;03_personality\nabout, mood, deltas&quot;)]
+    Safety[(&quot;Git safety net\nmanifest, log, before/after commits&quot;)]
+  end
+
+  Owner --&gt;|&quot;пишет, отвечает, управляет&quot;| Telegram
+  Trusted --&gt;|&quot;пишет и отвечает&quot;| Telegram
+  Telegram --&gt;|&quot;updates&quot;| Bot
+  Bot --&gt;|&quot;sendMessage&quot;| Telegram
+  Bot --&gt; Router
+  Router --&gt;|&quot;chat/completions&quot;| OpenRouter
+  OpenRouter --&gt;|&quot;JSON или текст&quot;| Router
+  Router --&gt; Capture
+  Capture --&gt;|&quot;raw до LLM&quot;| Raw
+  Capture --&gt;|&quot;mood только OWNER&quot;| Mood
+  Capture --&gt;|&quot;draft concepts, qna, profile&quot;| Graph
+  Capture --&gt;|&quot;about, mood, deltas&quot;| Persona
+  Raw --&gt; Vault
+  Mood --&gt; Vault
+  Graph --&gt; Vault
+  Persona --&gt; Vault
+  Bot --&gt;|&quot;git_wrap&quot;| Safety
+  Safety --&gt; Vault
+  Obsidian &lt;--&gt;|&quot;ручное чтение и правки&quot;| Vault
+  Skills --&gt;|&quot;промоушн draft, digest, portrait&quot;| Vault
+</code></pre>
+    </details>
+  </main>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+    const source = "flowchart LR\n  subgraph Client[\"Client\"]\n    Owner[\"Владелец в Telegram\"]\n    Trusted[\"Доверенный пользователь\"]\n    Obsidian[\"Obsidian UI и Graph View\"]\n  end\n\n  subgraph External[\"External\"]\n    Telegram[\"Telegram Bot API\"]\n    OpenRouter[\"OpenRouter API\\nQwen primary, DeepSeek fallback\"]\n  end\n\n  subgraph App[\"Application\"]\n    Bot[\"Psycho bot container\\naiogram handlers\"]\n    Router[\"LLM routing\\nJSON/text calls, fallback, warnings\"]\n    Capture[\"Capture-first pipeline\\n00_raw -\u003e 01_mood -\u003e 02/03\"]\n    Skills[\"Manual strong-model skills\\nreconcista, depersonalization\"]\n  end\n\n  subgraph Data[\"Data\"]\n    Vault[(\"Obsidian vault\\nusers/\u003cuid\u003e\")]\n    Raw[(\"00_raw\\nsessions, qna, notes\")]\n    Mood[(\"01_mood\\nevents, analysis, timeseries\")]\n    Graph[(\"02_concepts, 02_profile, 02_digest\")]\n    Persona[(\"03_personality\\nabout, mood, deltas\")]\n    Safety[(\"Git safety net\\nmanifest, log, before/after commits\")]\n  end\n\n  Owner --\u003e|\"пишет, отвечает, управляет\"| Telegram\n  Trusted --\u003e|\"пишет и отвечает\"| Telegram\n  Telegram --\u003e|\"updates\"| Bot\n  Bot --\u003e|\"sendMessage\"| Telegram\n  Bot --\u003e Router\n  Router --\u003e|\"chat/completions\"| OpenRouter\n  OpenRouter --\u003e|\"JSON или текст\"| Router\n  Router --\u003e Capture\n  Capture --\u003e|\"raw до LLM\"| Raw\n  Capture --\u003e|\"mood только OWNER\"| Mood\n  Capture --\u003e|\"draft concepts, qna, profile\"| Graph\n  Capture --\u003e|\"about, mood, deltas\"| Persona\n  Raw --\u003e Vault\n  Mood --\u003e Vault\n  Graph --\u003e Vault\n  Persona --\u003e Vault\n  Bot --\u003e|\"git_wrap\"| Safety\n  Safety --\u003e Vault\n  Obsidian \u003c--\u003e|\"ручное чтение и правки\"| Vault\n  Skills --\u003e|\"промоушн draft, digest, portrait\"| Vault\n";
+    const fileStem = "psycho-service-map";
+    const legendEntries = [{"color": "#2457c5", "label": "Client", "description": "Telegram/Obsidian users"}, {"color": "#14866d", "label": "Service", "description": "bot and live pipeline"}, {"color": "#b45500", "label": "Storage", "description": "vault stage artifacts and git safety net"}, {"color": "#8a4cc2", "label": "External", "description": "Telegram and OpenRouter"}, {"color": "#b42318", "label": "Manual", "description": "strong-model skills"}];
+    const autoDownload = true;
+    const diagram = document.getElementById("diagram");
+    const pngButton = document.getElementById("download-png");
+    const svgButton = document.getElementById("download-svg");
+    const mmdButton = document.getElementById("download-mmd");
+    let autoDownloaded = false;
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "default",
+      flowchart: { htmlLabels: false, curve: "basis" }
+    });
+
+    function saveBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function svgSize(svg) {
+      const viewBox = svg.viewBox && svg.viewBox.baseVal;
+      const rect = svg.getBoundingClientRect();
+      const width = Number.parseFloat(svg.getAttribute("width")) || (viewBox && viewBox.width) || rect.width || 1200;
+      const height = Number.parseFloat(svg.getAttribute("height")) || (viewBox && viewBox.height) || rect.height || 800;
+      return { width, height };
+    }
+
+    function wrapText(value, maxChars) {
+      const words = String(value).trim().split(/\s+/).filter(Boolean);
+      const lines = [];
+      let current = "";
+      for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length > maxChars && current) {
+          lines.push(current);
+          current = word;
+        } else {
+          current = candidate;
+        }
+      }
+      if (current) lines.push(current);
+      return lines.length ? lines : [""];
+    }
+
+    function legendLayout(width) {
+      if (!legendEntries.length) return { rows: [], height: 0 };
+      const maxChars = Math.max(28, Math.floor((width - 96) / 7.4));
+      const rows = [];
+      for (const entry of legendEntries) {
+        const text = entry.description ? `${entry.label}: ${entry.description}` : entry.label;
+        const lines = wrapText(text, maxChars);
+        lines.forEach((line, index) => rows.push({
+          color: entry.color,
+          marker: index === 0,
+          text: line
+        }));
+        rows.push({ spacer: true });
+      }
+      if (rows.length && rows[rows.length - 1].spacer) rows.pop();
+      return {
+        rows,
+        height: 58 + rows.filter((row) => !row.spacer).length * 20 + rows.filter((row) => row.spacer).length * 8
+      };
+    }
+
+    function appendSvgText(parent, text, attributes) {
+      const ns = "http://www.w3.org/2000/svg";
+      const node = document.createElementNS(ns, "text");
+      node.textContent = text;
+      for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+      parent.appendChild(node);
+      return node;
+    }
+
+    function addLegendToSvg(parent, width) {
+      const ns = "http://www.w3.org/2000/svg";
+      const layout = legendLayout(width);
+      if (!layout.height) return 0;
+
+      const group = document.createElementNS(ns, "g");
+      const box = document.createElementNS(ns, "rect");
+      box.setAttribute("x", "20");
+      box.setAttribute("y", "12");
+      box.setAttribute("width", String(width - 40));
+      box.setAttribute("height", String(layout.height - 20));
+      box.setAttribute("rx", "8");
+      box.setAttribute("fill", "#ffffff");
+      box.setAttribute("stroke", "#d7d9dd");
+      group.appendChild(box);
+
+      appendSvgText(group, "Легенда", {
+        x: width / 2,
+        y: 36,
+        "text-anchor": "middle",
+        fill: "#666b73",
+        "font-family": "Arial, sans-serif",
+        "font-size": "13",
+        "font-weight": "700"
+      });
+
+      let y = 64;
+      for (const row of layout.rows) {
+        if (row.spacer) {
+          y += 8;
+          continue;
+        }
+        const textWidth = Math.min(String(row.text).length * 7.3, width - 96);
+        const rowWidth = textWidth + (row.marker ? 20 : 0);
+        const startX = Math.max(28, (width - rowWidth) / 2);
+        if (row.marker) {
+          const marker = document.createElementNS(ns, "circle");
+          marker.setAttribute("cx", String(startX + 5));
+          marker.setAttribute("cy", String(y - 5));
+          marker.setAttribute("r", "5");
+          marker.setAttribute("fill", row.color || "#2457c5");
+          group.appendChild(marker);
+        }
+        appendSvgText(group, row.text, {
+          x: startX + (row.marker ? 18 : 0),
+          y,
+          fill: "#1d1d1f",
+          "font-family": "Arial, sans-serif",
+          "font-size": "14"
+        });
+        y += 20;
+      }
+
+      parent.appendChild(group);
+      return layout.height;
+    }
+
+    function currentSvgPayload() {
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = diagram.querySelector("svg");
+      if (!svg) throw new Error("SVG is not rendered yet");
+      const size = svgSize(svg);
+      const exportWidth = Math.ceil(Math.max(size.width, legendEntries.length ? 720 : size.width));
+      const wrapper = document.createElementNS(ns, "svg");
+      const legendHeight = addLegendToSvg(wrapper, exportWidth);
+      const gap = legendHeight ? 18 : 0;
+      const exportHeight = Math.ceil(size.height + legendHeight + gap);
+      wrapper.setAttribute("xmlns", ns);
+      wrapper.setAttribute("width", String(exportWidth));
+      wrapper.setAttribute("height", String(exportHeight));
+      wrapper.setAttribute("viewBox", `0 0 ${exportWidth} ${exportHeight}`);
+
+      const background = document.createElementNS(ns, "rect");
+      background.setAttribute("width", "100%");
+      background.setAttribute("height", "100%");
+      background.setAttribute("fill", "#ffffff");
+      wrapper.insertBefore(background, wrapper.firstChild);
+
+      const clone = svg.cloneNode(true);
+      clone.setAttribute("xmlns", ns);
+      clone.setAttribute("x", String(Math.max(0, (exportWidth - size.width) / 2)));
+      clone.setAttribute("y", String(legendHeight + gap));
+      clone.setAttribute("width", String(size.width));
+      clone.setAttribute("height", String(size.height));
+      wrapper.appendChild(clone);
+      return { text: new XMLSerializer().serializeToString(wrapper), width: exportWidth, height: exportHeight };
+    }
+
+    async function renderDiagram() {
+      try {
+        const result = await mermaid.render("diagram-svg", source);
+        diagram.innerHTML = result.svg;
+        pngButton.disabled = false;
+        svgButton.disabled = false;
+        if (autoDownload && !autoDownloaded) {
+          autoDownloaded = true;
+          window.setTimeout(() => downloadPng({ silent: true }).catch(() => undefined), 500);
+        }
+      } catch (error) {
+        diagram.innerHTML = `<pre class="error">${String(error).replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char]))}</pre>`;
+      }
+    }
+
+    async function downloadPng(options = {}) {
+      const svgPayload = currentSvgPayload();
+      const svgBlob = new Blob([svgPayload.text], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(svgBlob);
+      const image = new Image();
+      image.decoding = "async";
+
+      return new Promise((resolve, reject) => {
+        image.onload = () => {
+          const scale = Math.max(2, window.devicePixelRatio || 1);
+          const logicalWidth = image.naturalWidth || image.width || svgPayload.width;
+          const logicalHeight = image.naturalHeight || image.height || svgPayload.height;
+          const width = Math.ceil(logicalWidth * scale);
+          const height = Math.ceil(logicalHeight * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+            URL.revokeObjectURL(url);
+            if (!blob) {
+              reject(new Error("Canvas export returned an empty PNG"));
+              return;
+            }
+            saveBlob(blob, `${fileStem}.png`);
+            resolve();
+          }, "image/png");
+        };
+
+        image.onerror = () => {
+          URL.revokeObjectURL(url);
+          const error = new Error("PNG export failed in this browser");
+          if (!options.silent) alert("Не удалось экспортировать PNG в этом браузере. Попробуй Скачать SVG или запусти скрипт с --png.");
+          reject(error);
+        };
+
+        image.src = url;
+      });
+    }
+
+    pngButton.addEventListener("click", () => {
+      downloadPng().catch(() => undefined);
+    });
+
+    svgButton.addEventListener("click", () => {
+      saveBlob(new Blob([currentSvgPayload().text], { type: "image/svg+xml;charset=utf-8" }), `${fileStem}.svg`);
+    });
+
+    mmdButton.addEventListener("click", () => {
+      saveBlob(new Blob([source], { type: "text/plain;charset=utf-8" }), `${fileStem}.mmd`);
+    });
+
+    renderDiagram();
+  </script>
+</body>
+</html>

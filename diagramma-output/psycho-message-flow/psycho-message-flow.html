@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Psycho message flow</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f7f4;
+      --panel: #ffffff;
+      --text: #1d1d1f;
+      --muted: #666b73;
+      --line: #d7d9dd;
+      --accent: #2457c5;
+      --accent-text: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #15171a;
+        --panel: #202329;
+        --text: #f0f2f5;
+        --muted: #a9b0ba;
+        --line: #373c44;
+        --accent: #8bb1ff;
+        --accent-text: #101318;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+      line-height: 1.25;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    button {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      min-height: 36px;
+      padding: 7px 11px;
+    }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+    button:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
+    main {
+      display: grid;
+      gap: 18px;
+      padding: 24px;
+    }
+    .legend {
+      justify-self: center;
+      max-width: min(100%, 1100px);
+      text-align: center;
+    }
+    .legend-title {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0;
+      margin-bottom: 9px;
+      text-transform: uppercase;
+    }
+    .legend-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      justify-content: center;
+    }
+    .legend-item {
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      display: inline-flex;
+      gap: 8px;
+      min-height: 32px;
+      padding: 6px 10px;
+    }
+    .legend-marker {
+      border-radius: 999px;
+      display: inline-block;
+      flex: 0 0 auto;
+      height: 10px;
+      width: 10px;
+    }
+    .legend-text {
+      color: var(--muted);
+      display: inline-flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      justify-content: center;
+      line-height: 1.25;
+    }
+    .legend-text strong {
+      color: var(--text);
+      font-weight: 700;
+    }
+    .viewport, details {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .viewport {
+      min-height: 420px;
+      overflow: auto;
+      padding: 24px;
+    }
+    #diagram {
+      display: flex;
+      min-width: max-content;
+      align-items: center;
+      justify-content: center;
+    }
+    #diagram svg {
+      max-width: none;
+      height: auto;
+    }
+    .error {
+      max-width: 980px;
+      white-space: pre-wrap;
+      color: #b42318;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    details {
+      padding: 14px 16px;
+    }
+    summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      color: var(--text);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    @media (max-width: 720px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .actions {
+        justify-content: flex-start;
+      }
+      main {
+        padding: 14px;
+      }
+      .viewport {
+        padding: 14px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Psycho message flow</h1>
+    <div class="actions">
+      <button class="primary" id="download-png" disabled>Скачать PNG</button>
+      <button id="download-svg" disabled>Скачать SVG</button>
+      <button id="download-mmd">Скачать Mermaid</button>
+    </div>
+  </header>
+  <main>
+    <section class="legend" aria-label="Легенда">
+      <div class="legend-title">Легенда</div>
+      <div class="legend-items">
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#2457c5"></span>
+          <span class="legend-text"><strong>Raw</strong><span>immutable session capture before LLM</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#14866d"></span>
+          <span class="legend-text"><strong>Mood</strong><span>OWNER-only analysis artifacts</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#b45500"></span>
+          <span class="legend-text"><strong>Drafts</strong><span>concepts/profile/personality writes</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#8a4cc2"></span>
+          <span class="legend-text"><strong>Deferred</strong><span>digest is built later by reconcista</span></span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-marker" style="background:#b42318"></span>
+          <span class="legend-text"><strong>Failure</strong><span>fallback or neutral error</span></span>
+        </div>
+      </div>
+    </section>
+    <section class="viewport">
+      <div id="diagram" aria-label="Psycho message flow"></div>
+    </section>
+    <details>
+      <summary>Mermaid source</summary>
+      <pre><code>flowchart TD
+  Start([&quot;Поступило сообщение пользователя&quot;])
+  Access{&quot;Пользователь доверенный?&quot;}
+  Ignore([&quot;Молчаливо игнорировать&quot;])
+  Session{&quot;Есть активная или возобновляемая сессия?&quot;}
+  OpenSession[&quot;Открыть или возобновить сессию\n/ask, daily, /echo, /requestion, /about, /ucho, reply, note&quot;]
+  Raw[&quot;00_raw\nЗаписать user event в sessions до LLM&quot;]
+  MoodGate{&quot;OWNER и включён mood pipeline?&quot;}
+  Mood[&quot;01_mood\nPAD, quality, face, events, analysis, timeseries&quot;]
+  LLM[&quot;OpenRouter process_answer\nobservations, reaction, user_delta&quot;]
+  Valid{&quot;JSON валиден?&quot;}
+  Fallback[&quot;Fallback model или LLMError\nнейтральное сообщение при полном сбое&quot;]
+  QNA[&quot;00_raw/qna\nQ&amp;A-проекция с block-id&quot;]
+  Concepts[&quot;02_concepts\nDraft concepts, dedup, evidence, MOC&quot;]
+  Profile[&quot;02_profile\nКороткая доменная выжимка&quot;]
+  Personality[&quot;03_personality\nabout, mood, deltas, action refs&quot;]
+  Digest[&quot;02_digest\nРучной digest позже через reconcista\nrefs без копии полной переписки&quot;]
+  Reply[&quot;Telegram\nОтправить reaction, OWNER controls&quot;]
+  AssistantRaw[&quot;00_raw\nЗаписать assistant event в sessions&quot;]
+  Done([&quot;Сессия остаётся открытой&quot;])
+
+  Start --&gt; Access
+  Access --&gt;|&quot;Нет&quot;| Ignore
+  Access --&gt;|&quot;Да&quot;| Session
+  Session --&gt;|&quot;Нет&quot;| OpenSession
+  Session --&gt;|&quot;Да&quot;| Raw
+  OpenSession --&gt; Raw
+  Raw --&gt; MoodGate
+  MoodGate --&gt;|&quot;Да&quot;| Mood
+  MoodGate --&gt;|&quot;Нет&quot;| LLM
+  Mood --&gt; LLM
+  LLM --&gt; Valid
+  Valid --&gt;|&quot;Нет&quot;| Fallback
+  Fallback --&gt;|&quot;fallback ok&quot;| QNA
+  Fallback --&gt;|&quot;all failed&quot;| Reply
+  Valid --&gt;|&quot;Да&quot;| QNA
+  QNA --&gt; Concepts
+  Concepts --&gt; Profile
+  Profile --&gt; Personality
+  Personality --&gt; Digest
+  Personality --&gt; Reply
+  Reply --&gt; AssistantRaw
+  AssistantRaw --&gt; Done
+</code></pre>
+    </details>
+  </main>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+
+    const source = "flowchart TD\n  Start([\"Поступило сообщение пользователя\"])\n  Access{\"Пользователь доверенный?\"}\n  Ignore([\"Молчаливо игнорировать\"])\n  Session{\"Есть активная или возобновляемая сессия?\"}\n  OpenSession[\"Открыть или возобновить сессию\\n/ask, daily, /echo, /requestion, /about, /ucho, reply, note\"]\n  Raw[\"00_raw\\nЗаписать user event в sessions до LLM\"]\n  MoodGate{\"OWNER и включён mood pipeline?\"}\n  Mood[\"01_mood\\nPAD, quality, face, events, analysis, timeseries\"]\n  LLM[\"OpenRouter process_answer\\nobservations, reaction, user_delta\"]\n  Valid{\"JSON валиден?\"}\n  Fallback[\"Fallback model или LLMError\\nнейтральное сообщение при полном сбое\"]\n  QNA[\"00_raw/qna\\nQ\u0026A-проекция с block-id\"]\n  Concepts[\"02_concepts\\nDraft concepts, dedup, evidence, MOC\"]\n  Profile[\"02_profile\\nКороткая доменная выжимка\"]\n  Personality[\"03_personality\\nabout, mood, deltas, action refs\"]\n  Digest[\"02_digest\\nРучной digest позже через reconcista\\nrefs без копии полной переписки\"]\n  Reply[\"Telegram\\nОтправить reaction, OWNER controls\"]\n  AssistantRaw[\"00_raw\\nЗаписать assistant event в sessions\"]\n  Done([\"Сессия остаётся открытой\"])\n\n  Start --\u003e Access\n  Access --\u003e|\"Нет\"| Ignore\n  Access --\u003e|\"Да\"| Session\n  Session --\u003e|\"Нет\"| OpenSession\n  Session --\u003e|\"Да\"| Raw\n  OpenSession --\u003e Raw\n  Raw --\u003e MoodGate\n  MoodGate --\u003e|\"Да\"| Mood\n  MoodGate --\u003e|\"Нет\"| LLM\n  Mood --\u003e LLM\n  LLM --\u003e Valid\n  Valid --\u003e|\"Нет\"| Fallback\n  Fallback --\u003e|\"fallback ok\"| QNA\n  Fallback --\u003e|\"all failed\"| Reply\n  Valid --\u003e|\"Да\"| QNA\n  QNA --\u003e Concepts\n  Concepts --\u003e Profile\n  Profile --\u003e Personality\n  Personality --\u003e Digest\n  Personality --\u003e Reply\n  Reply --\u003e AssistantRaw\n  AssistantRaw --\u003e Done\n";
+    const fileStem = "psycho-message-flow";
+    const legendEntries = [{"color": "#2457c5", "label": "Raw", "description": "immutable session capture before LLM"}, {"color": "#14866d", "label": "Mood", "description": "OWNER-only analysis artifacts"}, {"color": "#b45500", "label": "Drafts", "description": "concepts/profile/personality writes"}, {"color": "#8a4cc2", "label": "Deferred", "description": "digest is built later by reconcista"}, {"color": "#b42318", "label": "Failure", "description": "fallback or neutral error"}];
+    const autoDownload = true;
+    const diagram = document.getElementById("diagram");
+    const pngButton = document.getElementById("download-png");
+    const svgButton = document.getElementById("download-svg");
+    const mmdButton = document.getElementById("download-mmd");
+    let autoDownloaded = false;
+
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "default",
+      flowchart: { htmlLabels: false, curve: "basis" }
+    });
+
+    function saveBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function svgSize(svg) {
+      const viewBox = svg.viewBox && svg.viewBox.baseVal;
+      const rect = svg.getBoundingClientRect();
+      const width = Number.parseFloat(svg.getAttribute("width")) || (viewBox && viewBox.width) || rect.width || 1200;
+      const height = Number.parseFloat(svg.getAttribute("height")) || (viewBox && viewBox.height) || rect.height || 800;
+      return { width, height };
+    }
+
+    function wrapText(value, maxChars) {
+      const words = String(value).trim().split(/\s+/).filter(Boolean);
+      const lines = [];
+      let current = "";
+      for (const word of words) {
+        const candidate = current ? `${current} ${word}` : word;
+        if (candidate.length > maxChars && current) {
+          lines.push(current);
+          current = word;
+        } else {
+          current = candidate;
+        }
+      }
+      if (current) lines.push(current);
+      return lines.length ? lines : [""];
+    }
+
+    function legendLayout(width) {
+      if (!legendEntries.length) return { rows: [], height: 0 };
+      const maxChars = Math.max(28, Math.floor((width - 96) / 7.4));
+      const rows = [];
+      for (const entry of legendEntries) {
+        const text = entry.description ? `${entry.label}: ${entry.description}` : entry.label;
+        const lines = wrapText(text, maxChars);
+        lines.forEach((line, index) => rows.push({
+          color: entry.color,
+          marker: index === 0,
+          text: line
+        }));
+        rows.push({ spacer: true });
+      }
+      if (rows.length && rows[rows.length - 1].spacer) rows.pop();
+      return {
+        rows,
+        height: 58 + rows.filter((row) => !row.spacer).length * 20 + rows.filter((row) => row.spacer).length * 8
+      };
+    }
+
+    function appendSvgText(parent, text, attributes) {
+      const ns = "http://www.w3.org/2000/svg";
+      const node = document.createElementNS(ns, "text");
+      node.textContent = text;
+      for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, String(value));
+      parent.appendChild(node);
+      return node;
+    }
+
+    function addLegendToSvg(parent, width) {
+      const ns = "http://www.w3.org/2000/svg";
+      const layout = legendLayout(width);
+      if (!layout.height) return 0;
+
+      const group = document.createElementNS(ns, "g");
+      const box = document.createElementNS(ns, "rect");
+      box.setAttribute("x", "20");
+      box.setAttribute("y", "12");
+      box.setAttribute("width", String(width - 40));
+      box.setAttribute("height", String(layout.height - 20));
+      box.setAttribute("rx", "8");
+      box.setAttribute("fill", "#ffffff");
+      box.setAttribute("stroke", "#d7d9dd");
+      group.appendChild(box);
+
+      appendSvgText(group, "Легенда", {
+        x: width / 2,
+        y: 36,
+        "text-anchor": "middle",
+        fill: "#666b73",
+        "font-family": "Arial, sans-serif",
+        "font-size": "13",
+        "font-weight": "700"
+      });
+
+      let y = 64;
+      for (const row of layout.rows) {
+        if (row.spacer) {
+          y += 8;
+          continue;
+        }
+        const textWidth = Math.min(String(row.text).length * 7.3, width - 96);
+        const rowWidth = textWidth + (row.marker ? 20 : 0);
+        const startX = Math.max(28, (width - rowWidth) / 2);
+        if (row.marker) {
+          const marker = document.createElementNS(ns, "circle");
+          marker.setAttribute("cx", String(startX + 5));
+          marker.setAttribute("cy", String(y - 5));
+          marker.setAttribute("r", "5");
+          marker.setAttribute("fill", row.color || "#2457c5");
+          group.appendChild(marker);
+        }
+        appendSvgText(group, row.text, {
+          x: startX + (row.marker ? 18 : 0),
+          y,
+          fill: "#1d1d1f",
+          "font-family": "Arial, sans-serif",
+          "font-size": "14"
+        });
+        y += 20;
+      }
+
+      parent.appendChild(group);
+      return layout.height;
+    }
+
+    function currentSvgPayload() {
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = diagram.querySelector("svg");
+      if (!svg) throw new Error("SVG is not rendered yet");
+      const size = svgSize(svg);
+      const exportWidth = Math.ceil(Math.max(size.width, legendEntries.length ? 720 : size.width));
+      const wrapper = document.createElementNS(ns, "svg");
+      const legendHeight = addLegendToSvg(wrapper, exportWidth);
+      const gap = legendHeight ? 18 : 0;
+      const exportHeight = Math.ceil(size.height + legendHeight + gap);
+      wrapper.setAttribute("xmlns", ns);
+      wrapper.setAttribute("width", String(exportWidth));
+      wrapper.setAttribute("height", String(exportHeight));
+      wrapper.setAttribute("viewBox", `0 0 ${exportWidth} ${exportHeight}`);
+
+      const background = document.createElementNS(ns, "rect");
+      background.setAttribute("width", "100%");
+      background.setAttribute("height", "100%");
+      background.setAttribute("fill", "#ffffff");
+      wrapper.insertBefore(background, wrapper.firstChild);
+
+      const clone = svg.cloneNode(true);
+      clone.setAttribute("xmlns", ns);
+      clone.setAttribute("x", String(Math.max(0, (exportWidth - size.width) / 2)));
+      clone.setAttribute("y", String(legendHeight + gap));
+      clone.setAttribute("width", String(size.width));
+      clone.setAttribute("height", String(size.height));
+      wrapper.appendChild(clone);
+      return { text: new XMLSerializer().serializeToString(wrapper), width: exportWidth, height: exportHeight };
+    }
+
+    async function renderDiagram() {
+      try {
+        const result = await mermaid.render("diagram-svg", source);
+        diagram.innerHTML = result.svg;
+        pngButton.disabled = false;
+        svgButton.disabled = false;
+        if (autoDownload && !autoDownloaded) {
+          autoDownloaded = true;
+          window.setTimeout(() => downloadPng({ silent: true }).catch(() => undefined), 500);
+        }
+      } catch (error) {
+        diagram.innerHTML = `<pre class="error">${String(error).replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[char]))}</pre>`;
+      }
+    }
+
+    async function downloadPng(options = {}) {
+      const svgPayload = currentSvgPayload();
+      const svgBlob = new Blob([svgPayload.text], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(svgBlob);
+      const image = new Image();
+      image.decoding = "async";
+
+      return new Promise((resolve, reject) => {
+        image.onload = () => {
+          const scale = Math.max(2, window.devicePixelRatio || 1);
+          const logicalWidth = image.naturalWidth || image.width || svgPayload.width;
+          const logicalHeight = image.naturalHeight || image.height || svgPayload.height;
+          const width = Math.ceil(logicalWidth * scale);
+          const height = Math.ceil(logicalHeight * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          canvas.toBlob((blob) => {
+            URL.revokeObjectURL(url);
+            if (!blob) {
+              reject(new Error("Canvas export returned an empty PNG"));
+              return;
+            }
+            saveBlob(blob, `${fileStem}.png`);
+            resolve();
+          }, "image/png");
+        };
+
+        image.onerror = () => {
+          URL.revokeObjectURL(url);
+          const error = new Error("PNG export failed in this browser");
+          if (!options.silent) alert("Не удалось экспортировать PNG в этом браузере. Попробуй Скачать SVG или запусти скрипт с --png.");
+          reject(error);
+        };
+
+        image.src = url;
+      });
+    }
+
+    pngButton.addEventListener("click", () => {
+      downloadPng().catch(() => undefined);
+    });
+
+    svgButton.addEventListener("click", () => {
+      saveBlob(new Blob([currentSvgPayload().text], { type: "image/svg+xml;charset=utf-8" }), `${fileStem}.svg`);
+    });
+
+    mmdButton.addEventListener("click", () => {
+      saveBlob(new Blob([source], { type: "text/plain;charset=utf-8" }), `${fileStem}.mmd`);
+    });
+
+    renderDiagram();
+  </script>
+</body>
+</html>

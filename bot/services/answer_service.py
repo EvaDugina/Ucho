@@ -97,7 +97,7 @@ def _apply_inner(
 
     # Obsidian-native: ссылка на конкретный Q-блок (^Q<n>) — клик в концепте
     # ведёт в точное место raw.
-    raw_ref = f"[[raw/{asked_at.strftime('%Y-%m-%d')}#^Q{q_num}]]"
+    raw_ref = f"[[00_raw/qna/{asked_at.strftime('%Y-%m-%d')}#^Q{q_num}]]"
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     session_marker = f"chat · {now_str}"
     touched_domains: set[str] = set()

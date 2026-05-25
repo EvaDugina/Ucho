@@ -1,10 +1,10 @@
 """Сравнение методов оценки настроения/состояния по сообщению (OWNER-тестирование).
 
 Гоняет НЕСКОЛЬКО независимых методов на один ответ человека (в контексте сессии),
-складывает их выводы в Markdown-отчёт `mood/analysis/YYYY-MM-DD.md` и пишет
-числа рядом в durable-ряд `mood/timeseries/YYYY-MM.jsonl` — чтобы потом на практике
+складывает их выводы в Markdown-отчёт `01_mood/analysis/YYYY-MM-DD.md` и пишет
+числа рядом в durable-ряд `01_mood/timeseries/YYYY-MM.jsonl` — чтобы потом на практике
 выбрать самые точные методы и строить графики колебаний настроения (день/неделя/
-месяц/сезон/год). Заметку-график `mood/График настроения.md` рисует плагин Obsidian Charts.
+месяц/сезон/год). Заметку-график `01_mood/График настроения.md` рисует плагин Obsidian Charts.
 
 Методы (провайдеры):
 - **pad** — текущий пайплайн настроения (OpenRouter-классификатор + код): в отчёт идёт эмоция.
@@ -31,11 +31,11 @@ _CHART_NOTE = "График настроения.md"
 
 
 def _ts_dir():
-    return userctx.user_root() / "mood" / "timeseries"
+    return userctx.user_root() / "01_mood" / "timeseries"
 
 
 def _analysis_dir():
-    return userctx.user_root() / "mood" / "analysis"
+    return userctx.user_root() / "01_mood" / "analysis"
 
 
 async def run_all(
@@ -195,7 +195,7 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
 
 
 def append_report(q_num: int | None, text_len: int, report: str) -> None:
-    """Дописать человекочитаемый отчёт методов в `mood/analysis/YYYY-MM-DD.md`.
+    """Дописать человекочитаемый отчёт методов в `01_mood/analysis/YYYY-MM-DD.md`.
 
     Это knowledge-base след для depersonalization/ручного чтения. В чат отчёт не
     отправляется: пользователю уходит только основная реакция Иуды.
@@ -220,7 +220,7 @@ _METHOD_KEYS = ("pad", "emolex", "dostoevsky", "panas")
 
 
 def append_point(text_len: int, results: dict) -> None:
-    """Дописать точку временного ряда в `mood/timeseries/YYYY-MM.jsonl`.
+    """Дописать точку временного ряда в `01_mood/timeseries/YYYY-MM.jsonl`.
 
     Durable append-only (НЕ кольцо, НЕ ротируется) — основа для графиков колебания
     настроения за день/неделю/месяц/сезон/год. Помесячная партиция держит файлы
@@ -296,7 +296,7 @@ def aggregate_daily(points: list[dict]) -> tuple[list[str], dict[str, list]]:
 
 
 def rebuild_chart(days: int = _CHART_DAYS) -> None:
-    """Перегенерировать `mood/График настроения.md` — заметку с блоком Obsidian
+    """Перегенерировать `01_mood/График настроения.md` — заметку с блоком Obsidian
     Charts (рендерит community-плагин «Obsidian Charts»; Python для рисования не нужен).
     Дневное среднее PAD за последние `days` дней. Вызывается после `append_point`.
     """
@@ -317,10 +317,12 @@ def rebuild_chart(days: int = _CHART_DAYS) -> None:
         body = (
             "# График настроения\n\n"
             "Дневное среднее PAD (валентность/энергия/доминирование, ∈[-1..1]) по "
-            f"последним {days} дням. Источник — `mood/timeseries/`.\n"
+            f"последним {days} дням. Источник — `01_mood/timeseries/`.\n"
             "Требует community-плагин **Obsidian Charts** (иначе блок ниже не отрисуется).\n\n"
             + "\n".join(block) + "\n"
         )
-        atomic_write_text(userctx.user_root() / "mood" / _CHART_NOTE, body)
+        d = userctx.user_root() / "01_mood"
+        d.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(d / _CHART_NOTE, body)
     except Exception:
         log.exception("rebuild_chart failed (non-fatal)")

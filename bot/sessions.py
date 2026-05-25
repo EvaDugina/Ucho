@@ -1,70 +1,57 @@
-"""Кольцо последних N сессий пользователя (per-user) — для reply-resume.
+"""Восстановимый индекс сессий поверх `00_raw/sessions`.
 
-Ответив (reply) на любое сообщение прошлой сессии, пользователь продолжает её.
-Снапшот = ``session.Session.to_dict()``. Индексом служит само кольцо: у каждого
-снапшота есть ``message_ids`` (все id сообщений бота этой сессии). Файл —
-``users/<uid>/_sessions.json``, кольцо на ``MAX_SESSIONS`` записей.
-
-Модуль НЕ импортирует ``session`` (работает со словарями) — чтобы не было цикла:
-``session`` импортирует ``sessions``.
+`_sessions.json` больше не является источником истины и не создаётся. Полный
+транскрипт сессии живёт в `00_raw/sessions/<session_id>.jsonl`; этот модуль
+оставляет старый API для reply-resume и тестов.
 """
-import json
-import logging
-from pathlib import Path
+from __future__ import annotations
+
 from typing import Optional
 
-from . import userctx
-from .atomic import atomic_write_json
-
-log = logging.getLogger(__name__)
-
-MAX_SESSIONS = 25
-
-
-def _file() -> Path:
-    return userctx.user_root() / "_sessions.json"
-
-
-def _load() -> list[dict]:
-    f = _file()
-    if not f.exists():
-        return []
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
-        log.exception("failed to load sessions ring, treating as empty")
-        return []
-
-
-def _save(items: list[dict]) -> None:
-    try:
-        atomic_write_json(_file(), items[-MAX_SESSIONS:])
-    except Exception:
-        log.exception("failed to persist sessions ring")
+from . import session_log
 
 
 def snapshot(session_dict: dict) -> None:
-    """Положить снапшот сессии в кольцо (заменяя прежний с тем же id)."""
-    sid = session_dict.get("id")
-    if not sid:
-        return
-    items = [s for s in _load() if s.get("id") != sid]
-    items.append(session_dict)
-    _save(items)
+    """Исторический no-op: снапшоты выводятся из event-log."""
+    return None
 
 
 def load(session_id: str) -> Optional[dict]:
-    for s in reversed(_load()):
-        if s.get("id") == session_id:
-            return s
-    return None
+    events = session_log.session_events(session_id)
+    if not events:
+        return None
+    message_ids = [
+        int(e["telegram_message_id"])
+        for e in events
+        if isinstance(e.get("telegram_message_id"), int)
+    ]
+    last_question = ""
+    current_q_num = None
+    last_domain = None
+    asked_at = None
+    history: list[dict] = []
+    for e in events:
+        role = e.get("role")
+        text = (e.get("text") or "").strip()
+        if role in {"user", "assistant"} and text:
+            history.append({"role": role, "content": text, "ts": e.get("ts")})
+        if role == "assistant" and e.get("kind") in {"question", "reaction", "service"}:
+            last_question = text
+            current_q_num = e.get("q_num")
+            last_domain = e.get("domain") or last_domain
+            asked_at = e.get("ts") or asked_at
+    return {
+        "id": session_id,
+        "mode": "probe",
+        "domain": last_domain,
+        "last_domain": last_domain,
+        "last_question": last_question,
+        "current_q_num": current_q_num,
+        "asked_at": asked_at,
+        "message_ids": message_ids[-50:],
+        "history": history[-12:],
+    }
 
 
 def find_by_message_id(message_id: int) -> Optional[str]:
-    """id самой свежей сессии, в чьих message_ids есть это сообщение."""
-    mid = int(message_id)
-    for s in reversed(_load()):
-        if mid in (s.get("message_ids") or []):
-            return s.get("id")
-    return None
+    return session_log.find_session_by_message_id(message_id)

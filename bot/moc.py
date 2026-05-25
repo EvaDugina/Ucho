@@ -1,6 +1,6 @@
 """Map of Content (MOC) per-domain — Obsidian-native навигация по концептам.
 
-Один MOC-файл на домен: ``concepts/<domain>/<DOMAIN>.md`` (имя = домен
+Один MOC-файл на домен: ``02_concepts/<domain>/<DOMAIN>.md`` (имя = домен
 заглавными, чтобы узел графа подписывался названием темы, а не «_moc»). Содержит список
 всех концептов домена, сгруппированных по ``type`` (principle / value /
 preference / belief / claim), с одно-строчным summary под каждым.

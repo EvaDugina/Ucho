@@ -3,7 +3,7 @@
 Контекст угроз (PoC B, Telegram-бот, один-владелец):
 
 * **Path traversal через slug.** LLM может вернуть ``slug="../../etc/passwd"``,
-  и ``_path_for(slug, domain)`` запишет файл вне ``concepts/<domain>/``. Все
+  и ``_path_for(slug, domain)`` запишет файл вне ``02_concepts/<domain>/``. Все
   slug-и проходят через ``safe_slug`` → kebab-case, только ASCII, max 80.
 * **Newline-injection в raw-логе.** Парсер ``_ENTRY_RE`` находит запись по
   ``^## Q\\d+ ·``. Если в ответе пользователя есть ``\\n## Q42 ...``, парсер
@@ -150,7 +150,7 @@ def safe_open_question(raw: str) -> str:
 
 
 def safe_user_text(raw: str, limit: int = MAX_USER_TEXT) -> tuple[str, bool]:
-    """Ответ пользователя для записи в raw/ и подачи в LLM.
+    """Ответ пользователя для записи в 00_raw и подачи в LLM.
 
     Возвращает ``(text, truncated)`` — флаг говорит, что текст был обрезан.
     Перевод строк сохраняется (это нужно для читаемости ответа), но

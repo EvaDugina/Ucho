@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
-from . import sessions, userctx
+from . import session_log, userctx
 from .atomic import atomic_write_json
 from .config import DAILY_TZ, VAULT_PATH
 
@@ -104,6 +104,7 @@ class Session:
     clarifier_count: int = 0
     # Двухфазный коммит ответа: ставится ДО process_answer, чистится ПОСЛЕ.
     pending_answer: Optional[str] = None
+    pending_answer_event_id: Optional[str] = None
     # Идентичность сессии и id всех её сообщений бота — для reply-resume (кольцо).
     id: str = ""
     message_ids: list[int] = field(default_factory=list)
@@ -150,6 +151,9 @@ class Session:
         ``YYYY:MM:DD HH:MM``. Если старая история была без ``ts``, используем
         ``asked_at`` как честный fallback вместо выдумывания порядка во времени.
         """
+        from_log = session_log.transcript(self.id, max_chars=max_chars)
+        if from_log:
+            return from_log
         entries = _normalize_history(self.history, fallback=self.asked_at)
         if not entries:
             return ""
@@ -174,6 +178,11 @@ class Session:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["asked_at"] = self.asked_at.isoformat()
+        # История сообщений живёт в 00_raw/sessions. Runtime-файл хранит только
+        # состояние активной сессии и восстановимые id, без полного дублирования
+        # переписки.
+        d["history"] = []
+        d["message_ids"] = session_log.message_ids(self.id)[-50:] or self.message_ids[-50:]
         return d
 
     @classmethod
@@ -265,13 +274,8 @@ def get() -> Optional["Session"]:
 
 
 def _snapshot_to_ring(s: Optional["Session"]) -> None:
-    """Сохранить непустую сессию в кольцо (для последующего reply-resume)."""
-    if s is None or not (s.history or s.message_ids) or not s.id:
-        return
-    try:
-        sessions.snapshot(s.to_dict())
-    except Exception:
-        log.exception("failed to snapshot session to ring")
+    """Исторический no-op: прошлые сессии восстанавливаются из 00_raw/sessions."""
+    return
 
 
 def start(mode: Mode, domain: Optional[str] = None) -> "Session":
@@ -306,19 +310,75 @@ def close() -> bool:
 
 
 def resume(session_id: str) -> Optional["Session"]:
-    """Сделать активной сессию из кольца (текущую сперва снапшотим)."""
+    """Сделать активной сессию из канонического session-log."""
     uid = userctx.current_uid()
-    snap = sessions.load(session_id)
-    if snap is None:
+    events = session_log.session_events(session_id)
+    if not events:
         return None
     cur = _active.get(uid) if uid is not None else None
     if cur is not None and cur.id != session_id:
         _snapshot_to_ring(cur)
-    s = Session.from_dict(snap)
+    last_q = None
+    main_q = None
+    last_assistant = ""
+    last_domain = ""
+    asked_at = datetime.now()
+    message_ids: list[int] = []
+    history: list[dict] = []
+    for e in events:
+        mid = e.get("telegram_message_id", e.get("message_id"))
+        if mid is not None:
+            try:
+                message_ids.append(int(mid))
+            except (TypeError, ValueError):
+                pass
+        if e.get("role") in ("assistant", "user") and e.get("text"):
+            history.append(_history_entry(str(e.get("role")), str(e.get("text")), at=e.get("ts")))
+        if e.get("role") == "assistant":
+            last_assistant = str(e.get("text") or last_assistant)
+            last_domain = str(e.get("domain") or last_domain)
+            if e.get("q_num") is not None:
+                last_q = int(e["q_num"])
+                if e.get("kind") == "question" and main_q is None:
+                    main_q = last_q
+            try:
+                asked_at = _coerce_dt(e.get("ts"))
+            except Exception:
+                pass
+    s = Session(
+        mode="probe",
+        domain=last_domain or None,
+        last_question=last_assistant,
+        last_domain=last_domain,
+        current_q_num=last_q,
+        asked_at=asked_at,
+        history=history,
+        main_question=last_assistant if main_q == last_q else "",
+        main_q_num=main_q,
+        id=session_id,
+        message_ids=message_ids[-50:],
+    )
     if uid is not None:
         _active[uid] = s
     _persist()
     return s
+
+
+def has_pending(s: Optional["Session"] = None) -> bool:
+    s = s or get()
+    return bool(s and (s.pending_answer or s.pending_answer_event_id))
+
+
+def pending_answer_text(s: Optional["Session"] = None) -> str:
+    s = s or get()
+    if s is None:
+        return ""
+    if s.pending_answer_event_id:
+        event = session_log.find_event(s.pending_answer_event_id)
+        text = (event or {}).get("text") if isinstance(event, dict) else ""
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return (s.pending_answer or "").strip()
 
 
 def set_question(question: str, domain: str, q_num: Optional[int] = None) -> None:

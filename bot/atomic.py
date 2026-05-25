@@ -8,7 +8,7 @@ ext4. Это убирает риск битых файлов при:
 * kill контейнера в момент записи;
 * YandexDisk-pull, который иначе мог бы засинкать полу-записанный файл.
 
-Append-only логи (``raw/YYYY-MM-DD.md``, ``.psycho/log.md``) не используют этот
+Append-only логи (``00_raw/qna/YYYY-MM-DD.md``, ``.psycho/log.md``) не используют этот
 модуль — там append безопасен сам по себе.
 """
 from __future__ import annotations

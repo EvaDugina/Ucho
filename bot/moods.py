@@ -6,7 +6,7 @@
 - **Код (этот модуль)** считает математику: вектор настроения по сессии с
   приоритетом на последнее сообщение (recency) + затухающий prior из портрета,
   устойчивость (дисперсия), выбор контрастного лица, журнал и mood-map.
-- **depersonalization (сильная модель)** строит граф `mood/` и пишет `_mood_map.json`
+- **depersonalization (сильная модель)** строит граф `01_mood/` и пишет `_mood_map.json`
   + `mood_baseline` в портрет.
 
 Часть 1 (Фаза B) — измерения + `session_mood`. Часть 2 (Фаза C) — `BOT_MOODS`,
@@ -213,7 +213,6 @@ BOT_MOODS = (
     "ласка", "любовь", "вера", "вселение_уверенности", "смирение", "клятва",
 )
 
-_MOOD_LOG_MAX = 200  # кольцо журнала пар (настроение → лицо)
 _BRIGHT_Q = {"гордость_самоуверенность", "воодушевление_азарт", "презрение_зависть"}
 
 
@@ -222,11 +221,13 @@ def coerce_bot_mood(s) -> str:
 
 
 def _mood_dir() -> "object":
-    return userctx.user_root() / "mood"
+    return userctx.user_root() / "01_mood"
 
 
 def _mood_log_path():
-    return userctx.user_root() / "_mood_log.jsonl"
+    from datetime import datetime
+
+    return _mood_dir() / "events" / f"{datetime.now():%Y-%m}.jsonl"
 
 
 def _default_faces(mv: dict) -> list[str]:
@@ -258,7 +259,7 @@ def _default_faces(mv: dict) -> list[str]:
 
 
 def load_mood_map() -> dict:
-    """Per-user рантайм-карта `mood/_mood_map.json` (пишет depersonalization). Нет → {}."""
+    """Per-user карта `01_mood/_mood_map.json` (пишет depersonalization). Нет → {}."""
     try:
         p = _mood_dir() / "_mood_map.json"
         if not p.exists():
@@ -285,8 +286,9 @@ def pick_bot_mood(mood_vec: dict) -> str:
 
 
 def log_turn(mood_vec: dict, bot_mood: str, vad: dict | None = None) -> None:
-    """Записать пару (настроение → лицо) в `_mood_log.jsonl` (кольцо). Для графа
-    Фазы D (depersonalization агрегирует в `mood/` + `_mood_map.json`). `vad` —
+    """Записать пару (настроение → лицо) в `01_mood/events/YYYY-MM.jsonl`.
+
+    Для графа Фазы D (depersonalization агрегирует в `01_mood/` + `_mood_map.json`). `vad` —
     нативная русская VAD-оценка лексикона (`lexicon.score`): сверка арбитр↔лексикон
     (где LLM перебивает детерминированный сигнал)."""
     try:
@@ -304,8 +306,9 @@ def log_turn(mood_vec: dict, bot_mood: str, vad: dict | None = None) -> None:
             "lex_dominance": vad.get("dominance"),
         }
         p = _mood_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
         lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
         lines.append(json.dumps(entry, ensure_ascii=False))
-        atomic_write_text(p, "\n".join(lines[-_MOOD_LOG_MAX:]) + "\n")
+        atomic_write_text(p, "\n".join(lines) + "\n")
     except Exception:
         log.exception("log_turn failed (non-fatal)")

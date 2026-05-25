@@ -20,15 +20,15 @@ log = logging.getLogger(__name__)
 # модульными константами от VAULT_PATH — теперь функции, т.к. у каждого
 # пользователя свой `<vault>/users/<uid>/`. `.psycho/` и git — глобальные.
 def raw_dir() -> Path:
-    return userctx.user_root() / "raw"
+    return userctx.user_root() / "00_raw" / "qna"
 
 
 def profile_dir() -> Path:
-    return userctx.user_root() / "profile"
+    return userctx.user_root() / "02_profile"
 
 
 def notes_dir() -> Path:
-    return userctx.user_root() / "notes"
+    return userctx.user_root() / "00_raw" / "notes"
 
 
 def index_file() -> Path:
@@ -333,13 +333,19 @@ def git_wrap(op_name: str) -> Iterator[None]:
 def ensure_layout() -> None:
     """Создать структуру для ТЕКУЩЕГО пользователя (userctx) + глобальный .psycho.
 
-    Per-user: raw/profile/notes/_index. Глобально (корень вольта): .psycho/,
-    git-репо.
+    Per-user: stage-папки 00_raw/01_mood/02_*/03_personality и _index.
+    Глобально (корень вольта): .psycho/, git-репо.
     """
     raw_dir().mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "00_raw" / "sessions").mkdir(parents=True, exist_ok=True)
+    notes_dir().mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "01_mood" / "events").mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "01_mood" / "analysis").mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "01_mood" / "timeseries").mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "02_concepts").mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "02_digest").mkdir(parents=True, exist_ok=True)
+    (userctx.user_root() / "03_personality").mkdir(parents=True, exist_ok=True)
     profile_dir().mkdir(parents=True, exist_ok=True)
-    # Папка графа настроений (узлы quality/лица + _mood_map.json); строит depersonalization.
-    (userctx.user_root() / "mood").mkdir(parents=True, exist_ok=True)
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
     for domain in DOMAINS:
         f = profile_dir() / f"{domain}.md"
@@ -348,12 +354,18 @@ def ensure_layout() -> None:
     idx = index_file()
     if not idx.exists():
         lines = ["# Psycho — индекс", "", "## Портрет по темам", ""]
-        lines += [f"- [[profile/{d}|{d}]]" for d in DOMAINS]
-        lines += ["", "## Сырые логи", "", "Папка `raw/` — Q&A по дням."]
+        lines += [f"- [[02_profile/{d}|{d}]]" for d in DOMAINS]
+        lines += [
+            "",
+            "## Сырые логи",
+            "",
+            "`00_raw/sessions/` — полный event-log сессий.",
+            "`00_raw/qna/` — человекочитаемая Q&A-проекция.",
+        ]
         idx.write_text("\n".join(lines) + "\n", encoding="utf-8")
     if not LOG_PATH.exists():
         LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
-    # Портрет (personality/about.md) + черновик настроения (personality/mood.md) —
+    # Портрет (03_personality/about.md) + черновик настроения (03_personality/mood.md) —
     # пустые скелеты, заполняются live кодом и прозой/графом depersonalization. Импорт
     # локальный: about/mood_file → atomic, без цикла с vault.
     try:
@@ -361,7 +373,7 @@ def ensure_layout() -> None:
         about.ensure()
         mood_file.ensure()
     except Exception:
-        log.exception("failed to ensure personality/ files")
+        log.exception("failed to ensure 03_personality/ files")
     _ensure_user_graph_settings()
     ensure_git_repo()
 
@@ -440,7 +452,7 @@ def mark_daily_sent(tz_name: str) -> None:
 
 
 def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: str) -> Path:
-    """Append Q&A в `raw/YYYY-MM-DD.md`. Санитизирует ввод от подделки
+    """Append Q&A в `00_raw/qna/YYYY-MM-DD.md`. Санитизирует ввод от подделки
     заголовков ``## Q...`` и ``**Q:**``/``**A:**`` (см. ``validation.escape_raw_block``).
 
     Лимиты длины применяются к answer; если обрезано — пишем warn в log.md.
@@ -463,7 +475,7 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
     a_clean = escape_raw_block(a_clean)
 
     # Block-id `^Q<n>` после **A:** — Obsidian-native якорь, на который концепты
-    # ссылаются как [[raw/<date>#^Q<n>]] (kepano obsidian-skills, block refs).
+    # ссылаются как [[00_raw/qna/<date>#^Q<n>]] (kepano obsidian-skills, block refs).
     # Якорь должен быть на отдельной строке после контента, чтобы Obsidian
     # привязал его к предыдущему блоку, а не к следующему.
     block = (
@@ -485,7 +497,7 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
 
 
 def append_note(when: datetime, text: str) -> Path:
-    """Append свободную заметку (/ucho) в `notes/YYYY-MM-DD.md` verbatim.
+    """Append свободную заметку (/ucho) в `00_raw/notes/YYYY-MM-DD.md` verbatim.
 
     Человеческий скрэтчпад — отдельно от raw (машинный Q&A-лог). Текст
     санитизируется так же, как ответ пользователя (control-байты, лимит),
@@ -523,7 +535,7 @@ def append_profile(when: datetime, domain: str, fragment: str, raw_time: str) ->
     fragment_clean = escape_raw_block(fragment_clean)
     block = (
         f"### {date_str}\n"
-        f"- {fragment_clean} _(из [[raw/{date_str}|{raw_time}]])_\n\n"
+        f"- {fragment_clean} _(из [[00_raw/qna/{date_str}|{raw_time}]])_\n\n"
     )
     try:
         with path.open("a", encoding="utf-8") as f:

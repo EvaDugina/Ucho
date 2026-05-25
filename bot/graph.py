@@ -1,6 +1,6 @@
 """Граф концептов в Obsidian: одна нота на концепт, связи во frontmatter и в теле.
 
-Файлы лежат в <vault>/concepts/<domain>/<slug>.md. Сохранение — всегда полная
+Файлы лежат в <vault>/02_concepts/<domain>/<slug>.md. Сохранение — всегда полная
 перезапись через save_concept(), чтобы не разъезжаться по форматам.
 """
 from __future__ import annotations
@@ -29,8 +29,8 @@ from .vault import append_log
 log = logging.getLogger(__name__)
 
 def concepts_dir() -> Path:
-    """Папка концептов ТЕКУЩЕГО пользователя: `<vault>/users/<uid>/concepts/`."""
-    return userctx.user_root() / "concepts"
+    """Папка концептов ТЕКУЩЕГО пользователя: `<vault>/users/<uid>/02_concepts/`."""
+    return userctx.user_root() / "02_concepts"
 
 
 RELATION_KINDS = ("supports", "contradicts", "derived_from", "related")
@@ -51,7 +51,7 @@ DRIFT_LOG_OP = "drift_skipped"
 class Evidence:
     when: str          # "2026-05-18 14:32"
     text: str          # цитата/перефраз из ответа
-    raw_ref: str       # "[[raw/2026-05-18#1432]]"
+    raw_ref: str       # "[[00_raw/qna/2026-05-18#^Q42]]"
 
 
 @dataclass
@@ -90,7 +90,7 @@ class Concept:
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n(.*)$", re.DOTALL)
 
-# Строка подтверждения вида:  `- 2026-05-20 16:52 — «текст цитаты» — из [[raw/2026-05-20|Q1]]`
+# Строка подтверждения вида:  `- 2026-05-20 16:52 — «текст цитаты» — из [[00_raw/qna/2026-05-20|Q1]]`
 _EVIDENCE_LINE_RE = re.compile(
     r"^-\s*(?P<when>.*?)\s*—\s*«(?P<text>.*)»\s*—\s*из\s*(?P<ref>\[\[.+?\]\])\s*$"
 )
@@ -415,7 +415,7 @@ def _filter_wikilinks(text: str, valid_slugs: set[str], owner_slug: str) -> str:
     """Заменить невалидные [[X]] в теле концепта на plain X и залогировать.
 
     * Извлекаем target — если есть alias `|`, берём часть до `|`.
-    * Поддерживаются ссылки на `raw/...`, `profile/...`, `concepts/...` —
+    * Поддерживаются ссылки на stage-папки и legacy `raw/profile/concepts` —
       они не slug'и графа, пропускаем без проверки.
     * Само-ссылку (на owner_slug) тоже пропускаем без warn — это редко, но
       допустимо.
@@ -424,7 +424,20 @@ def _filter_wikilinks(text: str, valid_slugs: set[str], owner_slug: str) -> str:
         target = m.group(1).strip()
         # внешние якоря — точно не slug графа
         head = target.split("/", 1)[0]
-        if head in {"raw", "profile", "concepts", ""}:
+        if head in {
+            "00_raw",
+            "01_mood",
+            "02_concepts",
+            "02_profile",
+            "02_digest",
+            "03_personality",
+            "raw",
+            "profile",
+            "concepts",
+            "personality",
+            "mood",
+            "",
+        }:
             return m.group(0)
         if target == owner_slug or target in valid_slugs:
             return m.group(0)
@@ -476,7 +489,7 @@ def _render(c: Concept) -> str:
 
         > [!quote]
         > <text>
-        > — [[raw/<date>#^Q<n>]] · <when>
+        > — [[00_raw/qna/<date>#^Q<n>]] · <when>
         ... (по одному callout на evidence)
 
         > [!contradiction] vs [[<other-slug>]]
@@ -492,7 +505,7 @@ def _render(c: Concept) -> str:
     читает — это нужно для миграции. Новых файлов в старом формате мы не пишем.
     """
     # Снаружи валидируем slug-ссылки во frontmatter и теле, чтобы файл не уезжал
-    # с broken wikilinks. Самого себя считаем валидным; raw/profile/concepts/...
+    # с broken wikilinks. Самого себя считаем валидным; stage/legacy папки
     # это не slug графа — пропускаем без проверки.
     valid = all_slugs_set()
     valid.add(c.slug)
@@ -714,7 +727,7 @@ def _extract_open_questions(body: str) -> list[str]:
 
 # Заголовок callout: `> [!<type>] [optional inline title]`
 _CALLOUT_HEAD_RE = re.compile(r"^>\s*\[!(?P<type>[a-z]+)\][+-]?\s*(?P<title>.*)$")
-# Атрибуция в `> [!quote]` callout: `> — [[raw/...|...]] · YYYY-MM-DD HH:MM`
+# Атрибуция в `> [!quote]` callout: `> — [[00_raw/qna/...|...]] · YYYY-MM-DD HH:MM`
 _QUOTE_ATTR_RE = re.compile(
     r"^>\s*—\s*(?P<ref>\[\[[^\]]+\]\])(?:\s*·\s*(?P<when>.+))?\s*$"
 )

@@ -1,0 +1,43 @@
+flowchart TD
+  Start(["Поступило сообщение пользователя"])
+  Access{"Пользователь доверенный?"}
+  Ignore(["Молчаливо игнорировать"])
+  Session{"Есть активная или возобновляемая сессия?"}
+  OpenSession["Открыть или возобновить сессию\n/ask, daily, /echo, /requestion, /about, /ucho, reply, note"]
+  Raw["00_raw\nЗаписать user event в sessions до LLM"]
+  MoodGate{"OWNER и включён mood pipeline?"}
+  Mood["01_mood\nPAD, quality, face, events, analysis, timeseries"]
+  LLM["OpenRouter process_answer\nobservations, reaction, user_delta"]
+  Valid{"JSON валиден?"}
+  Fallback["Fallback model или LLMError\nнейтральное сообщение при полном сбое"]
+  QNA["00_raw/qna\nQ&A-проекция с block-id"]
+  Concepts["02_concepts\nDraft concepts, dedup, evidence, MOC"]
+  Profile["02_profile\nКороткая доменная выжимка"]
+  Personality["03_personality\nabout, mood, deltas, action refs"]
+  Digest["02_digest\nРучной digest позже через reconcista\nrefs без копии полной переписки"]
+  Reply["Telegram\nОтправить reaction, OWNER controls"]
+  AssistantRaw["00_raw\nЗаписать assistant event в sessions"]
+  Done(["Сессия остаётся открытой"])
+
+  Start --> Access
+  Access -->|"Нет"| Ignore
+  Access -->|"Да"| Session
+  Session -->|"Нет"| OpenSession
+  Session -->|"Да"| Raw
+  OpenSession --> Raw
+  Raw --> MoodGate
+  MoodGate -->|"Да"| Mood
+  MoodGate -->|"Нет"| LLM
+  Mood --> LLM
+  LLM --> Valid
+  Valid -->|"Нет"| Fallback
+  Fallback -->|"fallback ok"| QNA
+  Fallback -->|"all failed"| Reply
+  Valid -->|"Да"| QNA
+  QNA --> Concepts
+  Concepts --> Profile
+  Profile --> Personality
+  Personality --> Digest
+  Personality --> Reply
+  Reply --> AssistantRaw
+  AssistantRaw --> Done

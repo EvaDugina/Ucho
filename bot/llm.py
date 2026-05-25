@@ -111,7 +111,7 @@ def _session_context_block(session_context: str) -> str:
 
 
 def _user_prompt_block() -> str:
-    """Per-user тюнинг персоны из `<base>/user_prompt.md` (пишет ТОЛЬКО depersonalization).
+    """Per-user тюнинг персоны из `03_personality/user_prompt.md`.
 
     Как держать регистр с этим человеком, на что давить, чего избегать (включает
     выжимку mood-map). Бот файл не создаёт; нет файла → ''. Инжектится рядом с
@@ -119,7 +119,7 @@ def _user_prompt_block() -> str:
     """
     try:
         from . import userctx
-        p = userctx.user_root() / "user_prompt.md"
+        p = userctx.user_root() / "03_personality" / "user_prompt.md"
         if not p.exists():
             return ""
         txt = p.read_text(encoding="utf-8").strip()
@@ -130,8 +130,8 @@ def _user_prompt_block() -> str:
 
 
 def _portrait_block() -> str:
-    """Блок «# Кто перед тобой»: портрет (personality/about.md) + текущее
-    настроение (personality/mood.md). Пусто → ''."""
+    """Блок «# Кто перед тобой»: портрет (`03_personality/about.md`) + текущее
+    настроение (`03_personality/mood.md`). Пусто → ''."""
     p = ""
     try:
         p = about.render_for_prompt()

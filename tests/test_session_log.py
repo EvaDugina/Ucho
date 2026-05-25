@@ -29,9 +29,11 @@ def test_session_log_writes_one_jsonl_file_per_session(as_user):
         bot_mood="вера",
     )
 
-    path = userctx.user_root() / "raw" / "sessions" / "abc123.jsonl"
+    path = userctx.user_root() / "00_raw" / "sessions" / "abc123.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert [r["text"] for r in rows] == ["Первое.", "Второе."]
+    assert rows[0]["event_id"] == "abc123:000001"
+    assert rows[0]["telegram_message_id"] == 1
     assert rows[0]["ts"] == "2026-05-25T10:00:00"
     assert rows[1]["reply_to_message_id"] == 1
     assert rows[1]["bot_mood"] == "вера"

@@ -50,12 +50,12 @@ def test_commit_all_commits_only_current_user_scope(as_user):
     uid1 = as_user
     uid2 = uid1 + 10_000
 
-    note1 = userctx.user_root() / "notes" / "one.md"
+    note1 = userctx.user_root() / "00_raw" / "notes" / "one.md"
     note1.parent.mkdir(parents=True, exist_ok=True)
     note1.write_text("user one\n", encoding="utf-8")
     userctx.set_user(uid2)
     vault.ensure_layout()
-    note2 = userctx.user_root() / "notes" / "two.md"
+    note2 = userctx.user_root() / "00_raw" / "notes" / "two.md"
     note2.parent.mkdir(parents=True, exist_ok=True)
     note2.write_text("user two\n", encoding="utf-8")
 
