@@ -39,9 +39,9 @@ ALLOWED_TELEGRAM_IDS = tuple(
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Мульти-методный анализ ответа (сравнение методов оценки настроения/состояния):
-# гоняется ТОЛЬКО для владельца, шлёт разбор перед основным ответом + пишет в
-# durable-ряд mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
-# выключить без пересборки. false → остаётся только базовый разбор настроения.
+# гоняется ТОЛЬКО для владельца, пишет разбор в mood/analysis/ и durable-ряд
+# mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
+# выключить без пересборки. false → остаётся только базовый разбор настроения в чат.
 ANALYSIS_ENABLED = os.getenv("ANALYSIS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))

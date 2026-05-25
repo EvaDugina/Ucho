@@ -21,12 +21,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Dostoevsky ставим с --no-deps (его пин fasttext==0.9.2 не собирается на py3.12;
-# бинарники даёт fasttext-wheel из requirements.txt). Модель тянем на build —
-# НЕФАТАЛЬНО: если хост модели недоступен, провайдер тональности просто отключится
-# в рантайме (bot/sentiment_dvk.py), сборка и бот не падают.
+# бинарники даёт fasttext-wheel из requirements.txt). Модель тянем на build: сначала
+# официальный архив, затем совместимый fallback из RuSentiment, если storage.b-labs.pro
+# недоступен. Если не вышло и это, провайдер тональности останется graceful-optional.
+COPY scripts/install_dostoevsky_model.py ./scripts/install_dostoevsky_model.py
 RUN pip install --no-cache-dir --no-deps dostoevsky==0.6.0 \
-    && (python -m dostoevsky download fasttext-social-network-model \
-        || echo "WARN: dostoevsky model not downloaded — sentiment provider disabled")
+    && python scripts/install_dostoevsky_model.py
 
 COPY bot/ ./bot/
 COPY prompts/ ./prompts/

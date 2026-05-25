@@ -16,6 +16,7 @@ from aiogram.types import (
 from . import (
     about,
     analysis,
+    face_actions,
     graph,
     lexicon,
     mood_file,
@@ -24,6 +25,7 @@ from . import (
     questions,
     ratelimit,
     session,
+    session_log,
     sessions,
     userctx,
     users,
@@ -31,7 +33,7 @@ from . import (
 )
 from .config import ALLOWED_TELEGRAM_IDS, ANALYSIS_ENABLED, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError
-from .llm import about_present, ask_next, classify_mood, process_answer
+from .llm import about_present, ask_next, classify_mood, process_answer, regenerate_reaction
 from .services.answer_service import apply_processed
 from .validation import (
     MAX_USER_TEXT,
@@ -123,6 +125,37 @@ def _ask_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _face_keyboard(token: str, *, liked: bool = False) -> InlineKeyboardMarkup:
+    """Админская клавиатура: регенерация лиц, feedback маски, избранное."""
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for idx, face in enumerate(moods.BOT_MOODS):
+        pair.append(InlineKeyboardButton(text=face, callback_data=f"face:rg:{token}:{idx}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([
+        InlineKeyboardButton(text="✓ маска подходит", callback_data=f"face:ok:{token}"),
+        InlineKeyboardButton(text="✗ маска не подходит", callback_data=f"face:no:{token}"),
+    ])
+    rows.append([
+        InlineKeyboardButton(
+            text=("★ понравилось" if liked else "☆ понравилось"),
+            callback_data=f"face:like:{token}",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _with_face_signature(text: str, bot_mood: str | None) -> str:
+    body = safe_chat_html(text)
+    if bot_mood:
+        body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
+    return body
+
+
 # ---------- helpers ----------
 
 
@@ -204,6 +237,9 @@ async def _send_question(
     text: str,
     suffix: str = "",
     plain: bool = False,
+    bot_mood: str | None = None,
+    admin_controls: bool = False,
+    action_context: dict | None = None,
 ) -> Message | None:
     """Отправить сообщение сессии И записать его в qmap + в message_ids сессии.
 
@@ -213,15 +249,35 @@ async def _send_question(
     reply-resume). ``plain=True`` — реплика-реакция: без заголовка «Q<n> · domain»,
     просто речь от первого лица.
     """
+    token: str | None = None
+    reply_markup = None
+    if plain and admin_controls and bot_mood and action_context:
+        token = face_actions.create_action(
+            session_id=action_context.get("session_id"),
+            q_num=q_num,
+            answered_q_num=action_context.get("answered_q_num"),
+            kind=action_context.get("kind") or "reaction",
+            bot_mood=bot_mood,
+            assistant_text=text,
+            user_text=action_context.get("user_text") or "",
+            question=action_context.get("question") or "",
+            session_context=action_context.get("session_context") or "",
+            reply_to_user_message_id=action_context.get("reply_to_user_message_id"),
+            parent_token=action_context.get("parent_token"),
+        )
+        reply_markup = _face_keyboard(token)
+
     if plain:
         # Реакция/реплика от LLM: экранируем и нормализуем — любой «код»/разметка
         # от модели уходит как обычный текст, Telegram его не интерпретирует.
-        body = safe_chat_html(text)
+        body = _with_face_signature(text, bot_mood) if token else safe_chat_html(text)
     else:
         body = _format_q(q_num, mode, domain, text)
     if suffix:
         body += suffix
-    sent = await bot.send_message(chat_id, body, parse_mode="HTML")
+    sent = await bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=reply_markup)
+    if token:
+        face_actions.set_message(token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
     try:
         qmap.append(sent.message_id, q_num, text, domain, at=getattr(sent, "date", None))
     except Exception:
@@ -239,6 +295,17 @@ async def _send_question(
             s.record_assistant(text, at=getattr(sent, "date", None))
         except Exception:
             log.exception("failed to record assistant message in session")
+        session_log.append(
+            session_id=s.id,
+            role="assistant",
+            kind="reaction" if plain else "question",
+            text=text,
+            at=getattr(sent, "date", None),
+            message_id=getattr(sent, "message_id", None),
+            q_num=q_num,
+            domain=domain,
+            bot_mood=bot_mood,
+        )
     return sent
 
 
@@ -279,6 +346,14 @@ def _anchor_user_cmd(message: Message) -> None:
     mid = getattr(message, "message_id", None)
     if s is not None and mid:
         s.add_message_id(int(mid))
+        session_log.append(
+            session_id=s.id,
+            role="user",
+            kind="command",
+            text=message.text or "",
+            at=getattr(message, "date", None),
+            message_id=int(mid),
+        )
 
 
 async def _session_reply(
@@ -305,6 +380,16 @@ async def _session_reply(
         a = anchor if anchor is not None else text
         session.set_question(a, dom, q_num=vault.next_q_num())
         s.record_assistant(html.unescape(text or ""), at=getattr(sent, "date", None))
+    session_log.append(
+        session_id=s.id,
+        role="assistant",
+        kind="service",
+        text=html.unescape(text or ""),
+        at=getattr(sent, "date", None),
+        message_id=getattr(sent, "message_id", None),
+        q_num=s.current_q_num,
+        domain=s.last_domain,
+    )
     return sent
 
 
@@ -437,7 +522,8 @@ _HELP_ADMIN = (
     "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
     "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
     "<b>/users</b> — список доверенных\n"
-    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас"
+    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас\n"
+    "<b>/like</b> / <b>/fav</b> — отметить reply-реплику Иуды"
 )
 
 _HELP_PEBBLE = "<b>/pebble</b> — бросить камень → «буль.»"
@@ -628,6 +714,121 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
     try:
         session.start(mode="probe", domain=domain)
         await _send_next_question(callback.bot, chat_id, domain=domain, show_thinking=True)
+    finally:
+        ratelimit.release(uid)
+
+
+@router.callback_query(F.data.startswith("face:"))
+async def cb_face_action(callback: CallbackQuery) -> None:
+    """Админские кнопки лица: регенерация, feedback маски, избранное."""
+    if not users.is_owner(callback.from_user.id):
+        await callback.answer()
+        return
+    userctx.set_user(callback.from_user.id)
+    parts = (callback.data or "").split(":")
+    if len(parts) < 3:
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+    action = parts[1]
+    token = parts[2]
+    rec = face_actions.get_action(token)
+    if rec is None:
+        await callback.answer("Эта кнопка уже устарела", show_alert=True)
+        return
+
+    if action in {"ok", "no"}:
+        verdict = "suitable" if action == "ok" else "unsuitable"
+        if face_actions.record_mood_feedback(token, verdict):
+            vault.commit_all("mood feedback")
+            await callback.answer("Отметил маску.")
+        else:
+            await callback.answer("Не смог отметить маску", show_alert=True)
+        return
+
+    if action == "like":
+        liked = face_actions.set_liked(token, liked=None)
+        if liked is None:
+            await callback.answer("Не нашёл реплику Иуды для отметки", show_alert=True)
+            return
+        try:
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=_face_keyboard(token, liked=liked))
+        except Exception:
+            log.exception("failed to update like keyboard")
+        vault.commit_all("liked reply")
+        await callback.answer("Сохранил в понравившиеся." if liked else "Снял отметку.")
+        return
+
+    if action != "rg" or len(parts) < 4:
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+    try:
+        face_idx = int(parts[3])
+        face = moods.BOT_MOODS[face_idx]
+    except (ValueError, IndexError):
+        await callback.answer("Неизвестное лицо", show_alert=True)
+        return
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await callback.answer()
+        await callback.bot.send_message(callback.from_user.id, ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        try:
+            new_text = await regenerate_reaction(
+                rec.get("question") or "",
+                rec.get("user_text") or "",
+                bot_mood=face,
+                session_context=rec.get("session_context") or "",
+            )
+        except LLMError:
+            await callback.answer("Не получилось перегенерировать", show_alert=True)
+            return
+        if not new_text:
+            new_text = "Складно. Слишком складно."
+        new_token = face_actions.create_action(
+            session_id=rec.get("session_id"),
+            q_num=rec.get("q_num"),
+            answered_q_num=rec.get("answered_q_num"),
+            kind="regen",
+            bot_mood=face,
+            assistant_text=new_text,
+            user_text=rec.get("user_text") or "",
+            question=rec.get("question") or "",
+            session_context=rec.get("session_context") or "",
+            reply_to_user_message_id=rec.get("reply_to_user_message_id"),
+            parent_token=token,
+        )
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        sent = await callback.bot.send_message(
+            chat_id,
+            _with_face_signature(new_text, face),
+            parse_mode="HTML",
+            reply_to_message_id=rec.get("message_id"),
+            reply_markup=_face_keyboard(new_token),
+        )
+        face_actions.set_message(new_token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
+        s = session.get()
+        if s is not None:
+            try:
+                s.add_message_id(sent.message_id)
+                s.record_assistant(new_text, at=getattr(sent, "date", None))
+            except Exception:
+                log.exception("failed to record regen in session")
+            session_log.append(
+                session_id=s.id,
+                role="assistant",
+                kind="regen",
+                text=new_text,
+                at=getattr(sent, "date", None),
+                message_id=getattr(sent, "message_id", None),
+                reply_to_message_id=rec.get("message_id"),
+                q_num=rec.get("q_num"),
+                domain=s.last_domain,
+                bot_mood=face,
+            )
+        vault.commit_all("face regen")
+        await callback.answer("Перегенерировал.")
     finally:
         ratelimit.release(uid)
 
@@ -881,6 +1082,41 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
     await _ingest_note(message, clean)
 
 
+@router.message(Command("like", "fav"))
+async def cmd_like(message: Message) -> None:
+    """Отметить reply-реплику Иуды как понравившуюся / снять отметку."""
+    if not _is_owner(message):
+        return
+    s = session.get()
+    if s is not None:
+        session_log.append(
+            session_id=s.id,
+            role="user",
+            kind="command",
+            text=message.text or "",
+            at=getattr(message, "date", None),
+            message_id=getattr(message, "message_id", None),
+            reply_to_message_id=(
+                message.reply_to_message.message_id if message.reply_to_message is not None else None
+            ),
+            q_num=s.current_q_num,
+            domain=s.last_domain,
+        )
+    if message.reply_to_message is None:
+        await message.answer("Ответь командой /like на реплику Иуды.")
+        return
+    rec = face_actions.find_by_message_id(message.reply_to_message.message_id)
+    if rec is None:
+        await message.answer("Не нашёл реплику Иуды для отметки")
+        return
+    liked = face_actions.set_liked(rec.get("token"), liked=None, at=getattr(message, "date", None))
+    if liked is None:
+        await message.answer("Не нашёл реплику Иуды для отметки")
+        return
+    vault.commit_all("liked reply")
+    await message.answer("Сохранил в понравившиеся." if liked else "Снял отметку.")
+
+
 # ---------- text messages ----------
 
 
@@ -997,8 +1233,21 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     s.pending_answer = text
     session.persist()
     s.record_user(text, at=getattr(message, "date", None))
-    session_context = s.render_transcript()
     real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
+    session_log.append(
+        session_id=s.id,
+        role="user",
+        kind="answer",
+        text=text,
+        at=getattr(message, "date", None),
+        message_id=getattr(message, "message_id", None),
+        reply_to_message_id=(
+            message.reply_to_message.message_id if message.reply_to_message is not None else None
+        ),
+        q_num=s.current_q_num,
+        domain=real_hint,
+    )
+    session_context = s.render_transcript()
     context_concepts = _context_for_domain(real_hint)
 
     # Настроение: классифицируем последнее сообщение → копим траекторию сессии →
@@ -1080,6 +1329,8 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
     # становится «якорем» следующего хода (её q_num, её message_id в сессии).
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
+    answered_question = s.last_question
+    answered_q_num = s.current_q_num
     new_n = vault.next_q_num()
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
     session.set_question(reaction, next_domain, q_num=new_n)
@@ -1087,6 +1338,17 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     await _send_question(
         message.bot, message.chat.id,
         q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
+        bot_mood=bot_mood,
+        admin_controls=_is_owner(message) and bool(bot_mood),
+        action_context={
+            "session_id": s.id,
+            "answered_q_num": answered_q_num,
+            "kind": "reaction",
+            "user_text": text,
+            "question": answered_question,
+            "session_context": session_context,
+            "reply_to_user_message_id": getattr(message, "message_id", None),
+        },
     )
 
 

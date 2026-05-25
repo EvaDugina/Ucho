@@ -49,10 +49,10 @@ class AccessMiddleware(BaseMiddleware):
         # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
         # её можно продолжить reply на любое её сообщение). Команды-открыватели
         # (/ask, /echo, /requestion, /about) затем заведут новую.
-        # ИСКЛЮЧЕНИЕ — /pebble: проверка живости, не должна трогать сессию и
-        # прерывать генерацию реакции (см. cmd_pebble).
+        # ИСКЛЮЧЕНИЯ: /pebble — проверка живости; /like и /fav — отметки reply
+        # на уже отправленную реплику, не должны прерывать обсуждение.
         if isinstance(event, Message) and (event.text or "").startswith("/"):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
-            if cmd != "pebble" and session.close():
+            if cmd not in {"pebble", "like", "fav"} and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)

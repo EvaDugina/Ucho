@@ -20,8 +20,14 @@ description: >-
 
 - **Бот (Qwen 14B, live)** только *захватывает*: пишет `raw/`, копит дешёвые
   `user_delta` в `_user_deltas.jsonl`, пишет живой снимок настроения в
-  frontmatter `personality/mood.md` и пары `настроение→лицо` в `_mood_log.jsonl`.
-  Связного портрета и анализа он не строит — слаб в этом.
+  frontmatter `personality/mood.md`, пары `настроение→лицо` в `_mood_log.jsonl`,
+  явный feedback маски в `_mood_feedback.jsonl`, понравившиеся реплики в
+  `_liked_replies.json`/`_liked_replies_log.jsonl` и полный session-log в
+  `raw/sessions/<session_id>.jsonl`.
+  Связного портрета и анализа он не строит — слаб в этом. Big Five/OCEAN
+  в live-анализе сообщений НЕ считать и не возвращать в `bot/analysis.py`;
+  PANAS допустим только как текущий affect-сигнал инструментального отчёта, не
+  как профиль личности.
 - **Ты (вручную)** *выверяешь описательные документы* носителя: проза 20 секций
   `personality/about.md`, связный анализ в теле `personality/mood.md`, психометрический
   профиль `personality/profile.md` (OCEAN/MBTI/DISC), оценка soft skills
@@ -39,7 +45,8 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
 - `personality/mood.md` — **тело** (связный анализ настроения) + `mood_baseline`
   во frontmatter. Остальной frontmatter — живой снимок кода, его НЕ переписывай.
 - `personality/profile.md` — психометрический профиль (OCEAN/MBTI/DISC). Пишешь
-  ТОЛЬКО ты (бот его не создаёт, в live-промпт он не идёт).
+  ТОЛЬКО ты (бот его не создаёт, в live-промпт он не идёт; per-message OCEAN в
+  боте запрещён).
 - `personality/softskills.md` — оценка soft skills по ответам. Пишешь ТОЛЬКО ты
   (бот файл не создаёт, Qwen live-контракт не расширяется, в системный промпт файл
   напрямую не инжектится).
@@ -48,6 +55,8 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
 
 **Нельзя (территория бота / другого скилла / источники истины):**
 - `raw/**` — источник правды (только чтение).
+- `_mood_feedback.jsonl`, `_liked_replies.json`, `_liked_replies_log.jsonl`,
+  `_face_actions.json`, `raw/sessions/**` — источники наблюдений/feedback (только чтение).
 - `concepts/**`, `profile/**`, `digests/**`, `_tags.md` — зона `reconcista`.
 - `personality/mood.md` frontmatter (кроме `mood_baseline`) — живой снимок кода.
 - `_session.json`, `_state.json`, `.psycho/manifest.json`, `_index.md` — служебное бота.
@@ -165,8 +174,10 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
 ## Граф настроений (`mood/`) — отдельный граф
 
 Цель: per-user связь «настроение человека → лицо, которым Иуда отвечает» и какое лицо
-ему **терпимо**. Бот логирует пары в `_mood_log.jsonl` и выбирает лицо контрастно
-(фолбэк) или по `_mood_map.json` (твоя карта). Ты строишь выверенный граф и карту.
+ему **терпимо**. Бот логирует пары в `_mood_log.jsonl`, явные `suitable|unsuitable`
+в `_mood_feedback.jsonl`, понравившиеся ответы в `_liked_replies.json` и выбирает
+лицо контрастно (фолбэк) или по `_mood_map.json` (твоя карта). Ты строишь выверенный
+граф и карту.
 
 **Закрытые списки (канон — `bot/moods.py`):**
 - настроения (`QUALITIES`, ~12): тревога, страх, грусть_тоска, апатия_подавленность,
@@ -186,6 +197,11 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
 сверяй с тем, что выбрал арбитр-LLM: систематические расхождения (LLM перебивает
 лексикон) полезны для калибровки и могут попасть в `user_prompt.md`.
 
+`_mood_feedback.jsonl` имеет больший вес, чем косвенная интерпретация следующей
+реплики: `suitable` = лицо/маска подошла, `unsuitable` = оттолкнула. `_liked_replies.json`
+и `_liked_replies_log.jsonl` — позитивные примеры удачного лица и формулировки; учитывай
+их для mood-map и `user_prompt.md`, но не переписывай эти файлы.
+
 **Graph view:** фильтр `path:mood`; цвет по `kind` (user vs bot). Граф концептов
 (`path:concepts`) папку `mood/` не захватывает — они независимы.
 
@@ -200,8 +216,11 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
    `personality/mood.md` (снимок + текущий анализ + `mood_baseline`) +
    `personality/profile.md` (предыдущий психометрический профиль, если есть) +
    `personality/softskills.md` (предыдущая оценка soft skills, если есть) +
-   `_mood_log.jsonl` (пары настроение→лицо) + `mood/` (граф) + `mood/_mood_map.json`
-   + `user_prompt.md`; `.psycho/log.md` (только чтение).
+   `_mood_log.jsonl` (пары настроение→лицо) + `_mood_feedback.jsonl` (явный feedback
+   маски, если есть) + `_liked_replies.json`/`_liked_replies_log.jsonl` (понравившиеся
+   ответы, если есть) + `raw/sessions/` (полный машинный лог сессий, только для
+   контекста порядка сообщений) + `mood/` (граф) + `mood/_mood_map.json` +
+   `user_prompt.md`; `.psycho/log.md` (только чтение).
 
 ### Фаза 1 — PROPOSAL (ничего не пишем)
 Составь план, покажи кратко в чате и запиши в
@@ -214,7 +233,8 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
    связный разбор за период — доминирующие эмоции, динамика и устойчивость, что
    поднимает/гасит, типичный фон. Из `_mood_log.jsonl` + `personality/mood.md`
    (живой снимок) + `raw/` (контекст). Frontmatter-снимок не переписывай (его пишет код).
-3. **Граф настроений + mood-map + baseline.** Из `_mood_log.jsonl` (пары) + `raw/`
+3. **Граф настроений + mood-map + baseline.** Из `_mood_log.jsonl` (пары),
+   `_mood_feedback.jsonl` (явные `suitable|unsuitable`), понравившихся реплик и `raw/`
    (как человек реагировал ПОСЛЕ хода — зашло лицо или оттолкнуло):
    - Каждой паре — **вердикт** `терпимо | нейтрально | отвергнуто`, обнови рёбра `mood/`.
    - Пересобери `mood/_mood_map.json` (ключ `quality(знак)`: `prefer`/`avoid` лиц).
@@ -250,7 +270,8 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
      оценки/`н/д`, confidence, evidence, сводка сильных сторон/рисков/рабочего поведения).
    - **граф настроений:** обнови узлы/рёбра `mood/` (вердикты), перезапиши
      `mood/_mood_map.json`, уточни `mood_baseline`, перепиши `user_prompt.md` (с выжимкой
-     профиля). После — **очистить/ротировать `_mood_log.jsonl`**.
+     профиля). После — **очистить/ротировать `_mood_log.jsonl`**; `_mood_feedback.jsonl`
+     и liked-файлы не чисть без явной команды, это пользовательский feedback.
 3. **Финальный коммит:** `git -C <vault> add -A && git -C <vault> commit -m "depersonalization <YYYY-WNN>: applied"`.
 
 ### Фаза 3 — LINT (проверка целостности, действие)
@@ -273,7 +294,9 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
   зон риска и рабочего взаимодействия; от 3-го лица, без роли владелец/гость.
 - **Настроения `mood/`:** `_mood_map.json` — валидный JSON, лица ∈ `BOT_MOODS`, ключи —
   quality из закрытого списка; узлы ∈ закрытым спискам; рёбра quality→лицо имеют
-  вердикт+счётчик; `user_prompt.md` компактен (≤~300 токенов) и директивен.
+  вердикт+счётчик; явный `_mood_feedback.jsonl` учтён сильнее косвенных сигналов,
+  понравившиеся реплики учтены как позитивные примеры; `user_prompt.md` компактен
+  (≤~300 токенов) и директивен.
 - **Неприкосновенное не тронуто:** `raw/`, `concepts/`, `profile/`, `_session.json`,
   `_state.json`, `.psycho/manifest.json` (`git diff --name-only` checkpoint..HEAD).
 

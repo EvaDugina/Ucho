@@ -5,32 +5,31 @@ from bot import analysis
 
 
 def test_format_report_handles_all_none():
-    results = {k: None for k in ("pad", "vad_lex", "emolex", "dostoevsky", "ocean", "panas")}
+    results = {k: None for k in ("pad", "emolex", "dostoevsky", "panas")}
     s = analysis.format_report(None, None, results)
     assert "Анализ ответа" in s
     # каждый метод деградирует до плейсхолдера, а не падает
     assert "нет" in s.lower()
-    assert "Big Five" in s and "PANAS" in s
+    assert "PANAS" in s
+    assert "Big Five" not in s and "OCEAN" not in s and "NRC-VAD" not in s
 
 
 def test_format_report_full():
     results = {
         "pad": {"quality": "грусть_тоска", "valence": -0.5, "arousal": -0.5,
                 "dominance": -0.5, "dominance_label": "low", "stability": "rigid"},
-        "vad_lex": {"valence": -0.4, "arousal": -0.1, "dominance": -0.3, "n": 2},
         "emolex": {"top": ["sadness", "fear"], "sadness": 0.5, "fear": 0.3,
                    "positive": 0.0, "negative": 0.5, "n": 3},
         "dostoevsky": {"label": "negative", "score": 0.8},
-        "ocean": {"openness": 0.6, "conscientiousness": 0.5, "extraversion": 0.3,
-                  "agreeableness": 0.6, "neuroticism": 0.4},
-        "panas": {"positive_affect": 0.3, "negative_affect": 0.7},
+        "panas": {"positive_affect": 0.2, "negative_affect": 0.7, "source": "code"},
     }
     s = analysis.format_report(results["pad"], "ласка", results)
-    assert "EmoLex" in s and "Big Five" in s and "PANAS" in s and "Dostoevsky" in s
-    assert "ласка" in s  # выбранное лицо в строке PAD
+    assert "EmoLex" in s and "Dostoevsky" in s and "PANAS" in s
+    assert "Big Five" not in s and "OCEAN" not in s and "NRC-VAD" not in s
+    assert "выбранное лицо Иуды: ласка" in s
     assert "грусть" in s  # эмоция EmoLex переведена на русский
-    # после чисел есть текстовые пояснения
-    assert "негатив" in s and "тревога" in s.lower()
+    assert "валентность" not in s and "доминирование" not in s and "устойчивость" not in s
+    assert "негатив" in s and "негативный аффект: 0.7" in s
 
 
 def test_append_report_writes_knowledge_note(as_user):

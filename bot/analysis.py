@@ -7,11 +7,10 @@
 месяц/сезон/год). Заметку-график `mood/График настроения.md` рисует плагин Obsidian Charts.
 
 Методы (провайдеры):
-- **pad** — текущий пайплайн настроения (Qwen-классификатор + код): эмоция + V/A/D.
-- **vad_lex** — нативный VAD-лексикон NRC-VAD (`bot/lexicon.py`).
+- **pad** — текущий пайплайн настроения (Qwen-классификатор + код): в отчёт идёт эмоция.
 - **emolex** — эмо-лексикон NRC-EmoLex, Плутчик-8 (`bot/emolex.py`).
 - **dostoevsky** — тональность RuSentiment (`bot/sentiment_dvk.py`, graceful-optional).
-- **ocean** / **panas** — Big Five + аффект через Qwen-промпт (`llm.analyze_psych`).
+- **panas** — кодовая оценка текущего позитивного/негативного аффекта по сигналам выше.
 
 Принцип проекта сохранён: методы дают сигнал, арбитр-персона (Qwen) отвечает отдельно.
 Любой сбой провайдера → None (не участвует), обработка ответа не падает.
@@ -22,7 +21,7 @@ import asyncio
 import json
 import logging
 
-from . import emolex, lexicon, llm, sentiment_dvk, userctx
+from . import emolex, sentiment_dvk, userctx
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -53,12 +52,9 @@ async def run_all(
     loop = asyncio.get_event_loop()
     emolex_fut = loop.run_in_executor(None, emolex.score_sync, text)
     dvk_fut = loop.run_in_executor(None, sentiment_dvk.score_sync, text)
-    psych_fut = asyncio.ensure_future(
-        llm.analyze_psych(text, history, session_context=session_context)
-    )
 
-    emolex_r, dvk_r, psych_r = await asyncio.gather(
-        emolex_fut, dvk_fut, psych_fut, return_exceptions=True,
+    emolex_r, dvk_r = await asyncio.gather(
+        emolex_fut, dvk_fut, return_exceptions=True,
     )
 
     def _ok(r):
@@ -69,15 +65,12 @@ async def run_all(
 
     emolex_r = _ok(emolex_r)
     dvk_r = _ok(dvk_r)
-    psych_r = _ok(psych_r)
 
     return {
         "pad": _pad_view(mood_vec),
-        "vad_lex": vad,
         "emolex": emolex_r,
         "dostoevsky": dvk_r,
-        "ocean": (psych_r or {}).get("ocean") if psych_r else None,
-        "panas": (psych_r or {}).get("panas") if psych_r else None,
+        "panas": _panas_from_signals(_pad_view(mood_vec), emolex_r, dvk_r),
     }
 
 
@@ -102,76 +95,76 @@ _DVK_RU = {
     "positive": "позитив", "negative": "негатив", "neutral": "нейтрально",
     "skip": "не определить", "speech": "речевой этикет",
 }
-_STAB_RU = {
-    "rigid": "застрял в одном состоянии", "labile": "настроение скачет",
-    "adequate": "ровные колебания",
-}
-_DOM_LABEL_RU = {"high": "контроль/сила", "normal": "обычный контроль", "low": "бессилие/придавлен"}
-# Big Five: ярлык + что значит высокий полюс.
-_OCEAN_RU = (
-    ("openness", "открытость", "любознательность, тяга к новому и идеям"),
-    ("conscientiousness", "добросовестность", "организованность, дисциплина"),
-    ("extraversion", "экстраверсия", "общительность, энергия вовне"),
-    ("agreeableness", "доброжелательность", "теплота, уступчивость, эмпатия"),
-    ("neuroticism", "нейротизм", "тревожность, эмоц. неустойчивость"),
-)
 _PANAS_RU = (
-    ("positive_affect", "позитивный аффект", "бодрость, интерес, энтузиазм"),
-    ("negative_affect", "негативный аффект", "тревога, раздражение, подавленность"),
+    ("positive_affect", "позитивный аффект"),
+    ("negative_affect", "негативный аффект"),
 )
 
 
-def _axis_ru(x, kind: str) -> str:
-    """Ось VAD ∈[-1..1] → понятная фраза."""
-    if x is None:
-        return "—"
-    hi, lo = x > 0.33, x < -0.33
-    if kind == "valence":
-        return "позитив (хорошее)" if hi else ("негатив (плохое)" if lo else "нейтрально")
-    if kind == "arousal":
-        return "много энергии/возбуждён" if hi else ("вялость, мало сил" if lo else "ровная энергия")
-    if kind == "dominance":
-        return "чувствует силу/контроль" if hi else ("бессилие, не управляет" if lo else "обычный контроль")
-    return ""
+def _num(x) -> float | None:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
-def _level01_ru(x) -> str:
-    """Шкала 0..1 → низко/средне/высоко."""
-    if x is None:
-        return "—"
-    return "высоко" if x > 0.66 else ("низко" if x < 0.34 else "средне")
+def _clamp01(x: float) -> float:
+    return round(max(0.0, min(1.0, x)), 3)
+
+
+def _avg(xs: list[float]) -> float | None:
+    return round(sum(xs) / len(xs), 3) if xs else None
+
+
+def _panas_from_signals(pad: dict | None, emo: dict | None, dvk: dict | None) -> dict | None:
+    """PANAS-like сигнал 0..1 из уже посчитанных методов, без OCEAN/психотипирования."""
+    pos: list[float] = []
+    neg: list[float] = []
+
+    if isinstance(pad, dict):
+        v = _num(pad.get("valence"))
+        a = _num(pad.get("arousal"))
+        if v is not None:
+            arousal = (a + 1.0) / 2.0 if a is not None else 0.5
+            pos.append(_clamp01(0.7 * ((v + 1.0) / 2.0) + 0.3 * arousal))
+            neg.append(_clamp01(0.7 * ((-v + 1.0) / 2.0) + 0.3 * arousal))
+
+    if isinstance(emo, dict):
+        ep = _num(emo.get("positive"))
+        en = _num(emo.get("negative"))
+        if ep is not None:
+            pos.append(_clamp01(ep))
+        if en is not None:
+            neg.append(_clamp01(en))
+
+    if isinstance(dvk, dict):
+        dp = _num(dvk.get("positive"))
+        dn = _num(dvk.get("negative"))
+        if dp is not None:
+            pos.append(_clamp01(dp))
+        if dn is not None:
+            neg.append(_clamp01(dn))
+
+    if not pos and not neg:
+        return None
+    return {"positive_affect": _avg(pos), "negative_affect": _avg(neg), "source": "code"}
 
 
 def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) -> str:
     """Единый Markdown-отчёт сравнения методов.
 
-    После каждого вычисленного числа — текстовая расшифровка (числа без пояснений
-    мало о чём говорят). Только числа/ярлыки (без слов человека) → можно безопасно
+    Только итоговые инструментальные сигналы (без слов человека) → можно безопасно
     писать в vault без сохранения дословного пользовательского текста.
     """
-    L = ["🧪 Анализ ответа — методы (число → пояснение)"]
+    L = ["🧪 Анализ ответа — методы"]
 
     pad = results.get("pad")
-    L.append("\n▸ PAD (Qwen+код), вектор по сессии")
+    L.append("\n▸ PAD (Qwen+код)")
     if pad:
         L.append(f"эмоция: {pad.get('quality')}")
-        L.append(f"валентность: {pad.get('valence')} — {_axis_ru(pad.get('valence'), 'valence')}")
-        L.append(f"энергия: {pad.get('arousal')} — {_axis_ru(pad.get('arousal'), 'arousal')}")
-        L.append(f"доминирование: {pad.get('dominance')} — {_DOM_LABEL_RU.get(pad.get('dominance_label'), '—')}")
-        L.append(f"устойчивость: {pad.get('stability')} — {_STAB_RU.get(pad.get('stability'), '—')}")
         L.append(f"выбранное лицо Иуды: {bot_mood or '—'}")
     else:
         L.append("нет данных")
-
-    vad = results.get("vad_lex")
-    L.append("\n▸ NRC-VAD (лексикон, по словам)")
-    if vad:
-        L.append(f"валентность: {vad.get('valence')} — {_axis_ru(vad.get('valence'), 'valence')}")
-        L.append(f"возбуждение: {vad.get('arousal')} — {_axis_ru(vad.get('arousal'), 'arousal')}")
-        L.append(f"доминирование: {vad.get('dominance')} — {_axis_ru(vad.get('dominance'), 'dominance')}")
-        L.append(f"(слов из лексикона: {vad.get('n')})")
-    else:
-        L.append("нет совпадений со словарём")
 
     emo = results.get("emolex")
     L.append("\n▸ NRC-EmoLex (эмоции Плутчика, по словам)")
@@ -180,7 +173,6 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
         L.append(f"ведущие эмоции: {top}")
         L.append(f"полярность: позитив {emo.get('positive')} / негатив {emo.get('negative')} — "
                  f"{'преобладает негатив' if (emo.get('negative') or 0) > (emo.get('positive') or 0) else ('преобладает позитив' if (emo.get('positive') or 0) > (emo.get('negative') or 0) else 'поровну')}")
-        L.append(f"(слов из лексикона: {emo.get('n')})")
     else:
         L.append("нет совпадений со словарём")
 
@@ -191,21 +183,11 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
     else:
         L.append("нет данных (модель не загружена)")
 
-    oc = results.get("ocean")
-    L.append("\n▸ Big Five / OCEAN (Qwen, 0..1)")
-    if oc:
-        for key, ru, meaning in _OCEAN_RU:
-            v = oc.get(key)
-            L.append(f"{ru}: {v} — {_level01_ru(v)} ({meaning})")
-    else:
-        L.append("нет данных")
-
     pa = results.get("panas")
-    L.append("\n▸ PANAS (Qwen, аффект сейчас, 0..1)")
+    L.append("\n▸ PANAS (код, текущий аффект, 0..1)")
     if pa:
-        for key, ru, meaning in _PANAS_RU:
-            v = pa.get(key)
-            L.append(f"{ru}: {v} — {_level01_ru(v)} ({meaning})")
+        for key, ru in _PANAS_RU:
+            L.append(f"{ru}: {pa.get(key)}")
     else:
         L.append("нет данных")
 
@@ -234,7 +216,7 @@ def append_report(q_num: int | None, text_len: int, report: str) -> None:
         log.exception("append_report failed (non-fatal)")
 
 
-_METHOD_KEYS = ("pad", "vad_lex", "emolex", "dostoevsky", "ocean", "panas")
+_METHOD_KEYS = ("pad", "emolex", "dostoevsky", "panas")
 
 
 def append_point(text_len: int, results: dict) -> None:
