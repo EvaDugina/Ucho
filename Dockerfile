@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements-base.txt
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Тестовые инструменты держим в образе: проект по правилам запускает pytest только
+# через Docker, а `docker compose run --rm bot pytest` должен быть самодостаточным.
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
 # Dostoevsky ставим с --no-deps (его пин fasttext==0.9.2 не собирается на py3.12;
 # бинарники даёт fasttext-wheel из requirements.txt). Модель тянем на build: сначала
 # официальный архив, затем совместимый fallback из RuSentiment, если storage.b-labs.pro
@@ -31,7 +36,9 @@ RUN pip install --no-cache-dir --no-deps dostoevsky==0.6.0 \
 COPY bot/ ./bot/
 COPY prompts/ ./prompts/
 COPY scripts/ ./scripts/
+COPY tests/ ./tests/
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
 CMD ["python", "-m", "bot.main"]

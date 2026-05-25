@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from . import session, userctx, users
 
@@ -39,6 +39,18 @@ class AccessMiddleware(BaseMiddleware):
         if uid is None or not users.is_allowed(uid):
             return  # не в whitelist — тишина
         userctx.set_user(uid)
+        if isinstance(event, Message):
+            text = event.text or ""
+            kind = "command" if text.startswith("/") else ("text" if text else event.content_type)
+            log.info(
+                "incoming message: uid=%s kind=%s message_id=%s text_len=%s",
+                uid,
+                kind,
+                event.message_id,
+                len(text),
+            )
+        elif isinstance(event, CallbackQuery):
+            log.info("incoming callback: uid=%s data=%s", uid, event.data or "")
         # Disclaimer один раз для гостей (не владельца).
         if not users.is_owner(uid) and not users.has_consent(uid):
             try:

@@ -15,6 +15,7 @@ from aiogram.types import Message
 
 from . import handlers, ratelimit, session, userctx, users, vault
 from .config import DOMAINS
+from .errors import LLMError
 from .llm import process_answer
 from .services.answer_service import apply_processed
 
@@ -72,6 +73,18 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             session_context=session_context,
             mode=s.mode,
         )
+    except LLMError as exc:
+        log.warning("recovery: process_answer LLM error")
+        vault.append_log("warn", "pending_answer_recovery_llm_unavailable", f"Q{q_num} process_answer LLMError")
+        try:
+            await bot.send_message(
+                uid,
+                f"{getattr(exc, 'user_message', 'Модели OpenRouter сейчас недоступны. Попробуй позже.')} "
+                "Pending-ответ оставлен на следующий рестарт. Если не хочешь ждать — /start закроет сессию.",
+            )
+        except Exception:
+            pass
+        return  # pending_answer сохранён — повторим в следующий раз.
     except Exception:
         log.exception("recovery: process_answer failed")
         vault.append_log("error", "pending_answer_recovery_failed", f"Q{q_num} process_answer raised")

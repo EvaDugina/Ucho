@@ -62,14 +62,31 @@ _CLASSIFIER_PROMPT = """Ты классификатор концептов в г
 def _classify_with_llm(concept: graph.Concept) -> dict:
     """Синхронный wrapper над LLM-классификатором.
 
-    Используется openai-клиент из bot.llm (он async), поэтому крутим в
-    asyncio.run.
+    OpenRouter вызывается через async openai-compatible client, поэтому крутим
+    в asyncio.run.
     """
     from openai import AsyncOpenAI
 
-    from bot.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+    from bot.config import (
+        LLM_FALLBACK_PROCESS,
+        LLM_MODEL_PROCESS,
+        LLM_TIMEOUT,
+        OPENAI_API_KEY,
+        OPENAI_BASE_URL,
+        OPENROUTER_DATA_COLLECTION,
+        OPENROUTER_ZDR,
+    )
 
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+    client = AsyncOpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=OPENAI_BASE_URL,
+        timeout=LLM_TIMEOUT,
+        max_retries=1,
+    )
+    models = tuple(dict.fromkeys((LLM_MODEL_PROCESS, *LLM_FALLBACK_PROCESS)))
+    provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
+    if OPENROUTER_ZDR:
+        provider["zdr"] = True
 
     user_msg = (
         f"Концепт:\n"
@@ -81,20 +98,24 @@ def _classify_with_llm(concept: graph.Concept) -> dict:
     )
 
     async def go() -> dict:
-        resp = await client.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _CLASSIFIER_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.0,
-        )
-        raw = resp.choices[0].message.content or "{}"
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"domain": concept.domain, "confidence": 0.0, "reason": "JSON parse failed"}
+        last_error = ""
+        for model in models:
+            try:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": _CLASSIFIER_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.0,
+                    extra_body={"provider": provider},
+                )
+                raw = resp.choices[0].message.content or "{}"
+                return json.loads(raw)
+            except Exception as exc:
+                last_error = f"{model}: {exc!r}"
+        return {"domain": concept.domain, "confidence": 0.0, "reason": last_error or "LLM failed"}
 
     try:
         return asyncio.run(go())

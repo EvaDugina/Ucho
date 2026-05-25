@@ -6,7 +6,9 @@
 - ищет противоречия с уже зафиксированным и задаёт уточняющие вопросы,
 - ведёт острую (но уважительную) дискуссию.
 
-**Приватность:** LLM работает **локально** через Ollama. Данные не уходят в OpenAI/Anthropic. Бот молчит со всеми, кроме владельца (whitelist по `OWNER_TELEGRAM_ID`).
+**Приватность:** live-LLM работает через OpenRouter. Тексты диалога уходят во внешний
+AI-провайдер по OpenRouter API; бот по-прежнему молчит со всеми, кроме доверенных
+пользователей (whitelist по `OWNER_TELEGRAM_ID` + `ALLOWED_TELEGRAM_IDS`).
 
 Стадия: **PoC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH` (по умолчанию `C:\Users\eva\YandexDisk\Obsidian\Psycho`).
 
@@ -39,12 +41,12 @@ Psycho/
 ### 1. Среда
 
 - Docker Desktop с **WSL 2 based engine**.
-- Драйвер NVIDIA 581.x+ для GPU-проброса.
-- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#installation) — без него Qwen 14B будет на CPU и недопустимо медленной.
+- OpenRouter API key.
 
 ### 2. Токены
 
 - Telegram: [@BotFather](https://t.me/BotFather) → `/newbot` → токен.
+- OpenRouter: создай ключ в личном кабинете и положи его в `OPENAI_API_KEY`.
 - Свой Telegram user_id: [@userinfobot](https://t.me/userinfobot) → `/start`.
 - В @BotFather: `/setjoingroups` → Disable; `/setprivacy` → Enable.
 
@@ -54,6 +56,7 @@ Psycho/
 cp .env.example .env
 # обязательно заполни:
 #   TELEGRAM_BOT_TOKEN
+#   OPENAI_API_KEY
 #   OWNER_TELEGRAM_ID
 #   VAULT_HOST_PATH  (если хранишь вольт не по дефолтному пути)
 ```
@@ -65,12 +68,7 @@ docker compose up -d
 docker compose logs -f bot
 ```
 
-### 5. Скачать модель (первый раз, ~9 GB)
-
-```powershell
-docker exec -it psycho-ollama ollama pull qwen2.5:14b-instruct
-docker exec -it psycho-ollama nvidia-smi   # проверка GPU-проброса
-```
+Compose поднимает только `bot`; локального LLM-сервиса в проекте больше нет.
 
 ## Команды бота
 
@@ -122,21 +120,20 @@ docker exec -it psycho-ollama nvidia-smi   # проверка GPU-проброс
 
 `<vault>/_state.json` — сквозной счётчик `last_q_num`. Тоже переживает рестарт.
 
-## Если GPU не подцепилась
+## Модели OpenRouter
 
-Закомментируй блок `deploy.resources` в `docker-compose.yml` для сервиса `ollama` и переключи модель на 7B:
-
-```powershell
-# в .env
-OPENAI_MODEL=qwen2.5:7b-instruct
-```
+Дефолтный live-контур:
 
 ```powershell
-docker compose up -d
-docker exec -it psycho-ollama ollama pull qwen2.5:7b-instruct
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL_DEFAULT=qwen/qwen3-235b-a22b-2507
+LLM_MODEL_FALLBACKS=deepseek/deepseek-v4-flash
+OPENROUTER_DATA_COLLECTION=deny
+OPENROUTER_ZDR=true
 ```
 
-На CPU Ryzen 5 5600 7B-модель отвечает за ~5–15 секунд — терпимо.
+Локальный LLM-контур удалён из runtime. Если обе модели OpenRouter недоступны, бот
+покажет предупреждение в Telegram и запишет служебное предупреждение в vault log.
 
 ## Управление контейнерами
 
@@ -144,7 +141,6 @@ docker exec -it psycho-ollama ollama pull qwen2.5:7b-instruct
 docker compose down                          # остановить
 docker compose up -d --build bot             # пересобрать только bot после правок
 docker compose logs --tail=200 bot
-docker exec -it psycho-ollama ollama list    # установленные модели
 ```
 
 ## Замечания

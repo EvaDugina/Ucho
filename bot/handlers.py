@@ -194,6 +194,11 @@ def _format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str
     return "\n".join(lines)
 
 
+def _llm_user_message(exc: LLMError, fallback: str) -> str:
+    """Человекочитаемое сообщение о сбое LLM без технического traceback."""
+    return getattr(exc, "user_message", None) or fallback
+
+
 def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
     """Сформировать HTML-сообщение с вопросом.
 
@@ -781,8 +786,8 @@ async def cb_face_action(callback: CallbackQuery) -> None:
                 bot_mood=face,
                 session_context=rec.get("session_context") or "",
             )
-        except LLMError:
-            await callback.answer("Не получилось перегенерировать", show_alert=True)
+        except LLMError as exc:
+            await callback.answer(_llm_user_message(exc, "Не получилось перегенерировать."), show_alert=True)
             return
         if not new_text:
             new_text = "Складно. Слишком складно."
@@ -962,12 +967,12 @@ async def cmd_about(message: Message) -> None:
     thinking = await _start_thinking(message)
     try:
         text = await about_present(portrait)
-    except LLMError:
+    except LLMError as exc:
         # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
         # не глушим: уходят в глобальный @dp.errors().
         log.warning("about_present LLM error")
         await _stop_thinking(thinking)
-        await message.answer("Не вышло собрать портрет словами. Попробуй позже.")
+        await message.answer(_llm_user_message(exc, "Не вышло собрать портрет словами. Попробуй позже."))
         return
     finally:
         ratelimit.release(uid)
@@ -1034,14 +1039,14 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
                 session_context=session_context,
                 mode="probe",
             )
-        except LLMError:
+        except LLMError as exc:
             # Ожидаемый сбой модели → заметка уже сохранена, честно говорим про
             # разбор. Прочие исключения (баги) уходят в глобальный @dp.errors().
             log.warning("process_answer LLM error in note ingest")
             prefix = (note_prefix + ". ") if note_prefix else ""
             await _session_reply(
                 message,
-                f"{prefix}Заметку сохранил, но разобрать в граф не вышло. Попробуй позже.",
+                f"{prefix}Заметку сохранил, но разобрать в граф не вышло. {_llm_user_message(exc, 'Попробуй позже.')}",
                 anchor=clean,
             )
             return
@@ -1303,12 +1308,15 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             session_context=session_context,
             mode=s.mode,
         )
-    except LLMError:
+    except LLMError as exc:
         # Ожидаемый сбой модели → нейтральная фраза, pending_answer остаётся —
         # recovery дожмёт на следующем старте. Прочие исключения (баги) не
         # глушим: уходят в глобальный @dp.errors().
         log.warning("process_answer LLM error")
-        await message.answer("Не получилось разобрать ответ. Сформулируй ещё раз или /start (смыв).")
+        await message.answer(
+            _llm_user_message(exc, "Не получилось разобрать ответ.")
+            + " Ответ оставлен в очереди обработки; можно повторить позже или /start (смыв)."
+        )
         return
 
     try:
@@ -1408,12 +1416,15 @@ async def _send_next_question(
             bot_mood=bot_mood,
             mode=s.mode,
         )
-    except LLMError:
+    except LLMError as exc:
         # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
         # не глушим: уходят в глобальный @dp.errors().
         log.warning("ask_next LLM error")
         await _stop_thinking(thinking)
-        await bot.send_message(chat_id, "Не вышло сформулировать вопрос. Попробуй ещё раз.")
+        await bot.send_message(
+            chat_id,
+            _llm_user_message(exc, "Не вышло сформулировать вопрос. Попробуй ещё раз."),
+        )
         session.clear()
         return
     await _stop_thinking(thinking)

@@ -1,8 +1,10 @@
-"""Обёртка над openai-совместимым API (Ollama).
+"""Обёртка над OpenRouter через openai-совместимый API.
 
 Функции по режимам system-prompt:
 - ask_next        → mode: ask (главный вопрос; примеры стиля из questions_examples.md)
 - process_answer  → mode: process (разбор ответа + реакция)
+- classify_mood   → mood classifier (JSON)
+- analyze_psych   → OCEAN/PANAS classifier (JSON)
 - about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 """
 import json
@@ -16,10 +18,23 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from . import about, mood_file, moods, vault
 from .config import (
     DOMAINS,
+    LLM_FALLBACK_ABOUT,
+    LLM_FALLBACK_ASK,
+    LLM_FALLBACK_MOOD,
+    LLM_FALLBACK_PROCESS,
+    LLM_FALLBACK_PSYCH,
+    LLM_FALLBACK_REACTION,
+    LLM_MODEL_ABOUT,
+    LLM_MODEL_ASK,
+    LLM_MODEL_MOOD,
+    LLM_MODEL_PROCESS,
+    LLM_MODEL_PSYCH,
+    LLM_MODEL_REACTION,
     LLM_TIMEOUT,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
-    OPENAI_MODEL,
+    OPENROUTER_DATA_COLLECTION,
+    OPENROUTER_ZDR,
     PROMPTS_DIR,
 )
 from .errors import LLMError
@@ -27,7 +42,7 @@ from .validation import strip_extra_punctuation
 
 log = logging.getLogger(__name__)
 
-# timeout — чтобы зависшая/упавшая Ollama не держала бота ~600 c (дефолт sdk).
+# timeout — чтобы зависший/недоступный OpenRouter не держал бота ~600 c (дефолт sdk).
 # max_retries=1 — один повтор на транзиентный сбой, без многократного умножения
 # ожидания (worst case ≈ 2 × LLM_TIMEOUT, а не 600 c).
 _client = AsyncOpenAI(
@@ -145,34 +160,140 @@ def _system(kind: str) -> str:
     return "\n\n".join(parts) + _user_prompt_block() + _portrait_block()
 
 
-async def _chat_json(messages: list[dict], temperature: float = 0.6) -> dict:
+_TASK_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "process": (LLM_MODEL_PROCESS, LLM_FALLBACK_PROCESS),
+    "mood": (LLM_MODEL_MOOD, LLM_FALLBACK_MOOD),
+    "psych": (LLM_MODEL_PSYCH, LLM_FALLBACK_PSYCH),
+    "ask": (LLM_MODEL_ASK, LLM_FALLBACK_ASK),
+    "about": (LLM_MODEL_ABOUT, LLM_FALLBACK_ABOUT),
+    "reaction": (LLM_MODEL_REACTION, LLM_FALLBACK_REACTION),
+}
+
+
+def _models_for(task: str) -> tuple[str, ...]:
+    primary, fallbacks = _TASK_ROUTES.get(task, _TASK_ROUTES["process"])
+    out: list[str] = []
+    for model in (primary, *fallbacks):
+        if model and model not in out:
+            out.append(model)
+    return tuple(out)
+
+
+def _openrouter_extra_body(*, zdr: bool | None = None) -> dict:
+    """Privacy/provider options for OpenRouter.
+
+    `data_collection=deny` is the hard default. `zdr=true` asks OpenRouter to route
+    only through zero-data-retention providers where supported/available.
+    """
+    provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
+    use_zdr = OPENROUTER_ZDR if zdr is None else zdr
+    if use_zdr:
+        provider["zdr"] = True
+    return {"provider": provider}
+
+
+def _is_zdr_unavailable(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "zero data retention" in s or "no endpoints found matching your data policy" in s
+
+
+def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, ...]) -> None:
+    summary = " → ".join(models) if models else "нет настроенных моделей"
+    detail = "; ".join(errors)
+    log.warning("LLM %s all models unavailable: %s", task, detail)
+    try:
+        vault.append_log(
+            "warn",
+            "llm_models_unavailable",
+            f"task={task}; route={summary}; {detail}",
+        )
+    except Exception:
+        log.exception("failed to write LLM unavailable warning")
+    raise LLMError(
+        "LLM request failed for all models: " + detail,
+        user_message=f"Модели OpenRouter сейчас недоступны: {summary}. Попробуй позже.",
+    )
+
+
+async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) -> dict:
     """Вызов LLM с принудительным JSON-выводом.
 
-    Сбой запроса (таймаут/упавшая Ollama) и неразбираемый ответ заворачиваются в
-    ``LLMError`` — вызывающий хэндлер ловит её и отвечает нейтральной фразой.
+    Сбой запроса и неразбираемый ответ пробуют следующий OpenRouter fallback.
+    Если все модели сорвались — ``LLMError``; вызывающий хэндлер ловит её и
+    отвечает нейтральной фразой.
     """
-    try:
-        resp = await _client.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            messages=messages,
-            temperature=temperature,
-        )
-    except Exception as exc:
-        raise LLMError(f"LLM request failed: {exc}") from exc
-    raw = resp.choices[0].message.content or ""
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        # Не светим тело ответа на INFO/ERROR: оно может отражать слова человека.
-        # Сам payload — только на DEBUG (включается осознанно, см. config.LOG_LEVEL).
-        log.error("LLM returned non-JSON (%d chars)", len(raw))
-        log.debug("LLM non-JSON payload: %r", raw[:500])
-        raise LLMError("LLM returned non-JSON") from exc
+    errors: list[str] = []
+    models = _models_for(task)
+    for model in models:
+        try:
+            try:
+                resp = await _client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body=_openrouter_extra_body(),
+                )
+            except Exception as exc:
+                if not OPENROUTER_ZDR or not _is_zdr_unavailable(exc):
+                    raise
+                log.warning("LLM %s model %s has no ZDR endpoint; retrying without zdr", task, model)
+                resp = await _client.chat.completions.create(
+                    model=model,
+                    response_format={"type": "json_object"},
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body=_openrouter_extra_body(zdr=False),
+                )
+        except Exception as exc:
+            errors.append(f"{model}: request failed: {exc}")
+            log.warning("LLM %s request failed on %s: %r", task, model, exc)
+            continue
+        raw = resp.choices[0].message.content or ""
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            # Не светим тело ответа на INFO/ERROR: оно может отражать слова человека.
+            # Сам payload — только на DEBUG (включается осознанно, см. config.LOG_LEVEL).
+            log.error("LLM %s returned non-JSON from %s (%d chars)", task, model, len(raw))
+            log.debug("LLM non-JSON payload from %s: %r", model, raw[:500])
+            errors.append(f"{model}: non-JSON response")
+    _raise_models_unavailable(task, errors, models)
+
+
+async def _chat_text(task: str, messages: list[dict], temperature: float = 0.6) -> str:
+    """Plain-text OpenRouter call with the same task routing/fallback policy."""
+    errors: list[str] = []
+    models = _models_for(task)
+    for model in models:
+        try:
+            try:
+                resp = await _client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body=_openrouter_extra_body(),
+                )
+            except Exception as exc:
+                if not OPENROUTER_ZDR or not _is_zdr_unavailable(exc):
+                    raise
+                log.warning("LLM %s model %s has no ZDR endpoint; retrying without zdr", task, model)
+                resp = await _client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    extra_body=_openrouter_extra_body(zdr=False),
+                )
+        except Exception as exc:
+            errors.append(f"{model}: request failed: {exc}")
+            log.warning("LLM %s request failed on %s: %r", task, model, exc)
+            continue
+        return resp.choices[0].message.content or ""
+    _raise_models_unavailable(task, errors, models)
 
 
 class _ObservationModel(BaseModel):
-    """Контракт одного наблюдения из process-ответа LLM (Qwen).
+    """Контракт одного наблюдения из process-ответа LLM.
 
     Лишние поля игнорируем, отсутствующие — дефолтим. ``name`` обязателен и
     непустой: наблюдение без имени бесполезно для графа (slug выводится из имени).
@@ -190,7 +311,7 @@ class _ObservationModel(BaseModel):
 def normalize_observations(raw) -> list[dict]:
     """Провалидировать список наблюдений LLM по контракту, отбросив мусор.
 
-    Хрупкий JSON от 14B-модели (наблюдение не dict, нет ``name``, кривые типы)
+    Хрупкий JSON от модели (наблюдение не dict, нет ``name``, кривые типы)
     отсеивается здесь — РАНО, а не падает позже в сервис-слое. Возвращает список
     чистых dict-ов (ключи name/domain/type/summary/quote), пригодных для
     ``services.answer_service.apply_processed``.
@@ -272,7 +393,7 @@ async def ask_next(
         messages.extend(history)
     messages.append({"role": "user", "content": user_msg})
 
-    data = await _chat_json(messages, temperature=0.8)
+    data = await _chat_json("ask", messages, temperature=0.8)
     if "question" not in data or "domain" not in data:
         # Контракт ответа модели нарушен — это сбой LLM, а не баг кода: хэндлер
         # ловит LLMError и отвечает нейтрально (см. handlers._send_next_question).
@@ -328,7 +449,7 @@ async def process_answer(
         messages.extend(history)
     messages.append({"role": "user", "content": user_msg})
 
-    data = await _chat_json(messages, temperature=0.5)
+    data = await _chat_json("process", messages, temperature=0.5)
     # Контракт наблюдений валидируем сразу (pydantic): мусорные/безымянные
     # отсеиваются здесь, а не падают позже в сервис-слое.
     data["observations"] = normalize_observations(data.get("observations"))
@@ -386,11 +507,74 @@ async def classify_mood(
         ] if x)},
     ]
     try:
-        data = await _chat_json(messages, temperature=0.2)
+        data = await _chat_json("mood", messages, temperature=0.2)
     except Exception:
         log.exception("classify_mood failed (non-fatal)")
         data = {}
     return moods.normalize_per_msg(data)
+
+
+def _clamp01(x) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(x))), 2)
+    except (TypeError, ValueError):
+        return 0.5
+
+
+async def analyze_psych(
+    answer: str,
+    history: Optional[list[dict]] = None,
+    session_context: str = "",
+) -> Optional[dict]:
+    """Оценка Big Five (OCEAN) + PANAS по сообщению в контексте сессии.
+
+    Один дешёвый классифицирующий JSON-вызов. Возвращает
+    `{"ocean": {... 5 черт 0..1}, "panas": {pa, na 0..1}}` или None при сбое.
+    Это инструмент сравнения методов, не диагноз.
+    """
+    sys = (
+        "Ты психолингвистический классификатор. По последнему сообщению человека, "
+        "С УЧЁТОМ предыдущего контекста диалога, оцени его профиль и верни СТРОГО "
+        "JSON без текста снаружи. Все значения — числа 0..1.\n"
+        '{"ocean":{"openness":0.0,"conscientiousness":0.0,"extraversion":0.0,'
+        '"agreeableness":0.0,"neuroticism":0.0},"panas":{"positive_affect":0.0,'
+        '"negative_affect":0.0}}\n'
+        "- ocean — Big Five: openness (открытость опыту), conscientiousness "
+        "(добросовестность), extraversion (экстраверсия), agreeableness "
+        "(доброжелательность), neuroticism (нейротизм/тревожность). 0 — низко, 1 — высоко.\n"
+        "- panas — аффект сейчас: positive_affect (бодрость/интерес/энтузиазм), "
+        "negative_affect (тревога/раздражение/подавленность). 0..1 независимо друг от друга.\n"
+        "Оценивай осторожно: мало данных → значения ближе к 0.5. Только JSON."
+    )
+    messages: list[dict] = [{"role": "system", "content": sys}]
+    if history and not session_context:
+        messages.extend(history)
+    messages.append({"role": "user", "content": "\n\n".join(x for x in [
+        _session_context_block(session_context),
+        "last_user_message:\n" + _fence_user(answer, "USER_ANSWER"),
+    ] if x)})
+    try:
+        data = await _chat_json("psych", messages, temperature=0.2)
+    except Exception:
+        log.exception("analyze_psych failed (non-fatal)")
+        return None
+    o = data.get("ocean") if isinstance(data, dict) else None
+    p = data.get("panas") if isinstance(data, dict) else None
+    if not isinstance(o, dict) or not isinstance(p, dict):
+        return None
+    return {
+        "ocean": {
+            "openness": _clamp01(o.get("openness")),
+            "conscientiousness": _clamp01(o.get("conscientiousness")),
+            "extraversion": _clamp01(o.get("extraversion")),
+            "agreeableness": _clamp01(o.get("agreeableness")),
+            "neuroticism": _clamp01(o.get("neuroticism")),
+        },
+        "panas": {
+            "positive_affect": _clamp01(p.get("positive_affect")),
+            "negative_affect": _clamp01(p.get("negative_affect")),
+        },
+    }
 
 
 async def regenerate_reaction(
@@ -424,18 +608,15 @@ async def regenerate_reaction(
         + _fence_user(answer, "USER_ANSWER"),
         f"bot_mood (надень это лицо): {bot_mood}",
     ] if x)
-    try:
-        resp = await _client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": sys},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.7,
-        )
-    except Exception as exc:
-        raise LLMError(f"LLM request failed: {exc}") from exc
-    return strip_extra_punctuation(resp.choices[0].message.content or "").strip()
+    text = await _chat_text(
+        "reaction",
+        [
+            {"role": "system", "content": sys},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.7,
+    )
+    return strip_extra_punctuation(text).strip()
 
 
 async def about_present(portrait: str) -> str:
@@ -448,9 +629,5 @@ async def about_present(portrait: str) -> str:
         {"role": "system", "content": f"{_iuda_prompt}\n\n{_about_prompt}" + _user_prompt_block()},
         {"role": "user", "content": f"Портрет (твоя опись этого человека):\n{portrait}\n\nПокажи мне, каким ты меня видишь."},
     ]
-    resp = await _client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.5,
-    )
-    return strip_extra_punctuation(resp.choices[0].message.content or "")
+    text = await _chat_text("about", messages, temperature=0.5)
+    return strip_extra_punctuation(text)

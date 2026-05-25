@@ -35,7 +35,7 @@ def concepts_dir() -> Path:
 
 RELATION_KINDS = ("supports", "contradicts", "derived_from", "related")
 CONCEPT_TYPES = ("principle", "value", "preference", "belief", "claim")
-# draft  — создан ботом (Qwen) live, без связей/конфликтов, ждёт промоушна Claude.
+# draft  — создан ботом live, без связей/конфликтов, ждёт промоушна Claude.
 # stable — выверен Claude в скилле reconcista.
 # tentative / contested — промежуточные пометки Claude.
 CONCEPT_STATUSES = ("draft", "stable", "tentative", "contested")

@@ -1,33 +1,17 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: psycho-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-data:/root/.ollama
-    # GPU-проброс RTX 3060 (Windows + WSL2 + NVIDIA Container Toolkit).
-    # Если GPU не определяется — закомментируй блок deploy: контейнер пойдёт на CPU.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   bot:
     build: .
     container_name: psycho-bot
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Non-secret runtime route. Overrides stale model values in .env; secrets
+      # like OPENAI_API_KEY still live only in .env.
+      LLM_MODEL_DEFAULT: qwen/qwen3-235b-a22b-2507
+      LLM_MODEL_FALLBACKS: deepseek/deepseek-v4-flash
     volumes:
       # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
       # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,
       # чтобы путь не дублировался в двух местах.
       - "${VAULT_HOST_PATH:?set VAULT_HOST_PATH in .env (see .env.example)}:/vault"
-    depends_on:
-      - ollama
-
-volumes:
-  ollama-data:

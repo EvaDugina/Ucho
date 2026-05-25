@@ -1,12 +1,12 @@
 """Портрет пользователя (per-user): `personality/about.md` + журнал дельт.
 
 Гибрид (capture-first):
-- **Live (Qwen, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
+- **Live (OpenRouter, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
   и дописывает сырую дельту в `_user_deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
-- **Weekly (Claude).** Скилл `depersonalization` раз в неделю переписывает прозу секций
-  из накопленных дельт + `raw/` (Qwen 14B для связного портрета слаба).
+- **Manual strong pass.** Скилл `depersonalization` переписывает прозу секций
+  из накопленных дельт + `raw/`; live-модель связную прозу 20 секций не ведёт.
 
 Настроение вынесено в `personality/mood.md` (см. `bot/mood_file.py`) — здесь только
 портрет носителя, без mood-полей.

@@ -17,45 +17,45 @@ Telegram-бот «Ухо» (персона «Иуда из Кариота»), к
 ## Запуск и разработка
 
 Всё исполняется в Docker — локальный запуск скриптов/тестов вне контейнера запрещён
-(см. глобальный `~/.Codex/AGENTS.md`). Бот + Ollama поднимаются вместе:
+(см. глобальный `~/.Codex/AGENTS.md`). Live-LLM работает через OpenRouter:
 
 ```powershell
-docker compose up -d                 # поднять bot + ollama
+docker compose up -d                 # поднять bot
 docker compose logs -f bot           # логи бота
 docker compose up -d --build bot     # пересобрать только bot после правок кода
-docker exec -it psycho-ollama ollama pull qwen2.5:14b-instruct   # один раз, ~9 GB
 ```
 
 Конфиг — `.env` (из `.env.example`). `VAULT_HOST_PATH` обязателен: путь к vault на
-хосте, пробрасывается в контейнер как `/vault`. `.env` под `.gitignore` и **закрыт
-для чтения** — не пытайся его прочитать.
+хосте, пробрасывается в контейнер как `/vault`; `OPENAI_API_KEY` — ключ OpenRouter.
+`.env` под `.gitignore` и **закрыт для чтения** — не пытайся его прочитать.
 
 ## Тесты
 
-Формального `pytest`-набора нет (тех. долг PoC B). ~30 e2e-проверок гоняются ad-hoc
-на изолированном vault:
+Pytest-набор гоняется внутри Docker на изолированном vault:
 
 ```powershell
-docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot python <<'PY'
-# ... сценарий ...
-PY
+docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot pytest
 ```
 
+Ad-hoc e2e-сценарии тоже запускай только через `docker compose run --rm ... bot`.
+
 После правок кода всегда пересобирай образ (`--build`) — `bot/`, `prompts/`, `scripts/`
-копируются внутрь образа на build-стадии, а не монтируются.
+и `tests/` копируются внутрь образа на build-стадии, а не монтируются.
 
 ## Архитектура (большая картина)
 
 **Capture-first, две модели с разными ролями** — ключевой принцип:
-- **Qwen 14B локально (live, в контейнере)** только *захватывает*: режимы `ask` /
-  `process` + `about_present` (портрет). В `process` создаёт лишь черновые концепты
-  (`status: draft`) с evidence — **без связей и конфликтов**.
+- **OpenRouter live-модель** только *захватывает*: режимы `ask` / `process` /
+  `classify_mood` / `about_present`. Primary:
+  `qwen/qwen3-235b-a22b-2507`, fallback:
+  `deepseek/deepseek-v4-flash`. В `process` создаёт лишь черновые
+  концепты (`status: draft`) с evidence — **без связей и конфликтов**.
 - **Codex (вручную, НЕ в контейнере)** *собирает выверенные документы* двумя скиллами:
   `.Codex/skills/reconcista/` — граф знаний (промоушн draft→stable, дедуп/слияние, связи,
   реальные противоречия, `profile/`, MOC, теги, digest); `.Codex/skills/depersonalization/`
   — портрет носителя (`personality/about.md`), анализ настроения (`personality/mood.md`),
   психометрика (`personality/profile.md`), soft skills (`personality/softskills.md`),
-  граф `mood/`, `user_prompt.md`. Qwen 14B для этого слаба.
+  граф `mood/`, `user_prompt.md`. Live-модель для этого не используется.
 
 **Хранилище — файлы, не БД.** Граф живёт в Obsidian-vault как Markdown:
 `raw/` (сырые Q&A), `concepts/<domain>/<slug>.md` (узлы графа), `profile/`, `notes/`.

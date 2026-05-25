@@ -7,12 +7,12 @@
 месяц/сезон/год). Заметку-график `mood/График настроения.md` рисует плагин Obsidian Charts.
 
 Методы (провайдеры):
-- **pad** — текущий пайплайн настроения (Qwen-классификатор + код): в отчёт идёт эмоция.
+- **pad** — текущий пайплайн настроения (OpenRouter-классификатор + код): в отчёт идёт эмоция.
 - **emolex** — эмо-лексикон NRC-EmoLex, Плутчик-8 (`bot/emolex.py`).
 - **dostoevsky** — тональность RuSentiment (`bot/sentiment_dvk.py`, graceful-optional).
 - **panas** — кодовая оценка текущего позитивного/негативного аффекта по сигналам выше.
 
-Принцип проекта сохранён: методы дают сигнал, арбитр-персона (Qwen) отвечает отдельно.
+Принцип проекта сохранён: методы дают сигнал, арбитр-персона отвечает отдельно.
 Любой сбой провайдера → None (не участвует), обработка ответа не падает.
 """
 from __future__ import annotations
@@ -159,7 +159,7 @@ def format_report(mood_vec: dict | None, bot_mood: str | None, results: dict) ->
     L = ["🧪 Анализ ответа — методы"]
 
     pad = results.get("pad")
-    L.append("\n▸ PAD (Qwen+код)")
+    L.append("\n▸ PAD (OpenRouter+код)")
     if pad:
         L.append(f"эмоция: {pad.get('quality')}")
         L.append(f"выбранное лицо Иуды: {bot_mood or '—'}")
