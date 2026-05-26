@@ -40,8 +40,8 @@ CONCEPT_TYPES = ("principle", "value", "preference", "belief", "claim")
 # tentative / contested — промежуточные пометки Claude.
 CONCEPT_STATUSES = ("draft", "stable", "tentative", "contested")
 
-# Если save_concept обнаруживает, что target изменён извне (Obsidian / YandexDisk
-# pull / ручная правка), он по умолчанию НЕ перезаписывает — ручная правка
+# Если save_concept обнаруживает, что target изменён извне (Obsidian / git pull /
+# ручная правка), он по умолчанию НЕ перезаписывает — ручная правка
 # приоритетнее. Чтобы это переопределить (например, в скриптах миграции),
 # передавай force=True.
 DRIFT_LOG_OP = "drift_skipped"
@@ -168,7 +168,7 @@ def save_concept(c: Concept, force: bool = False) -> Optional[Path]:
     * **name/summary/evidence/open_questions**: проходят через ``safe_*``
       санитизацию (длины, переводы строк, YAML-разделители).
     * **Drift**: перед записью сверяем mtime/size с manifest; при внешней
-      правке (Obsidian / YandexDisk-pull) и ``force=False`` пропускаем.
+      правке (Obsidian / git pull) и ``force=False`` пропускаем.
     * **Запись**: атомарная (tmp + os.replace), после успеха — manifest.record.
     """
     _ensure_layout()

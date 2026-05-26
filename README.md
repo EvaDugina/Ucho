@@ -12,7 +12,7 @@
 AI-провайдер по OpenRouter API; бот по-прежнему молчит со всеми, кроме доверенных
 пользователей (whitelist по `OWNER_TELEGRAM_ID` + `ALLOWED_TELEGRAM_IDS`).
 
-Стадия: **POC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH` (по умолчанию `C:\Users\eva\YandexDisk\Obsidian\Psycho`).
+Стадия: **POC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH`; при серверном запуске это путь к vault на сервере (например `/srv/psycho/vault`). Синхронизация хранилища между машинами — только через git.
 
 ## Что появляется в вольте
 

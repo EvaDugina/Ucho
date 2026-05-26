@@ -9,6 +9,7 @@ disclaimer о приватности новым гостям и закрывае
 from __future__ import annotations
 
 import logging
+import random
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
@@ -23,6 +24,19 @@ _CONSENT_TEXT = (
     "ничего не уходит в облако. Доступ к твоей базе есть у владельца этого бота. "
     "Продолжая пользоваться, ты соглашаешься. Команды — /help."
 )
+
+_NON_TEXT_REPLIES = (
+    "Бедное то ухо, которое не имеет глаз.",
+    "Ухо без глаза слышит стук, но не видит, откуда кровь.",
+    "Ты принёс образ. А ухо, бедное, родилось без глаз.",
+    "Бедное ухо: ему показывают, а оно умеет только слушать.",
+    "Ухо без глаз не свидетель. Дай словами.",
+    "Я слышу только буквы; без глаз ухо слепнет.",
+)
+
+
+def _non_text_reply() -> str:
+    return random.choice(_NON_TEXT_REPLIES)
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -40,8 +54,20 @@ class AccessMiddleware(BaseMiddleware):
             return  # не в whitelist — тишина
         userctx.set_user(uid)
         if isinstance(event, Message):
-            text = event.text or event.caption or ""
-            kind = "command" if text.startswith("/") else ("text" if event.text else event.content_type)
+            if event.text is None:
+                log.info(
+                    "ignored non-text message: uid=%s kind=%s message_id=%s",
+                    uid,
+                    event.content_type,
+                    event.message_id,
+                )
+                try:
+                    await event.answer(_non_text_reply())
+                except Exception:
+                    log.exception("failed to send non-text reply to %s", uid)
+                return
+            text = event.text or ""
+            kind = "command" if text.startswith("/") else "text"
             log.info(
                 "incoming message: uid=%s kind=%s message_id=%s text_len=%s",
                 uid,

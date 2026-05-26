@@ -15,7 +15,7 @@
 - **СУБД:** не используется (граф в Markdown-файлах внутри Obsidian-vault)
 - **Очередь / брокер:** не используется
 - **AI-провайдер:** OpenRouter через openai-совместимый API. Стартовая live-модель `qwen/qwen3-235b-a22b-2507`, fallback `deepseek/deepseek-v4-flash`. Локального LLM runtime в проекте больше нет.
-- **Прочее:** PyYAML (парсинг frontmatter), python-dotenv, git CLI (как safety net для записи в vault), YandexDisk-клиент на хосте (как механизм синка vault), `pymorphy3` (+`pymorphy3-dicts-ru`) для лемматизации русского ввода под VAD-лексикон NRC-VAD (`bot/data/nrc_vad_ru.tsv`, вшит в образ; собирается `scripts/build_lexicon.py`).
+- **Прочее:** PyYAML (парсинг frontmatter), python-dotenv, git CLI (как safety net и единственный механизм синхронизации vault между окружениями), `pymorphy3` (+`pymorphy3-dicts-ru`) для лемматизации русского ввода под VAD-лексикон NRC-VAD (`bot/data/nrc_vad_ru.tsv`, вшит в образ; собирается `scripts/build_lexicon.py`).
 
 **Переменные окружения:**
 
@@ -24,7 +24,7 @@
 | `TELEGRAM_BOT_TOKEN` | токен от @BotFather | `123:abc…` |
 | `OWNER_TELEGRAM_ID` | владелец/админ (всегда разрешён) | `123456789` |
 | `ALLOWED_TELEGRAM_IDS` | доп. доверенные id через запятую (начальный список; рантайм — в `.psycho/users.json`) | `111,222` |
-| `VAULT_HOST_PATH` | абсолютный путь к Obsidian-vault на хосте; пробрасывается в контейнер как `/vault` | `C:/Users/eva/YandexDisk/Obsidian/Psycho` |
+| `VAULT_HOST_PATH` | абсолютный путь к Obsidian-vault на хосте/сервере; пробрасывается в контейнер как `/vault` | `/srv/psycho/vault` |
 | `VAULT_PATH` | путь внутри контейнера (можно переопределить для тестов) | `/vault` |
 | `OPENAI_BASE_URL` | URL OpenRouter API | `https://openrouter.ai/api/v1` |
 | `OPENAI_API_KEY` | OpenRouter API key | `sk-or-...` |
@@ -50,11 +50,12 @@
 - **Компоненты:**
   - Telegram-бот (`bot/`) — диалоговый слой, маршрутизация команд, форматирование сообщений.
   - OpenRouter — внешний live-LLM-провайдер.
-  - Obsidian-vault на хосте — хранилище графа и raw-логов, синхронизируется через YandexDisk-клиент.
+  - Obsidian-vault на сервере/хосте — хранилище графа и raw-логов; синхронизация и перенос между окружениями идут только через git.
 - **Разделение труда (capture-first):** OpenRouter live-модель только захватывает — диалог, `00_raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенные документы строит сильная модель вручную двумя скиллами (proposal → apply под git): `.agents/skills/reconcista/` — граф знаний (промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, `02_profile/`, MOC, теги, digest); `.agents/skills/depersonalization/` — портрет (`03_personality/about.md`), настроение (`03_personality/mood.md`), психометрика (`03_personality/profile.md`), soft skills (`03_personality/softskills.md`), граф `01_mood/`, `03_personality/user_prompt.md`.
 - **Multi-user изоляция:** бот обслуживает несколько доверенных пользователей; у каждого — своя база в `<vault>/users/<user_id>/` (`00_raw`, `01_mood`, `02_concepts`, `02_profile`, `02_digest`, `03_personality`, `_index`, `_state`, `_session`). `.psycho/` (manifest, log, startup-check, users.json) и `.git/` — глобальные на корне (один safety net, ключи манифеста — относительные пути). Текущий пользователь — request-scoped через `userctx` (contextvar, async-безопасно): aiogram-middleware ставит его на каждый update; data-слой (vault/graph/moc) маршрутизирует пути по `userctx.user_root()`. Whitelist + роли — `bot/users.py` (`OWNER_TELEGRAM_ID` = админ, гости — env + `.psycho/users.json`). Гостю при первом обращении — disclaimer о приватности.
 - **Потоки данных:**
   - Пользователь шлёт сообщение → `00_raw/sessions` фиксирует событие до LLM → `01_mood` анализирует тон → LLM (через OpenRouter) возвращает JSON (`observations` — только анализ) → код пишет в vault: `00_raw/qna`, `02_concepts`, `02_profile`, `03_personality/deltas`; slug из имени, дедуп решает create/update → атомарная запись через `git_wrap` → MOC rebuild.
+  - Non-text Telegram-сообщения (файлы, фото, голосовые, caption-only) не доходят до handlers/LLM и не читаются как вложения: middleware отвечает короткой миниатюрой на тему «бедное ухо без глаз» и останавливает обработку.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа. Дедуп по дате (`vault.daily_already_sent`/`mark_daily_sent`, поле `last_daily_date` в `_state.json`) — один дневной на пользователя в день, общий для cron / `/dailyall` / догона. При старте `scheduler.catch_up_daily` досылает сегодняшний дневной, если бот лежал в час рассылки (за прошлые дни — нет). Активная сессия/прошлые ответы не блокируют дневной.
   - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore_all()` восстанавливает активные `_session.json`, а `process_pending_on_startup` дожимает pending-события по `pending_answer_event_id` из `00_raw/sessions`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
 - **Внешние зависимости:** Telegram Bot API + OpenRouter API. Секреты только в `.env`.
@@ -224,9 +225,7 @@ docker compose logs -f bot
 
 ### Бэкапы
 
-Не делаются в текущей стадии. Полагаемся на:
-- Git внутри vault (`git_wrap` коммитит до/после каждой операции записи).
-- YandexDisk-history (хранит версии файлов на серверах Яндекса).
+Не делаются в текущей стадии. Полагаемся на git внутри vault: `git_wrap` коммитит до/после каждой операции записи, а серверная синхронизация должна идти только через git remote.
 
 Полноценные бэкапы (`pg_dump`-аналог, cron, ротация, проверка восстановления) — обязательство MVP A.
 
@@ -335,7 +334,7 @@ PoC B техчасть считается принятой, когда:
 **Сверх POC B (оставлено осознанно):**
 
 - **Multi-user изоляция** (`users/<id>/`, `userctx`-contextvar, whitelist+роли+consent) — формально MVP A; берём только изоляцию для пары доверенных, без полного MVP-A hardening.
-- **Git-safety-net в vault + manifest/mtime drift** — полу-обвязка из praxis: даёт undo-семантику и защищает ручные правки под YandexDisk-синк.
+- **Git-safety-net в vault + manifest/mtime drift** — полу-обвязка из praxis: даёт undo-семантику и защищает ручные правки/изменения после `git pull`.
 
 **Оставшиеся gates MVP A:** бэкапы по cron/ручной restore drill; `deploy.sh` + короткий runbook; структурные JSON-логи; минимальный непубличный дашборд; решение по systemd/shared-server policy; embedding-дедуп (`nomic-embed-text`) остаётся кандидатом, не блокером readiness.
 
@@ -373,8 +372,9 @@ PoC B техчасть считается принятой, когда:
 ### Технические решения
 
 - **2026-05-26:** последовательный hardening к MVP A readiness без смены стадии. Обязательные session-log события (`append_required`) теперь валят обработку до LLM; `/ucho` сначала пишет verbatim в `00_raw/notes/`, сразу делает best-effort scoped commit и только потом идёт в `process_answer`. Пользователь больше не получает статус «заметка сохранена» и счётчики — только комментарий Иуды; если LLM падает после сохранения заметки, бот молчит. Conversation/note/daily вынесены в сервисы, recovery/scheduler отвязаны от приватных helpers `handlers.py`. `vault.py` разрезан на `storage/*` и `repositories/*`, но оставлен фасадом. Добавлен `requirements-lock.txt`, `tests/smoke/`, `diagramma-output/` снят с индекса. Проверки: полный pytest, smoke pytest и ruff в Docker.
-- **2026-05-20:** atomic writes через `tmp + os.replace` (вместо ftell+fsync без replace) — единственная защита от полу-записанных файлов под YandexDisk-pull. Применяется ко всем критичным JSON и концептам.
-- **2026-05-20:** git как safety net внутри vault, а не снаружи. Vault в YandexDisk-папке, `.git/` синкается тоже — это даёт `psycho-undo`-семантику между устройствами. Риск конфликтов git при работе с нескольких устройств принят (single-user, маловероятен).
+- **2026-05-26:** серверная модель хранения: YandexDisk исключён из операционной схемы, vault синхронизируется между окружениями только через git. `VAULT_HOST_PATH` указывает на серверный путь, а backup/restore drill остаётся gate для MVP A.
+- **2026-05-20:** atomic writes через `tmp + os.replace` (вместо ftell+fsync без replace) — защита от полу-записанных файлов при падении контейнера или внешнем `git pull/checkout`. Применяется ко всем критичным JSON и концептам.
+- **2026-05-20:** git как safety net внутри vault, а не снаружи. `.git/` живёт вместе с vault и даёт `psycho-undo`-семантику между окружениями; серверная синхронизация строится только вокруг git.
 - **2026-05-20:** парсер концептов поддерживает два формата (callouts + старый H2) — нужно для миграции и для того, чтобы ручные правки в Obsidian в любом из стилей не теряли данные.
 - **2026-05-20:** dedup через Jaccard на биграммах токенов (порог 0.7), не BM25. Граф ≤ сотни узлов, простой алгоритм достаточен, BM25-индекс — оверкилл для PoC B.
 - **2026-05-20:** валидация ввода — Defence-in-depth: на границе Telegram (`_accept_user_text`), на входе в vault (`escape_raw_block` в `append_raw`), на входе в граф (`safe_slug` в `save_concept`/`add_relation`/`append_evidence`), на выходе в Telegram (`html.escape` в `_format_q`).
@@ -404,7 +404,7 @@ PoC B техчасть считается принятой, когда:
 - `deploy.sh` отсутствует — для single-user покрыто `docker compose up -d`, но для MVP A нужен runbook/deploy script.
 - E2E-сценарии Telegram/OpenRouter остаются ручными: нужны моки Telegram update/send и OpenRouter non-JSON/timeout/rate-limit, чтобы проверять recovery без живой сети.
 - Промпты LLM (`prompts/base.md` + `process.md`) стоит дополнительно проверить на соответствие stage-схеме 00–03 при следующей ревизии: runtime-контракт JSON актуален, но текстовые пояснения промптов должны оставаться синхронными с документацией.
-- Бэкап-стратегия: сейчас полагаемся на git внутри vault + YandexDisk-history. До MVP A нужна явная стратегия (тест восстановления).
+- Бэкап-стратегия: сейчас полагаемся на git внутри vault и серверный git remote. До MVP A нужна явная стратегия бэкапов и тест восстановления.
 
 ### Журнал изменений
 
