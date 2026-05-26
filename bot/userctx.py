@@ -35,19 +35,37 @@ def set_user(uid: int) -> Path:
     return user_root()
 
 
+def clear_user() -> None:
+    """Сбросить request-scoped user context.
+
+    Используется тестами и системными путями, где отсутствие пользователя должно
+    быть явным, а не неявным fallback на корень vault.
+    """
+    _current_uid.set(None)
+
+
 def current_uid() -> int | None:
     return _current_uid.get()
+
+
+def system_root() -> Path:
+    """Глобальный корень vault (`VAULT_PATH`) для system/migration paths."""
+    return VAULT_PATH
 
 
 def user_root() -> Path:
     """Корень данных текущего пользователя: `<vault>/users/<uid>/`.
 
-    Если uid не выставлен (нештатный путь вне хэндлера/тикера) — фолбэк на
-    корень вольта, чтобы не падать. В нормальной работе всегда выставлен.
+    Если uid не выставлен — это ошибка вызова data-layer. Глобальный корень
+    берётся только через явный `system_root()`, а доступ к конкретному
+    пользователю без переключения контекста — через `root_for(uid)`.
     """
     uid = _current_uid.get()
     if uid is None:
-        return VAULT_PATH
+        raise RuntimeError(
+            "userctx.user_root() called without current uid; "
+            "use userctx.system_root() for vault root or userctx.root_for(uid)"
+        )
     return VAULT_PATH / "users" / str(uid)
 
 

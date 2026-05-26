@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 
+import pytest
+
+from bot.errors import VaultError
 from bot import session_log, userctx
 
 
@@ -37,3 +41,17 @@ def test_session_log_writes_one_jsonl_file_per_session(as_user):
     assert rows[0]["ts"] == "2026-05-25T10:00:00"
     assert rows[1]["reply_to_message_id"] == 1
     assert rows[1]["bot_mood"] == "вера"
+
+
+def test_session_log_required_raises_on_write_error(as_user):
+    sessions = userctx.user_root() / "00_raw" / "sessions"
+    shutil.rmtree(sessions)
+    sessions.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(VaultError):
+        session_log.append_required(
+            session_id="required",
+            role="user",
+            kind="answer",
+            text="Не терять.",
+        )

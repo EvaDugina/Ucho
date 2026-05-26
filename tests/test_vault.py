@@ -7,7 +7,7 @@ import pytest
 
 from bot import graph, userctx, vault
 from bot.atomic import atomic_write_text
-from bot.config import LOG_PATH
+from bot.config import LOG_PATH, VAULT_PATH
 from bot.errors import ValidationError, VaultError
 from bot.graph import Concept
 
@@ -16,6 +16,17 @@ def test_next_q_num_monotonic(as_user):
     a = vault.next_q_num()
     b = vault.next_q_num()
     assert b == a + 1
+
+
+def test_runtime_repo_requires_user_context(as_user):
+    try:
+        userctx.clear_user()
+        with pytest.raises(RuntimeError, match="userctx.user_root"):
+            vault.next_q_num()
+        assert userctx.system_root() == VAULT_PATH
+        assert userctx.root_for(as_user) == VAULT_PATH / "users" / str(as_user)
+    finally:
+        userctx.set_user(as_user)
 
 
 def test_atomic_write_text_roundtrip(tmp_path):

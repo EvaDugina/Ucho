@@ -2,9 +2,7 @@
 
 Вынесено из ``handlers.py`` — это НЕ транспорт (не aiogram-роутинг), а логика,
 которую дёргает ``main.py`` при старте: восстановить незавершённый LLM-цикл и
-обработать сообщения, пришедшие пока контейнер лежал. Завязана на приватные
-хелперы хэндлеров (отправка реплики, probe-цикл, приём текста) — поэтому
-импортирует ``handlers`` и зовёт их через него; обратной зависимости нет.
+обработать сообщения, пришедшие пока контейнер лежал.
 """
 from __future__ import annotations
 
@@ -13,11 +11,13 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
-from . import handlers, ratelimit, session, userctx, users, vault
+from . import ratelimit, session, userctx, users, vault
 from .config import DOMAINS
 from .errors import LLMError
 from .llm import process_answer
+from .services import conversation_service, note_service, session_messages
 from .services.answer_service import apply_processed
+from .validation import MAX_USER_TEXT, safe_user_text
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +65,8 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     except Exception:
         log.exception("recovery: failed to notify owner")
 
-    real_hint = handlers._real_domain(s.last_domain) or handlers._real_domain(s.domain)
-    context_concepts = handlers._context_for_domain(real_hint)
+    real_hint = conversation_service.real_domain(s.last_domain) or conversation_service.real_domain(s.domain)
+    context_concepts = conversation_service.context_for_domain(real_hint)
     if not s.history or s.history[-1].get("role") != "user" or s.history[-1].get("content") != text:
         s.record_user(text)
     session_context = s.render_transcript()
@@ -120,10 +120,10 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
     new_n = vault.next_q_num()
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(reaction, next_domain, q_num=new_n)
+    session.set_question(session_messages.question_field_with_face(reaction, None), next_domain, q_num=new_n)
     session.persist()
     try:
-        await handlers._send_question(
+        await session_messages.send_question(
             bot, uid,
             q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
         )
@@ -205,15 +205,76 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
             return
         try:
             # Склеенный ответ как один ход → одна реакция; сессия остаётся открытой.
-            await handlers._handle_probe(carrier, combined)
+            clean, truncated = safe_user_text(combined)
+            if not clean:
+                return
+            if truncated:
+                vault.append_log("warn", "offline_user_text_truncated", f"len(raw)={len(combined)} > {MAX_USER_TEXT}")
+            payload = await conversation_service.process_probe_answer(
+                clean,
+                message_id=getattr(carrier, "message_id", None),
+                at=getattr(carrier, "date", None),
+                reply_to_message_id=(
+                    carrier.reply_to_message.message_id if carrier.reply_to_message is not None else None
+                ),
+                is_owner=users.is_owner(uid),
+            )
+            if payload is not None:
+                if payload.mood_message:
+                    await bot.send_message(uid, payload.mood_message)
+                await session_messages.send_question(
+                    bot, uid,
+                    q_num=payload.q_num,
+                    mode=payload.mode,
+                    domain=payload.domain,
+                    text=payload.text,
+                    plain=True,
+                    bot_mood=payload.bot_mood,
+                    admin_controls=users.is_owner(uid) and bool(payload.bot_mood),
+                    action_context={
+                        "session_id": payload.session_id,
+                        "answered_q_num": payload.answered_q_num,
+                        "kind": "reaction",
+                        "user_text": payload.user_text,
+                        "question": payload.answered_question,
+                        "session_context": payload.session_context,
+                        "reply_to_user_message_id": payload.reply_to_user_message_id,
+                    },
+                )
             vault.commit_all("offline batch")
+        except LLMError as exc:
+            log.warning("offline backlog: process_answer LLM error")
+            try:
+                await bot.send_message(
+                    uid,
+                    f"{getattr(exc, 'user_message', 'Не получилось разобрать ответ.')} "
+                    "Ответ оставлен в очереди обработки; можно повторить позже или /start (смыв).",
+                )
+            except Exception:
+                pass
         finally:
             ratelimit.release(uid)
     else:
         # Нет активной probe-сессии — склеить в заметку (тоже один итог).
-        clean = await handlers._accept_user_text(carrier, combined)
-        if clean is not None:
-            await handlers._ingest_note(
-                carrier, clean,
-                note_prefix="Пока меня не было — склеил сообщения в заметку",
-            )
+        clean, truncated = safe_user_text(combined)
+        if not clean:
+            return
+        if truncated:
+            vault.append_log("warn", "offline_note_truncated", f"len(raw)={len(combined)} > {MAX_USER_TEXT}")
+        if not ratelimit.try_acquire(uid):
+            return
+        try:
+            session.start(mode="probe", domain=None)
+            payload = await note_service.ingest_note(clean, at=getattr(carrier, "date", None))
+            if payload is not None:
+                await session_messages.send_question(
+                    bot, uid,
+                    q_num=payload.q_num,
+                    mode=payload.mode,
+                    domain=payload.domain,
+                    text=payload.text,
+                    plain=True,
+                    bot_mood=payload.bot_mood,
+                )
+        finally:
+            ratelimit.release(uid)

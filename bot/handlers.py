@@ -2,7 +2,6 @@ import html
 import logging
 import random
 import re
-from datetime import datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -15,10 +14,7 @@ from aiogram.types import (
 
 from . import (
     about,
-    analysis,
     face_actions,
-    graph,
-    lexicon,
     mood_file,
     moods,
     qmap,
@@ -31,10 +27,10 @@ from . import (
     users,
     vault,
 )
-from .config import ALLOWED_TELEGRAM_IDS, ANALYSIS_ENABLED, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
+from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError
-from .llm import about_present, ask_next, classify_mood, process_answer, regenerate_reaction
-from .services.answer_service import apply_processed
+from .llm import about_present, ask_next, regenerate_reaction
+from .services import conversation_service, daily_service, note_service, session_messages
 from .validation import (
     MAX_USER_TEXT,
     safe_chat_html,
@@ -63,13 +59,13 @@ _DOMAIN_LABELS = {
     "work": "Труд",
 }
 
-TG_MSG_LIMIT = 4000  # запас от 4096
+TG_MSG_LIMIT = session_messages.TG_MSG_LIMIT  # запас от 4096
 
 # Сентинел для домена, помеченного пользователем (/requestion). В DOMAINS его нет —
 # он влияет только на отображение «пользовательский» в сообщении бота. LLM на этот
 # домен не получает хинт, чтобы он сам выбрал реальный домен для концептов.
-USER_DOMAIN = "user"
-USER_DOMAIN_LABEL = "пользовательский"
+USER_DOMAIN = session_messages.USER_DOMAIN
+USER_DOMAIN_LABEL = session_messages.USER_DOMAIN_LABEL
 
 # Заголовок вопроса в сообщении бота: "Q<N> · [mode ·] <domain>" (см. _format_q).
 _Q_HEAD_RE = re.compile(r"^Q(\d+)\s*·\s")
@@ -164,70 +160,37 @@ def _remask_keyboard(token: str) -> InlineKeyboardMarkup:
 
 
 def _with_face_signature(text: str, bot_mood: str | None) -> str:
-    body = safe_chat_html(text)
-    if bot_mood:
-        body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
-    return body
+    return session_messages.with_face_signature(text, bot_mood)
 
 
 def _question_field_with_face(text: str, bot_mood: str | None) -> str:
     """Plain-text question field для LLM/raw: текст + выбранная маска без HTML."""
-    if not bot_mood:
-        return text
-    marker = f"лицо Иуды: {bot_mood}"
-    if marker in (text or ""):
-        return text
-    return f"{text}\n\n{marker}"
+    return session_messages.question_field_with_face(text, bot_mood)
 
 
 def _render_event_with_face(event: dict, bot_mood: str) -> str:
     """HTML-тело уже существующего bot-сообщения после remask."""
-    text = str(event.get("text") or "")
-    if event.get("kind") == "question":
-        q_num = int(event.get("q_num") or 0)
-        domain = str(event.get("domain") or "everyday")
-        body = _format_q(q_num, "probe", domain, text)
-        body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
-        return body
-    return _with_face_signature(text, bot_mood)
+    return session_messages.event_with_face(event, bot_mood)
 
 
 # ---------- helpers ----------
 
 
 def _is_owner(message: Message) -> bool:
-    return message.from_user is not None and users.is_owner(message.from_user.id)
+    from_user = getattr(message, "from_user", None)
+    return from_user is not None and users.is_owner(from_user.id)
 
 
 def _is_allowed(message: Message) -> bool:
-    return message.from_user is not None and users.is_allowed(message.from_user.id)
+    from_user = getattr(message, "from_user", None)
+    return from_user is not None and users.is_allowed(from_user.id)
 
 
 _DIRECTION_RU = {"auto": "на себя", "hetero": "на других/мир", "neutral": "нейтрально"}
 
 
 def _format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str:
-    """Настроенческий анализ хода — отдельное сообщение владельцу (перед ответом).
-
-    Только числа/ярлыки из закрытых списков (без слов человека) → можно слать как
-    есть. Это НЕ вопрос: шлётся напрямую `message.answer`, мимо `_send_question`/qmap.
-    """
-    lines = [
-        "🎭 Настроение",
-        f"эмоция: {mv.get('quality', '—')}",
-        f"валентность: {mv.get('valence')} ({mv.get('sign')})",
-        f"энергия: {mv.get('energy')} (arousal {mv.get('arousal')})",
-        f"доминирование: {mv.get('dominance_label')} ({mv.get('dominance')})",
-        f"направленность: {_DIRECTION_RU.get(mv.get('direction'), mv.get('direction'))}",
-        f"устойчивость: {mv.get('stability')}",
-        f"лицо: {bot_mood or '—'}",
-    ]
-    if isinstance(vad, dict):
-        lines.append(
-            f"лексикон VAD: v={vad.get('valence')} a={vad.get('arousal')} "
-            f"d={vad.get('dominance')} (слов: {vad.get('n')})"
-        )
-    return "\n".join(lines)
+    return conversation_service.format_mood(mv, bot_mood, vad)
 
 
 def _llm_user_message(exc: LLMError, fallback: str) -> str:
@@ -250,22 +213,12 @@ def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
     ``question_text`` обрезается до ~3500 символов — Telegram режет по 4096
     байт, нужен запас на head + теги ``<code>``.
     """
-    label = USER_DOMAIN_LABEL if domain == USER_DOMAIN else domain
-    parts = [f"Q{q_num}"]
-    if mode and mode != "probe":
-        parts.append(html.escape(mode))
-    parts.append(f"<i>{html.escape(label)}</i>")
-    head = " · ".join(parts)
-    safe_q = question_text or ""
-    if len(safe_q) > 3500:
-        safe_q = safe_q[:3500].rstrip() + "…"
-    body = html.escape(safe_q)
-    return f"{head}\n\n<code>{body}</code>"
+    return session_messages.format_q(q_num, mode, domain, question_text)
 
 
 def _real_domain(d: str | None) -> str | None:
     """Возвращает d только если это валидный концептный домен. Иначе None."""
-    return d if d in DOMAINS else None
+    return conversation_service.real_domain(d)
 
 
 async def _send_question(
@@ -282,74 +235,18 @@ async def _send_question(
     admin_controls: bool = False,
     action_context: dict | None = None,
 ) -> Message | None:
-    """Отправить сообщение сессии И записать его в qmap + в message_ids сессии.
-
-    Единая точка отправки реплики бота в обсуждении (главный вопрос, реакция,
-    /echo, /requestion, recovery): гарантирует, что message_id попадает в qmap
-    (для `/answer N` и реконструкции) и в `message_ids` активной сессии (для
-    reply-resume). ``plain=True`` — реплика-реакция: без заголовка «Q<n> · domain»,
-    просто речь от первого лица.
-    """
-    token: str | None = None
-    reply_markup = None
-    if plain and admin_controls and bot_mood and action_context:
-        token = face_actions.create_action(
-            session_id=action_context.get("session_id"),
-            q_num=q_num,
-            answered_q_num=action_context.get("answered_q_num"),
-            kind=action_context.get("kind") or "reaction",
-            bot_mood=bot_mood,
-            assistant_text=text,
-            user_text=action_context.get("user_text") or "",
-            question=action_context.get("question") or "",
-            session_context=action_context.get("session_context") or "",
-            reply_to_user_message_id=action_context.get("reply_to_user_message_id"),
-            parent_token=action_context.get("parent_token"),
-        )
-        reply_markup = _face_keyboard(token)
-
-    if plain:
-        # Реакция/реплика от LLM: экранируем и нормализуем — любой «код»/разметка
-        # от модели уходит как обычный текст, Telegram его не интерпретирует.
-        body = _with_face_signature(text, bot_mood) if token else safe_chat_html(text)
-    else:
-        body = _format_q(q_num, mode, domain, text)
-        if bot_mood:
-            body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
-    if suffix:
-        body += suffix
-    sent = await bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=reply_markup)
-    try:
-        qmap.append(sent.message_id, q_num, text, domain, at=getattr(sent, "date", None))
-    except Exception:
-        log.exception("failed to record question in qmap (q_num=%s)", q_num)
-    # Главный вопрос (не реакция) → в кольцо вопросов для /history.
-    if not plain:
-        questions.record(q_num, domain, text)
-    s = session.get()
-    if s is not None:
-        try:
-            s.add_message_id(sent.message_id)
-        except Exception:
-            log.exception("failed to record message_id in session")
-        try:
-            s.record_assistant(text, at=getattr(sent, "date", None))
-        except Exception:
-            log.exception("failed to record assistant message in session")
-        session_log.append(
-            session_id=s.id,
-            role="assistant",
-            kind="reaction" if plain else "question",
-            text=text,
-            at=getattr(sent, "date", None),
-            message_id=getattr(sent, "message_id", None),
-            q_num=q_num,
-            domain=domain,
-            bot_mood=bot_mood,
-        )
-    if token:
-        face_actions.set_message(token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
-    return sent
+    return await session_messages.send_question(
+        bot, chat_id,
+        q_num=q_num,
+        mode=mode,
+        domain=domain,
+        text=text,
+        suffix=suffix,
+        plain=plain,
+        bot_mood=bot_mood,
+        admin_controls=admin_controls,
+        action_context=action_context,
+    )
 
 
 def _open_anchored_session(entry: dict) -> None:
@@ -423,7 +320,7 @@ async def _session_reply(
         a = anchor if anchor is not None else text
         session.set_question(a, dom, q_num=vault.next_q_num())
         s.record_assistant(html.unescape(text or ""), at=getattr(sent, "date", None))
-    session_log.append(
+    session_log.append_required(
         session_id=s.id,
         role="assistant",
         kind="service",
@@ -498,45 +395,15 @@ async def _stop_thinking(thinking: Message | None) -> None:
 
 
 def _split_for_telegram(text: str) -> list[str]:
-    if len(text) <= TG_MSG_LIMIT:
-        return [text]
-    parts: list[str] = []
-    buf: list[str] = []
-    buf_len = 0
-    for line in text.split("\n"):
-        add = len(line) + 1
-        if buf_len + add > TG_MSG_LIMIT and buf:
-            parts.append("\n".join(buf))
-            buf = [line]
-            buf_len = add
-        else:
-            buf.append(line)
-            buf_len += add
-    if buf:
-        parts.append("\n".join(buf))
-    return parts
+    return session_messages.split_for_telegram(text)
 
 
 def _recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
-    try:
-        chunks: list[str] = []
-        today = datetime.now().date()
-        for delta in range(days):
-            day = today - timedelta(days=delta)
-            f = vault.raw_dir() / f"{day.isoformat()}.md"
-            if f.exists():
-                chunks.append(f.read_text(encoding="utf-8"))
-                if sum(len(c) for c in chunks) > max_chars:
-                    break
-        return "\n\n".join(chunks)[:max_chars]
-    except Exception:
-        log.exception("failed to load recent raw")
-        return ""
+    return conversation_service.recent_raw_text(days=days, max_chars=max_chars)
 
 
 def _context_for_domain(domain: str | None) -> str:
-    concepts = graph.find_concepts(domain=domain, limit=30)
-    return graph.context_snapshot(concepts)
+    return conversation_service.context_for_domain(domain)
 
 
 # ---------- commands ----------
@@ -1119,63 +986,20 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
         await message.answer(ratelimit.BUSY_MESSAGE)
         return
     try:
-        # Заметка тоже открывает сессию-обсуждение (как /ucho): первое сообщение —
-        # сообщение пользователя; на reply/продолжение пойдёт обычная реакция.
         session.start(mode="probe", domain=None)
         _anchor_user_cmd(message)
-        s = session.get()
-        if s is not None:
-            s.record_user(clean, at=getattr(message, "date", None))
-            session_context = s.render_transcript()
-        else:
-            session_context = ""
-        # 1. Verbatim в notes/ (человеческий скрэтчпад).
-        when = datetime.now()
         try:
-            vault.append_note(when, clean)
+            payload = await note_service.ingest_note(clean, at=getattr(message, "date", None))
         except Exception:
-            log.exception("failed to append note")
-
-        # 2. Прогон через LLM process. Синтетический «вопрос» — заметка свободная,
-        #    домен выберет LLM. Концепты привязываются к raw-блоку (для evidence).
-        q_num = vault.next_q_num()
-        note_question = "(свободная заметка)"
-        context_concepts = _context_for_domain(None)
-        # /ucho — без индикатора «Думаю» (он только для /ask и /about).
-        try:
-            result = await process_answer(
-                question=note_question,
-                answer=clean,
-                domain_hint=None,
-                context_concepts=context_concepts,
-                session_context=session_context,
-                mode="probe",
-            )
-        except LLMError as exc:
-            # Ожидаемый сбой модели → заметка уже сохранена, честно говорим про
-            # разбор. Прочие исключения (баги) уходят в глобальный @dp.errors().
-            log.warning("process_answer LLM error in note ingest")
-            prefix = (note_prefix + ". ") if note_prefix else ""
-            await _session_reply(
-                message,
-                f"{prefix}Заметку сохранил, но разобрать в граф не вышло. {_llm_user_message(exc, 'Попробуй позже.')}",
-                anchor=clean,
-            )
+            log.exception("failed to ingest note")
+            await message.answer("Не смог записать заметку. Ничего не разбираю — повтори позже.")
             return
-
-        created = updated = 0
-        try:
-            created, updated = apply_processed(result, q_num, when, note_question, clean)
-        except Exception:
-            log.exception("apply_processed failed in note ingest")
-        vault.commit_all(f"ucho note {when.strftime('%Y-%m-%d %H:%M')}")
-        prefix = (note_prefix + ". ") if note_prefix else ""
-        # Якорь обсуждения — текст заметки: продолжение пойдёт как ответ → реакция.
-        await _session_reply(
-            message,
-            f"{prefix}Заметка сохранена (notes/{when.strftime('%Y-%m-%d')}.md). "
-            f"В граф: +{created} новых, ~{updated} обновлено.",
-            anchor=clean,
+        if payload is None:
+            return
+        await _send_question(
+            message.bot, message.chat.id,
+            q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+            bot_mood=payload.bot_mood,
         )
     finally:
         ratelimit.release(uid)
@@ -1384,86 +1208,15 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
     clean = await _accept_user_text(message, text)
     if clean is None:
         return
-    text = clean
-    if s.current_q_num is None:
-        log.warning("session has no current_q_num; assigning fresh")
-        s.current_q_num = vault.next_q_num()
-        session.persist()
-    real_hint = _real_domain(s.last_domain) or _real_domain(s.domain)
-    # 00_raw: строгая фиксация user-сообщения ДО любого LLM-анализа. Pending
-    # хранит ссылку на событие, а не копию текста в runtime JSON.
-    event = session_log.append(
-        session_id=s.id,
-        role="user",
-        kind="answer",
-        text=text,
-        at=getattr(message, "date", None),
-        message_id=getattr(message, "message_id", None),
-        reply_to_message_id=(
-            message.reply_to_message.message_id if message.reply_to_message is not None else None
-        ),
-        q_num=s.current_q_num,
-        domain=real_hint,
-    )
-    s.pending_answer_event_id = event.get("event_id") if event else None
-    s.pending_answer = None if s.pending_answer_event_id else text
-    session.persist()
-    s.record_user(text, at=getattr(message, "date", None))
-    session_context = s.render_transcript()
-    context_concepts = _context_for_domain(real_hint)
-
-    # Настроение: классифицируем последнее сообщение → копим траекторию сессии →
-    # считаем вектор (recency + затухающий prior из портрета) → выбираем КОНТРАСТНОЕ
-    # лицо → пишем в портрет. Сбой не валит обработку ответа.
-    # Анализ настроения — ТОЛЬКО для владельца (OWNER): это его персональный
-    # инструмент-инсайт. Для остальных доверенных лицо выбирает сама LLM (bot_mood=None).
-    mood_vec = None
-    bot_mood = None
-    vad = None
-    if _is_owner(message):
-        try:
-            # VAD — инструментальная подсказка: нативный русский лексикон (NRC-VAD),
-            # офлайн, без перевода. Даёт valence/arousal/dominance. LLM в classify_mood —
-            # арбитр (лексикон слеп к иронии). Нет совпадений слов → None.
-            vad = await lexicon.score(text)
-            per_msg = await classify_mood(
-                text, about.render_for_prompt(), vad=vad, session_context=session_context
-            )
-            s.record_mood(per_msg)
-            mood_vec = moods.session_mood(s.mood_trajectory, mood_file.baseline())
-            bot_mood = moods.pick_bot_mood(mood_vec)
-            mood_file.set_current(mood_vec, bot_mood)
-            # Мульти-методный разбор пишем в vault, не в чат: это knowledge-base
-            # след для depersonalization/ручного чтения. Сбой записи не должен
-            # ломать ход: bot_mood уже посчитан и пойдёт в process_answer.
-            # ANALYSIS_ENABLED → мульти-методное сравнение (OWNER-тестирование);
-            # иначе — базовый разбор настроения.
-            try:
-                if ANALYSIS_ENABLED:
-                    results = await analysis.run_all(
-                        text, None, mood_vec=mood_vec, vad=vad, session_context=session_context,
-                    )
-                    report = analysis.format_report(mood_vec, bot_mood, results)
-                    analysis.append_report(s.current_q_num, len(text), report)
-                    analysis.append_point(len(text), results)  # durable ряд для графиков
-                    analysis.rebuild_chart()                   # обновить заметку-график (Obsidian Charts)
-                else:
-                    await message.answer(_format_mood(mood_vec, bot_mood, vad))
-            except Exception:
-                log.exception("analysis report failed (non-fatal)")
-        except Exception:
-            log.exception("mood detection failed (non-fatal)")
-
-    # Реакция считается молча (Q1: тишина) — без индикатора «Думаю».
     try:
-        result = await process_answer(
-            question=s.last_question,
-            answer=text,
-            domain_hint=real_hint,
-            context_concepts=context_concepts,
-            bot_mood=bot_mood,
-            session_context=session_context,
-            mode=s.mode,
+        payload = await conversation_service.process_probe_answer(
+            clean,
+            message_id=getattr(message, "message_id", None),
+            at=getattr(message, "date", None),
+            reply_to_message_id=(
+                message.reply_to_message.message_id if message.reply_to_message is not None else None
+            ),
+            is_owner=_is_owner(message),
         )
     except LLMError as exc:
         # Ожидаемый сбой модели → нейтральная фраза, pending_answer остаётся —
@@ -1475,45 +1228,23 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             + " Ответ оставлен в очереди обработки; можно повторить позже или /start (смыв)."
         )
         return
-
-    try:
-        apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
-    except Exception:
-        log.exception("apply_processed failed")
-
-    # Ответ обработан (или провалился частично) — снимаем pending. Recovery
-    # больше не должен пытаться повторить эту реплику, иначе задвоит граф.
-    s.pending_answer = None
-    s.pending_answer_event_id = None
-    session.persist()
-
-    # Журнал пары (настроение → лицо) + лексиконный VAD для графа настроений (depersonalization агрегирует).
-    if mood_vec and bot_mood:
-        moods.log_turn(mood_vec, bot_mood, vad=vad)
-
-    # Реакция вместо кларифера: реплика-укол от 1-го лица, НЕ вопрос. Сессия
-    # НЕ закрывается — ждём следующего сообщения пользователя. Реакция
-    # становится «якорем» следующего хода (её q_num, её message_id в сессии).
-    reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
-    answered_question = s.last_question
-    answered_q_num = s.current_q_num
-    new_n = vault.next_q_num()
-    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(_question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
-    session.persist()
+    if payload is None:
+        return
+    if payload.mood_message:
+        await message.answer(payload.mood_message)
     await _send_question(
         message.bot, message.chat.id,
-        q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
-        bot_mood=bot_mood,
-        admin_controls=_is_owner(message) and bool(bot_mood),
+        q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+        bot_mood=payload.bot_mood,
+        admin_controls=_is_owner(message) and bool(payload.bot_mood),
         action_context={
-            "session_id": s.id,
-            "answered_q_num": answered_q_num,
+            "session_id": payload.session_id,
+            "answered_q_num": payload.answered_q_num,
             "kind": "reaction",
-            "user_text": text,
-            "question": answered_question,
-            "session_context": session_context,
-            "reply_to_user_message_id": getattr(message, "message_id", None),
+            "user_text": payload.user_text,
+            "question": payload.answered_question,
+            "session_context": payload.session_context,
+            "reply_to_user_message_id": payload.reply_to_user_message_id,
         },
     )
 
@@ -1602,19 +1333,4 @@ async def _send_next_question(
 
 
 async def send_daily_question(bot: Bot, uid: int) -> bool:
-    """Дневной вопрос пользователю — раз в день. True если отправлен, False если
-    пропущен (уже был сегодня).
-
-    Дедуп по дате (`vault.daily_already_sent`/`mark_daily_sent`, общий маркер для
-    cron, `/dailyall` и догона после простоя) — за день уходит ровно один. Активная
-    сессия и прошлые ответы НЕ блокируют: дневной вопрос всё равно приходит (как
-    `/ask`; текущая сессия уйдёт в кольцо через `session.start`).
-    """
-    userctx.set_user(uid)
-    if vault.daily_already_sent(DAILY_TZ):
-        log.info("daily skipped: already sent today uid=%s", uid)
-        return False
-    session.start(mode="probe", domain=None)
-    await _send_next_question(bot, uid, domain=None)
-    vault.mark_daily_sent(DAILY_TZ)
-    return True
+    return await daily_service.send_daily_question(bot, uid)

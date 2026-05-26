@@ -5,19 +5,15 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from . import users
-from .config import ALLOWED_TELEGRAM_IDS, DAILY_HOUR, DAILY_TZ, OWNER_TELEGRAM_ID
-from .handlers import send_daily_question
+from .config import DAILY_HOUR, DAILY_TZ
+from .services.daily_service import daily_targets, send_daily_question
 
 log = logging.getLogger(__name__)
 
 
 def _daily_targets() -> list[int]:
     """Кому слать дневной вопрос: владелец + env + рантайм-реестр + у кого есть данные."""
-    targets = set(users.allowed_ids()) | set(users.all_data_user_ids())
-    targets.add(OWNER_TELEGRAM_ID)
-    targets.update(ALLOWED_TELEGRAM_IDS)
-    return sorted(targets)
+    return daily_targets()
 
 
 async def _daily_for_all(bot: Bot) -> None:

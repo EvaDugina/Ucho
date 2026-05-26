@@ -1,16 +1,18 @@
 # Ucho — Telegram-бот для графа внутреннего мира
 
-Личный AI-бот, который ведёт **граф концептов** твоего психо-философского портрета в Obsidian. На каждый ответ он:
-- извлекает концепты (принципы, ценности, убеждения, предпочтения),
-- простраивает связи между ними (`supports`, `contradicts`, `derived_from`, `related`),
-- ищет противоречия с уже зафиксированным и задаёт уточняющие вопросы,
-- ведёт острую (но уважительную) дискуссию.
+Личный AI-бот, который ведёт capture-first базу психо-философского портрета в Obsidian. Live-контур на каждый ответ:
+- сохраняет полный session event-log до LLM-разбора,
+- извлекает черновые наблюдения-концепты (`status: draft`) с evidence,
+- обновляет Q&A-проекцию, заметки, mood/personality deltas,
+- отвечает короткой реакцией от лица Иуды.
+
+Связи между концептами, реальные противоречия, промоушн `draft → stable` и выверенная проза портрета собираются отдельными ручными проходами сильной моделью (`reconcista`, `depersonalization`), а не live-ботом.
 
 **Приватность:** live-LLM работает через OpenRouter. Тексты диалога уходят во внешний
 AI-провайдер по OpenRouter API; бот по-прежнему молчит со всеми, кроме доверенных
 пользователей (whitelist по `OWNER_TELEGRAM_ID` + `ALLOWED_TELEGRAM_IDS`).
 
-Стадия: **PoC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH` (по умолчанию `C:\Users\eva\YandexDisk\Obsidian\Psycho`).
+Стадия: **POC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH` (по умолчанию `C:\Users\eva\YandexDisk\Obsidian\Psycho`).
 
 ## Что появляется в вольте
 
@@ -22,7 +24,7 @@ Psycho/
 │  └─ notes/                      # свободные заметки
 ├─ 01_mood/                       # mood events, reports, timeseries
 ├─ 02_concepts/
-│   ├─ ethics/                    # узлы графа со связями во frontmatter
+│   ├─ ethics/                    # draft/stable узлы; live-бот пишет только draft-наблюдения
 │   ├─ aesthetics/
 │   ├─ politics/
 │   ├─ everyday/
@@ -66,6 +68,8 @@ cp .env.example .env
 #   OWNER_TELEGRAM_ID
 #   VAULT_HOST_PATH  (если хранишь вольт не по дефолтному пути)
 ```
+
+`DAILY_HOUR` — час ежедневного вопроса в зоне `DAILY_TZ`, не UTC.
 
 ### 4. Запуск
 

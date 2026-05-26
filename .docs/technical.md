@@ -3,7 +3,7 @@
 ## brunelleschi_stage
 
 - **Стадия:** POC B
-- **Последнее обновление:** 2026-05-25
+- **Последнее обновление:** 2026-05-26
 
 ---
 
@@ -63,7 +63,12 @@
 
 - `bot/main.py` — точка входа, регистрация router + scheduler, восстановление сессии.
 - `bot/config.py` — env-переменные, `DOMAINS`, пути `VAULT_PATH / MANIFEST_PATH / LOG_PATH`.
-- `bot/handlers.py` — все Telegram-хэндлеры команд и текстов, оркестрация `_apply_processed` (`00_raw/qna` дословно + домен сессии → `02_profile` → из `observations`: slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC; плюс `about.apply_delta`); возвращает `(created, updated)`. Связи/конфликты в live НЕ строит — это reconcista. На ответ — **реакция** (реплика-укол, не вопрос), сессия остаётся открытой; уточняющих вопросов бот не задаёт. Хелпер `_send_question()` — единая точка отправки вопроса/реакции (`plain` отделяет реакцию от главного вопроса), пишет bot-событие в `00_raw/sessions`. Для OWNER вопрос/реакция с выбранным лицом получает подпись; под реакцией есть inline-кнопки регенерации лица, feedback маски и toggle «понравилось»; `/like` умеет отметить reply-реплику Иуды, `/remask` по reply открывает меню лиц для вопроса или комментария бота и пишет выбранную маску в `bot_mood`/question-field. Команды (кроме `/pebble`, `/like`, `/remask`) закрывают активную сессию в `AccessMiddleware`; `ask/echo/ucho/about/requestion` открывают новую. Reply: `on_text` сперва ищет session по `00_raw/sessions`, иначе реконструирует вопрос из тела reply/сохраняет заметку.
+- `bot/handlers.py` — Telegram transport: routers, команды, callback parsing, Telegram send/reply. Сценарии conversation/note/daily вынесены в `bot/services/*`; `handlers.py` больше не держит основную бизнес-логику записи графа. Команды (кроме `/pebble`, `/like`, `/remask`) закрывают активную сессию в `AccessMiddleware`; `ask/echo/ucho/about/requestion` открывают новую. Reply: `on_text` сперва ищет session по `00_raw/sessions`, иначе реконструирует вопрос из тела reply/сохраняет заметку.
+- `bot/services/conversation_service.py` — use case ответа в открытой probe-сессии: обязательная запись user-answer в `00_raw/sessions` до LLM, pending refs, mood/analysis для OWNER, вызов `process_answer`, применение результата, очистка pending, подготовка reaction payload без Telegram-зависимости.
+- `bot/services/note_service.py` — use case `/ucho` и fallback-note: обязательная запись verbatim в `00_raw/notes` до LLM, best-effort git commit заметки, затем `process_answer`/`apply_processed`; если LLM упала после сохранения, возвращает `None`, чтобы транспорт молчал.
+- `bot/services/daily_service.py` — daily targets, дедуп по дате, отправка дневного вопроса без зависимости от приватных helpers `handlers.py`; `scheduler.py` импортирует этот сервис напрямую.
+- `bot/services/session_messages.py` — публичная transport-утилита отправки вопроса/реакции: формат Telegram HTML, `qmap/questions/session` bookkeeping и обязательная запись assistant event в `00_raw/sessions`.
+- `bot/services/answer_service.py` — запись `observations` в граф: `00_raw/qna` дословно + домен сессии → `02_profile` → slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC; плюс `about.apply_delta`. Связи/конфликты в live НЕ строит — это reconcista.
 - `bot/qmap.py` — совместимая восстановимая обёртка: `append`/`mark_answered` no-op, `find_by_message_id` и `find_by_q_num` читают `00_raw/sessions`. Отдельный `_qmap.json` не создаётся.
 - `bot/llm.py` — OpenRouter-обёртка openai-клиента с task-aware routing/fallback. Режимы `ask` / `process` + `about_present` (портрет; `iuda.md` + `about.md`) + `classify_mood` (категории настроения `sign/energy/direction/quality/dominance`; принимает лексиконный `vad`-якорь) + `analyze_psych` (OCEAN/PANAS для owner-анализа) + `regenerate_reaction` (только новая реплика в выбранном лице, без записи графа). JSON-вызовы идут с `response_format={"type":"json_object"}`, privacy body `provider.data_collection=deny` + `zdr=true`; primary/fallback по умолчанию: `qwen/qwen3-235b-a22b-2507` → `deepseek/deepseek-v4-flash`. Если все модели маршрута недоступны, бот пишет предупреждение в `.psycho/log.md` и отправляет человеку понятное сообщение. Системный промпт = `iuda` + `base` + `mood.md` + addendum + `user_prompt` + портрет.
 - `bot/moods.py` — настроение и лица. Шкала — **PAD**: размерные valence/arousal/**dominance** (∈[-1..1]) + дискретные `QUALITIES` (~12), `direction`, `stability`. `classify_mood`-результат → `session_mood` (recency-взвешенный вектор по сессии + затухающий prior из `mood_file.baseline()` (v,a,d) + устойчивость через дисперсию), `pick_bot_mood` (контраст + per-user `01_mood/_mood_map.json`; ось dominance — приоритетная: «придавлен→поддержи / властен→осади»), `log_turn` (`01_mood/events/YYYY-MM.jsonl`, с `dominance` + `lex_*`). Граф `01_mood/` и карту строит depersonalization. **Весь пайплайн в `handlers._handle_probe_locked` запускается только для OWNER** (`_is_owner`); при `ANALYSIS_ENABLED=true` инструментальный разбор пишется в `01_mood/analysis/`, при `false` базовый `_format_mood` уходит в чат. Для остальных доверенных `bot_mood=None` → лицо выбирает сама LLM.
@@ -73,7 +78,9 @@
 - `bot/analysis.py` — оркестратор инструментального анализа (OWNER-тестирование): `run_all` гоняет провайдеры конкурентно (переиспользует `mood_vec` из пайплайна настроения + `emolex` + `dostoevsky`, затем считает code-derived PANAS), `format_report` пишет в `01_mood/analysis/YYYY-MM-DD.md` только итоговые поля: **PAD: эмоция + выбранное лицо Иуды**, **NRC-EmoLex: ведущие эмоции + полярность**, **Dostoevsky**, **PANAS**; в Telegram отчёт не отправляется. `append_point` пишет точку в **durable** помесячный ряд `01_mood/timeseries/YYYY-MM.jsonl` (append-only, без ротации — основа для графиков день/неделя/месяц/сезон/год), `rebuild_chart` перегенерирует заметку `01_mood/График настроения.md` с блоком Obsidian Charts (дневное среднее PAD; рисует community-плагин, Python не нужен), `aggregate_daily` — чистая агрегация. Гейт — OWNER + `ANALYSIS_ENABLED`. Big Five/OCEAN не считается в live-анализе: его пишет только depersonalization в `03_personality/profile.md` по корпусу `00_raw/`.
 - `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на OpenRouter-контур): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
-- `bot/vault.py` — `ensure_layout` + `ensure_git_repo`, `git_wrap` транзакция, `append_log`, `next_q_num` + `_state.json`, `append_raw` с block-id в `00_raw/qna`, `append_profile` в `02_profile`, `append_note` (свободные заметки `/ucho` в `00_raw/notes`), `iter_history`. `_ensure_user_graph_settings` сидит `users/<uid>/.obsidian/graph.json` из шаблона `bot/assets/graph.json` новому юзеру (идемпотентно — существующий не трогает).
+- `bot/storage/git.py`, `transaction.py`, `layout.py`, `log.py` — git plumbing/scoped commits, `git_wrap`, per-user layout и глобальный `.psycho/log.md` с ротацией.
+- `bot/repositories/raw_repo.py`, `state_repo.py` — file-backed repositories: `append_raw`, `append_note`, `append_profile`, history lookup, `_state.json`, `next_q_num`, daily marker.
+- `bot/vault.py` — compatibility facade поверх `bot/storage/*` и `bot/repositories/*`, чтобы старые imports мигрировали постепенно.
 - `bot/assets/graph.json` — шаблон настроек графа Obsidian для папки пользователя (фильтр только `02_concepts` + скрытие MOC через `-file:<DOMAIN>` + без сирот, `showTags`, цветовые группы по доменам, серые узлы-теги). Копируется в каждый новый `users/<uid>/.obsidian/`.
 - `bot/session.py` — активная сессия, `_session.json` через atomic write, `from_dict` отбрасывает неизвестные поля и мигрирует legacy-history без `ts`. Runtime `history` может жить в памяти для текущего хода, но `to_dict()` пишет `history: []`; полный transcript берётся из `00_raw/sessions`. Pending хранит `pending_answer_event_id`, а не копию полного текста. Поле `mood_trajectory` — per-message векторы настроения за сессию (сброс на новый главный вопрос).
 - `bot/scheduler.py` — APScheduler с cron-триггером.
@@ -81,7 +88,7 @@
 - `bot/manifest.py` — `record(path)` / `check_drift(path)` через `.psycho/manifest.json`.
 - `bot/moc.py` — `rebuild_domain_moc(domain)` пересборка MOC-ноды `<DOMAIN>.md` (имя = тема заглавными → узел графа = категория) с группировкой по type; удаляет легаси `_moc.md`.
 - `bot/selfcheck.py` — механический self-check при старте по всем пользователям (MOC rebuild + валидация связей + дубли/сироты → `.psycho/startup-check.md`), без LLM.
-- `bot/userctx.py` — request-scoped текущий пользователь (contextvar) + `user_root()` для per-user маршрутизации путей.
+- `bot/userctx.py` — request-scoped текущий пользователь (contextvar). `user_root()` fail-fast без uid; системный корень берётся только через `system_root()`, а конкретный пользователь без переключения контекста — через `root_for(uid)`.
 - `bot/users.py` — whitelist-реестр (`OWNER` + env + `.psycho/users.json`), роли, consent.
 - `bot/validation.py` — `safe_slug` / `slugify` (транслит ru→latin для вывода slug из имени концепта кодом) / `safe_user_text` / `safe_chat_html` (экранирование вывода LLM для Telegram) / `escape_raw_block` / `is_valid_telegram_command_arg` и пр.
 - `prompts/base.md` (механика, домены, концепты, формат) + `prompts/iuda.md` (персона и голос) + `prompts/ask.md` / `process.md` / `about.md` / `mood.md` / `questions_examples.md` — промпты по режимам. `llm._system(kind)` собирает общий слой + addendum режима + портрет; JSON-контракт строгий. (`review.md`, `summarize.md`, `seeds.md` удалены.)
@@ -133,9 +140,15 @@ Psycho/
 │   ├── errors.py           иерархия исключений (Psycho/LLM/Vault/Validation)
 │   ├── llm.py              обёртка над OpenRouter (ask/process/about/classify_mood)
 │   ├── services/
-│   │   └── answer_service.py  запись observations в граф (дедуп/MOC/git_wrap)
+│   │   ├── answer_service.py       запись observations в граф (дедуп/MOC/git_wrap)
+│   │   ├── conversation_service.py ответ в открытой probe-сессии
+│   │   ├── note_service.py         /ucho и fallback-note
+│   │   ├── daily_service.py        daily targets + send_daily_question
+│   │   └── session_messages.py     отправка question/reaction + session-log
+│   ├── storage/             git/layout/log/transaction plumbing
+│   ├── repositories/        raw_repo/state_repo file-backed data layer
 │   ├── graph.py            Concept dataclass + рендер/парсер + dedup/resolve
-│   ├── vault.py            git_wrap, log, layout, raw, state
+│   ├── vault.py            compatibility facade для storage/repositories
 │   ├── session.py          активная сессия с persistence (+ mood_trajectory)
 │   ├── sessions.py         восстановимые индексы сессий из 00_raw/sessions
 │   ├── session_log.py      00_raw/sessions/<session_id>.jsonl (полный лог сообщений)
@@ -163,7 +176,7 @@ Psycho/
 ├── scripts/                build_lexicon.py, build_emolex.py, install_dostoevsky_model.py, migrate_* (одноразовые)
 ├── docker-compose.yml      bot
 ├── Dockerfile              python:3.12-slim + git (+ dostoevsky --no-deps + модель/fallback)
-├── requirements.txt        + requirements-base.txt / requirements-dev.txt
+├── requirements.txt        + requirements-base.txt / requirements-dev.txt / requirements-lock.txt
 ├── .env.example            пример конфига
 └── README.md
 ```
@@ -203,8 +216,10 @@ docker compose logs -f bot
 
 ### Тестирование
 
-- **Сценарии:** pytest-набор на изолированном vault (`VAULT_PATH=/tmp/psycho-test`). Покрывает stage-хранилище 00–03, session-log до LLM, OpenRouter-routing/fallback, отсутствие legacy-файлов, atomic writes, drift detection, wikilink validation, slug sanitization, callout render/parser roundtrip, alias resolve, Jaccard dedup и MOC rebuild.
+- **Сценарии:** pytest-набор на изолированном vault (`VAULT_PATH=/tmp/psycho-test`). Покрывает stage-хранилище 00–03, session-log до LLM, `/ucho` durability, service-layer use cases, OpenRouter-routing/fallback, отсутствие legacy-файлов, atomic writes, drift detection, wikilink validation, slug sanitization, callout render/parser roundtrip, alias resolve, Jaccard dedup и MOC rebuild.
 - **Команда запуска:** `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest`.
+- **Smoke:** `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke` проверяет note `/ucho`, answer path и recovery-facing pending event без живого Telegram/OpenRouter.
+- **Статика:** `docker compose run --rm --no-deps bot ruff check bot tests`.
 - **Целевое покрытие:** не отслеживается (PoC B). Главное — happy path всех 10 доменов + drift-сценарий.
 
 ### Бэкапы
@@ -221,7 +236,7 @@ docker compose logs -f bot
 
 ### Чеклисты
 
-- **Автоматические:** pytest-набор в Docker: `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest`.
+- **Автоматические:** pytest-набор в Docker: `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest`; smoke-набор: `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke`; ruff: `docker compose run --rm --no-deps bot ruff check bot tests`.
 - **Ручные:** 
   - `/ask <domain>` для каждого из 10 доменов → концепт создаётся.
   - Ручная правка `.md` в Obsidian → следующий `/ask` не теряет правку.
@@ -236,12 +251,12 @@ docker compose logs -f bot
   - `<vault>/.psycho/log.md` (append-only) — операционный журнал (drift skip, dedup, sanitize, llm-фолбэки).
   - Git внутри vault — каждый `_apply_processed` оставляет два коммита (`psycho(<uid>): before <op>` / `psycho(<uid>): <op>`). Коммит затрагивает только поддерево пользователя `users/<uid>/` — данные разных пользователей не смешиваются; `.psycho/` выведена из-под git (в `.gitignore`).
 - **Формат:** в `log.md` — `[YYYY-MM-DD HH:MM] LEVEL op — details`. В stderr — стандартный python logging.
-- **Ротация:** нет. На PoC B не критично — лог растёт медленно (десятки строк в неделю). С MVP A добавим ротацию по объёму.
+- **Ротация:** `.psycho/log.md` усекается по объёму (`_LOG_MAX_BYTES`, сейчас 1 MB), оставляя свежий хвост; stdout/stderr ротацию отдаём Docker/journal окружению.
 - **Healthcheck:** `/pebble` команда в Telegram — мгновенный «буль.» (liveness самого бота, без LLM-вызова). Внешнего healthcheck-endpoint нет.
 
 ### Безопасность
 
-- **Whitelist одного пользователя** (`OWNER_TELEGRAM_ID`) — все хэндлеры начинают с `_is_owner()`. Подсказки команд видны только владельцу через `BotCommandScopeChat(chat_id=OWNER_TELEGRAM_ID)`.
+- **Whitelist доверенных пользователей** (`OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS`, `.psycho/users.json`) — обычные команды доступны только доверенным, админские действия гейтятся `_is_owner()`. Подсказки команд видны только доверенным через `BotCommandScopeChat`; админ-блок — только владельцу.
 - **Секреты только в `.env`**: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `OPENAI_API_KEY`. `.env` в `.gitignore`.
 - **Валидация ввода пользователя** (`bot/validation.py`):
   - `safe_user_text` — лимит 10 000 символов, control-байты выкинуты.
@@ -263,21 +278,21 @@ docker compose logs -f bot
 
 **На текущей стадии (POC B) делаем:**
 
-- Зафиксированные зависимости (`requirements.txt` с `==`).
+- Зафиксированные зависимости (`requirements*.txt` + `requirements-lock.txt` из Docker-образа).
 - Один `.env` + `.env.example` с описанием.
 - Один способ запуска локально (`docker compose up -d`).
 - `.gitignore` под Python + Docker + IDE-мусор + `.env`.
 - Базовое логирование (stderr контейнера + `.psycho/log.md`).
+- Ruff и pytest в Docker зелёные; smoke-тесты главного пути лежат в `tests/smoke/`.
 - Whitelist (владелец + доверенные) + роли + валидация ввода.
 - **Multi-user изоляция данных** (`users/<id>/`, userctx, per-user сессии) — взято «**сверх POC B**» (multi-user формально MVP A; берём только изоляцию + whitelist для пары доверенных, без полного MVP-A hardening).
 - Atomic writes + drift detection + git_wrap транзакция в vault.
-- Smoke-проверки этапов 1-3 (30 шт, гоняются вручную через docker).
+- Generated artifacts (`diagramma-output/`) выведены из git-index и игнорируются.
 
 **Intentionally deferred (что НЕ делаем до следующей стадии):**
 
-- MVP-A hardening поверх multi-user: rate limiting на пользователя, структурные JSON-логи, бэкапы по cron с ротацией и тестом восстановления, мини-дашборд «кто сколько пользуется». Берём только если станет реальной альфой.
-- `deploy.sh` для shared-сервера — разворачивается на собственной машине через docker compose.
-- `tests/smoke/` как формальный набор pytest-сценариев — есть e2e-скрипты, но не оформлены (тех. долг).
+- MVP-A gates: бэкапы/restore drill, deploy script + runbook, структурные JSON-логи, минимальный дашборд «кто сколько пользуется», решение по systemd/shared-server policy. Берём только при реальном переходе в альфу.
+- `deploy.sh` для shared-сервера — сейчас разворачивается на собственной машине через docker compose.
 - Reverse-proxy (Caddy/nginx) — бот ходит в Telegram наружу, входящих HTTP нет.
 - Healthcheck-endpoint, Sentry, Grafana, мониторинг — MVP B.
 - 152-ФЗ-режим, открытый доступ для произвольных пользователей — MVP B (сейчас только доверенные по whitelist).
@@ -291,7 +306,7 @@ docker compose logs -f bot
 PoC B техчасть считается принятой, когда:
 
 - `docker compose up -d` запускает бота после `cp .env.example .env` и заполнения OpenRouter key.
-- 30 e2e-проверок проходят (`docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot python <<...`).
+- Pytest, smoke и ruff проходят в Docker командами из `## instructions`.
 - Бот работает неделю без падений на реальном vault владельца.
 - `.psycho/log.md` создан, наполняется, читаемый глазами.
 - `git log` внутри vault показывает регулярные пары `psycho(<uid>): before <op>` / `psycho(<uid>): <op>`, каждая ограничена поддеревом `users/<uid>/`.
@@ -306,7 +321,7 @@ PoC B техчасть считается принятой, когда:
 
 История по датам — в git (`git log`). Здесь — текущий снимок состояния и что осталось.
 
-**Текущее состояние (2026-05-25):**
+**Текущее состояние (2026-05-26):**
 
 - **Диалог:** главный вопрос (`/ask`/`/echo`/`/requestion`/дневной) открывает сессию-обсуждение; на каждый ответ — реакция-укол от 1-го лица (НЕ вопрос), сессия открыта, пока не задан новый вопрос или не выполнена любая команда (`/pebble`, `/like`, `/remask` — исключения, не трогают сессию). Уточняющих вопросов бот не задаёт. Reply на любую реплику из `00_raw/sessions` её продолжает (`bot/sessions.py`, `session.resume`).
 - **Голос:** в чат — от первого лица, на «ты», себя не называет. Досье (`summary` концептов, `03_personality/about.md`) — описательно от 3-го лица. Промпты разнесены: `prompts/iuda.md` (персона: голос/характер/правила общения) + `base.md` (домены, концепты, формат JSON) + аддендумы `ask`/`process`; `about` = `iuda.md` + `about.md` (голос из общей персоны); примеры стиля вопросов — `questions_examples.md` (`llm._system(kind)` = iuda + base + addendum + портрет).
@@ -314,13 +329,15 @@ PoC B техчасть считается принятой, когда:
 - **Портрет носителя** `03_personality/about.md` (`bot/about.py`): live-дельты в frontmatter + журнал, инъекция в системный промпт; прозу 20 секций пишет depersonalization. `/about` показывает портрет словами. Настроение — в `03_personality/mood.md` (`bot/mood_file.py`), пишется кодом каждый ход. `03_personality/profile.md` и `03_personality/softskills.md` — выверенные документы depersonalization; бот их не создаёт и не подмешивает напрямую в live-промпт.
 - **Команды:** `/ask /echo /ucho /about /requestion /history /pebble /start /help` + админ (`/adduser`/`/removeuser`/`/users`/`/dailyall`/`/like`/`/remask`). `/history` — последние 25 главных вопросов (`bot/questions.py`). Индикатор «Думаю» — один стикер 🎰, только для `/ask` и `/about`.
 - **Надёжность:** любой user-текст активной/возобновлённой сессии сначала пишется в `00_raw/sessions`; двухфазный коммит ответа (`pending_answer_event_id`) + recovery на старте; склейка офлайн-сообщений per-user до поллинга (`process_offline_backlog`); реконструкция reply из тела сообщения как фолбэк к session-log.
+- **Service/storage split:** conversation/note/daily use cases вынесены в `bot/services/*`; `handlers.py` остался transport-слоем. `vault.py` — совместимый фасад, реализация разнесена по `bot/storage/*` и `bot/repositories/*`. `userctx.user_root()` теперь fail-fast без uid.
+- **MVP A readiness:** `tests/smoke/` проверяет note/answer/recovery-facing пути без живых Telegram/OpenRouter; `requirements-lock.txt` фиксирует установленное Docker-окружение; `diagramma-output/` untracked+ignored; ruff зелёный.
 
 **Сверх POC B (оставлено осознанно):**
 
 - **Multi-user изоляция** (`users/<id>/`, `userctx`-contextvar, whitelist+роли+consent) — формально MVP A; берём только изоляцию для пары доверенных, без полного MVP-A hardening.
 - **Git-safety-net в vault + manifest/mtime drift** — полу-обвязка из praxis: даёт undo-семантику и защищает ручные правки под YandexDisk-синк.
 
-**Отложено до MVP A:** `tests/smoke/` как pytest-набор; `deploy.sh`; бэкапы по cron с ротацией; embedding-дедуп (`nomic-embed-text`); MVP-A hardening (per-user rate-limit-политики, структурные логи, дашборд). Подробнее — `## rules → Stage constraints` и `### Технический долг`.
+**Оставшиеся gates MVP A:** бэкапы по cron/ручной restore drill; `deploy.sh` + короткий runbook; структурные JSON-логи; минимальный непубличный дашборд; решение по systemd/shared-server policy; embedding-дедуп (`nomic-embed-text`) остаётся кандидатом, не блокером readiness.
 
 ### Manual verification scenarios (PoC B)
 
@@ -355,6 +372,7 @@ PoC B техчасть считается принятой, когда:
 
 ### Технические решения
 
+- **2026-05-26:** последовательный hardening к MVP A readiness без смены стадии. Обязательные session-log события (`append_required`) теперь валят обработку до LLM; `/ucho` сначала пишет verbatim в `00_raw/notes/`, сразу делает best-effort scoped commit и только потом идёт в `process_answer`. Пользователь больше не получает статус «заметка сохранена» и счётчики — только комментарий Иуды; если LLM падает после сохранения заметки, бот молчит. Conversation/note/daily вынесены в сервисы, recovery/scheduler отвязаны от приватных helpers `handlers.py`. `vault.py` разрезан на `storage/*` и `repositories/*`, но оставлен фасадом. Добавлен `requirements-lock.txt`, `tests/smoke/`, `diagramma-output/` снят с индекса. Проверки: полный pytest, smoke pytest и ruff в Docker.
 - **2026-05-20:** atomic writes через `tmp + os.replace` (вместо ftell+fsync без replace) — единственная защита от полу-записанных файлов под YandexDisk-pull. Применяется ко всем критичным JSON и концептам.
 - **2026-05-20:** git как safety net внутри vault, а не снаружи. Vault в YandexDisk-папке, `.git/` синкается тоже — это даёт `psycho-undo`-семантику между устройствами. Риск конфликтов git при работе с нескольких устройств принят (single-user, маловероятен).
 - **2026-05-20:** парсер концептов поддерживает два формата (callouts + старый H2) — нужно для миграции и для того, чтобы ручные правки в Obsidian в любом из стилей не теряли данные.
@@ -381,9 +399,9 @@ PoC B техчасть считается принятой, когда:
 
 ### Технический долг
 
-- Юнит-тесты чистых функций и сервис-слоя оформлены (`tests/`, pytest в Docker, изолированный tmp-вольт); полноценные E2E-сценарии Telegram/LLM по-прежнему ad-hoc — моки Telegram/OpenRouter не заведены.
-- `ruff check bot tests` ещё не зелёный целиком: остаточный лонг-долг в `about.py`/`graph.py`/`moods.py`/`qmap.py` (E741, F401 dead imports, E702) — не правился, чтобы не плодить churn в незатронутых модулях.
-- `deploy.sh` отсутствует — для single-user покрыто `docker compose up -d`, но формально PoC B требует.
+- Юнит-тесты чистых функций и сервис-слоя оформлены (`tests/`, pytest в Docker, изолированный tmp-вольт); smoke-набор главного пути есть в `tests/smoke/`. Полноценный E2E через эмулятор Telegram/живой OpenRouter по-прежнему не заведен.
+- `ruff check bot tests` зелёный на 2026-05-26.
+- `deploy.sh` отсутствует — для single-user покрыто `docker compose up -d`, но для MVP A нужен runbook/deploy script.
 - E2E-сценарии Telegram/OpenRouter остаются ручными: нужны моки Telegram update/send и OpenRouter non-JSON/timeout/rate-limit, чтобы проверять recovery без живой сети.
 - Промпты LLM (`prompts/base.md` + `process.md`) стоит дополнительно проверить на соответствие stage-схеме 00–03 при следующей ревизии: runtime-контракт JSON актуален, но текстовые пояснения промптов должны оставаться синхронными с документацией.
 - Бэкап-стратегия: сейчас полагаемся на git внутри vault + YandexDisk-history. До MVP A нужна явная стратегия (тест восстановления).

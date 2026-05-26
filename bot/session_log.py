@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import userctx
 from .atomic import atomic_write_text
+from .errors import VaultError
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,12 @@ def append(
     q_num: int | None = None,
     domain: str | None = None,
     bot_mood: str | None = None,
+    required: bool = False,
 ) -> dict | None:
     """Дописать событие сообщения в `00_raw/sessions/<session_id>.jsonl`."""
     if not session_id:
+        if required:
+            raise VaultError("session log append failed: empty session_id")
         return None
     try:
         d = _sessions_dir()
@@ -74,9 +78,24 @@ def append(
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return entry
-    except Exception:
+    except Exception as exc:
+        if required:
+            raise VaultError(f"session log append failed for session_id={session_id!r}") from exc
         log.exception("session log append failed (non-fatal)")
         return None
+
+
+def append_required(**kwargs) -> dict:
+    """Дописать обязательное событие или поднять VaultError.
+
+    Используется для канонических событий, без которых нельзя безопасно
+    продолжать LLM-цикл: user-answer перед process и bot question/reaction,
+    нужные для reply-resume/recovery.
+    """
+    event = append(**kwargs, required=True)
+    if event is None:
+        raise VaultError("session log append failed")
+    return event
 
 
 def iter_events() -> list[dict]:
