@@ -8,8 +8,8 @@
 
 Связи между концептами, реальные противоречия, промоушн `draft → stable` и выверенная проза портрета собираются отдельными ручными проходами сильной моделью (`reconcista`, `depersonalization`), а не live-ботом.
 
-**Приватность:** live-LLM работает через OpenRouter. Тексты диалога уходят во внешний
-AI-провайдер по OpenRouter API; бот по-прежнему молчит со всеми, кроме доверенных
+**Приватность:** live-LLM работает через AITunnel. Тексты диалога уходят во внешний
+AI-провайдер по AITunnel API; бот по-прежнему молчит со всеми, кроме доверенных
 пользователей (whitelist по `OWNER_TELEGRAM_ID` + `ALLOWED_TELEGRAM_IDS`).
 
 Стадия: **POC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH`; при серверном запуске это путь к vault на сервере (например `/srv/psycho/vault`). Синхронизация хранилища между машинами — только через git.
@@ -49,12 +49,12 @@ Psycho/
 ### 1. Среда
 
 - Docker Desktop с **WSL 2 based engine**.
-- OpenRouter API key.
+- AITunnel API key.
 
 ### 2. Токены
 
 - Telegram: [@BotFather](https://t.me/BotFather) → `/newbot` → токен.
-- OpenRouter: создай ключ в личном кабинете и положи его в `OPENAI_API_KEY`.
+- AITunnel: создай ключ в личном кабинете и положи его в `AITUNNEL_API_KEY`.
 - Свой Telegram user_id: [@userinfobot](https://t.me/userinfobot) → `/start`.
 - В @BotFather: `/setjoingroups` → Disable; `/setprivacy` → Enable.
 
@@ -64,7 +64,7 @@ Psycho/
 cp .env.example .env
 # обязательно заполни:
 #   TELEGRAM_BOT_TOKEN
-#   OPENAI_API_KEY
+#   AITUNNEL_API_KEY
 #   OWNER_TELEGRAM_ID
 #   VAULT_HOST_PATH  (если хранишь вольт не по дефолтному пути)
 ```
@@ -93,7 +93,7 @@ Compose поднимает только `bot`; локального LLM-серв
 | `/about` | Каким я тебя вижу — отформатированный портрет, затем обычная сессия |
 | `/history` | Последние 25 заданных вопросов (без ответов) |
 | `/pebble` | Бросить камень → «буль.». Прозрачен: не трогает активную сессию |
-| `/like` | Reply на реплику Иуды: отметить понравившейся или снять отметку |
+| `/like` | Reply на реплику Иуды: добавить её в избранное |
 | `/remask` | Reply на вопрос или комментарий Иуды: открыть меню смены лица |
 | `/start` | Смыв: закрыть сессию (данные целы) |
 | `/help` | Список команд |
@@ -132,19 +132,18 @@ Compose поднимает только `bot`; локального LLM-серв
 
 `<vault>/users/<uid>/_state.json` — сквозной счётчик `last_q_num` и daily marker. Тоже переживает рестарт.
 
-## Модели OpenRouter
+## Модели AITunnel
 
 Дефолтный live-контур:
 
 ```powershell
-OPENAI_BASE_URL=https://openrouter.ai/api/v1
-LLM_MODEL_DEFAULT=qwen/qwen3-235b-a22b-2507
-LLM_MODEL_FALLBACKS=deepseek/deepseek-v4-flash
-OPENROUTER_DATA_COLLECTION=deny
-OPENROUTER_ZDR=true
+AITUNNEL_BASE_URL=https://api.aitunnel.ru/v1
+AITUNNEL_API_KEY=...
+LLM_MODEL_DEFAULT=qwen3-235b-a22b-2507
+LLM_MODEL_FALLBACKS=deepseek-v4-flash
 ```
 
-Локальный LLM-контур удалён из runtime. Если обе модели OpenRouter недоступны, бот
+Локальный LLM-контур удалён из runtime. Если AITunnel-модель недоступна, бот
 покажет предупреждение в Telegram и запишет служебное предупреждение в vault log.
 
 ## Управление контейнерами

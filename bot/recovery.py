@@ -86,7 +86,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         try:
             await bot.send_message(
                 uid,
-                f"{getattr(exc, 'user_message', 'Модели OpenRouter сейчас недоступны. Попробуй позже.')} "
+                f"{getattr(exc, 'user_message', 'Модели AITunnel сейчас недоступны. Попробуй позже.')} "
                 "Pending-ответ оставлен на следующий рестарт. Если не хочешь ждать — /start закроет сессию.",
             )
         except Exception:

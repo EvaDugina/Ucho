@@ -1,4 +1,4 @@
-"""Обёртка над OpenRouter через openai-совместимый API.
+"""Обёртка над AITunnel через openai-совместимый API.
 
 Функции по режимам system-prompt:
 - ask_next        → mode: ask (главный вопрос; примеры стиля из questions_examples.md)
@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import about, mood_file, moods, vault
 from .config import (
+    AITUNNEL_API_KEY,
+    AITUNNEL_BASE_URL,
     DOMAINS,
     LLM_FALLBACK_ABOUT,
     LLM_FALLBACK_ASK,
@@ -31,10 +33,6 @@ from .config import (
     LLM_MODEL_PSYCH,
     LLM_MODEL_REACTION,
     LLM_TIMEOUT,
-    OPENAI_API_KEY,
-    OPENAI_BASE_URL,
-    OPENROUTER_DATA_COLLECTION,
-    OPENROUTER_ZDR,
     PROMPTS_DIR,
 )
 from .errors import LLMError
@@ -42,12 +40,12 @@ from .validation import strip_extra_punctuation
 
 log = logging.getLogger(__name__)
 
-# timeout — чтобы зависший/недоступный OpenRouter не держал бота ~600 c (дефолт sdk).
+# timeout — чтобы зависший/недоступный AITunnel не держал бота ~600 c (дефолт sdk).
 # max_retries=1 — один повтор на транзиентный сбой, без многократного умножения
 # ожидания (worst case ≈ 2 × LLM_TIMEOUT, а не 600 c).
 _client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL,
+    api_key=AITUNNEL_API_KEY,
+    base_url=AITUNNEL_BASE_URL,
     timeout=LLM_TIMEOUT,
     max_retries=1,
 )
@@ -179,24 +177,6 @@ def _models_for(task: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _openrouter_extra_body(*, zdr: bool | None = None) -> dict:
-    """Privacy/provider options for OpenRouter.
-
-    `data_collection=deny` is the hard default. `zdr=true` asks OpenRouter to route
-    only through zero-data-retention providers where supported/available.
-    """
-    provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
-    use_zdr = OPENROUTER_ZDR if zdr is None else zdr
-    if use_zdr:
-        provider["zdr"] = True
-    return {"provider": provider}
-
-
-def _is_zdr_unavailable(exc: Exception) -> bool:
-    s = str(exc).lower()
-    return "zero data retention" in s or "no endpoints found matching your data policy" in s
-
-
 def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, ...]) -> None:
     summary = " → ".join(models) if models else "нет настроенных моделей"
     detail = "; ".join(errors)
@@ -211,14 +191,14 @@ def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, .
         log.exception("failed to write LLM unavailable warning")
     raise LLMError(
         "LLM request failed for all models: " + detail,
-        user_message=f"Модели OpenRouter сейчас недоступны: {summary}. Попробуй позже.",
+        user_message=f"Модели AITunnel сейчас недоступны: {summary}. Попробуй позже.",
     )
 
 
 async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) -> dict:
     """Вызов LLM с принудительным JSON-выводом.
 
-    Сбой запроса и неразбираемый ответ пробуют следующий OpenRouter fallback.
+    Сбой запроса и неразбираемый ответ пробуют следующий AITunnel fallback.
     Если все модели сорвались — ``LLMError``; вызывающий хэндлер ловит её и
     отвечает нейтральной фразой.
     """
@@ -226,25 +206,12 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
     models = _models_for(task)
     for model in models:
         try:
-            try:
-                resp = await _client.chat.completions.create(
-                    model=model,
-                    response_format={"type": "json_object"},
-                    messages=messages,
-                    temperature=temperature,
-                    extra_body=_openrouter_extra_body(),
-                )
-            except Exception as exc:
-                if not OPENROUTER_ZDR or not _is_zdr_unavailable(exc):
-                    raise
-                log.warning("LLM %s model %s has no ZDR endpoint; retrying without zdr", task, model)
-                resp = await _client.chat.completions.create(
-                    model=model,
-                    response_format={"type": "json_object"},
-                    messages=messages,
-                    temperature=temperature,
-                    extra_body=_openrouter_extra_body(zdr=False),
-                )
+            resp = await _client.chat.completions.create(
+                model=model,
+                response_format={"type": "json_object"},
+                messages=messages,
+                temperature=temperature,
+            )
         except Exception as exc:
             errors.append(f"{model}: request failed: {exc}")
             log.warning("LLM %s request failed on %s: %r", task, model, exc)
@@ -262,28 +229,16 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
 
 
 async def _chat_text(task: str, messages: list[dict], temperature: float = 0.6) -> str:
-    """Plain-text OpenRouter call with the same task routing/fallback policy."""
+    """Plain-text AITunnel call with the same task routing/fallback policy."""
     errors: list[str] = []
     models = _models_for(task)
     for model in models:
         try:
-            try:
-                resp = await _client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    extra_body=_openrouter_extra_body(),
-                )
-            except Exception as exc:
-                if not OPENROUTER_ZDR or not _is_zdr_unavailable(exc):
-                    raise
-                log.warning("LLM %s model %s has no ZDR endpoint; retrying without zdr", task, model)
-                resp = await _client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    extra_body=_openrouter_extra_body(zdr=False),
-                )
+            resp = await _client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
         except Exception as exc:
             errors.append(f"{model}: request failed: {exc}")
             log.warning("LLM %s request failed on %s: %r", task, model, exc)

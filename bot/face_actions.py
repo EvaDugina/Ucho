@@ -1,4 +1,4 @@
-"""Action records для лиц Иуды, feedback маски и избранных реплик.
+"""Action records для лиц Иуды, пользовательских оценок и избранных реплик.
 
 Callback Telegram короткий, поэтому в кнопках живёт только token. Runtime JSON
 хранит ссылки на `00_raw/sessions` events, а не копии полного текста.
@@ -71,6 +71,34 @@ def _save_actions(data: dict) -> None:
     atomic_write_json(_actions_file(), {r["token"]: r for r in items if r.get("token")})
 
 
+def _root_token(data: dict, token: str | None) -> str | None:
+    if not token:
+        return None
+    seen: set[str] = set()
+    current = token
+    while current and current not in seen:
+        seen.add(current)
+        rec = data.get(current)
+        if not isinstance(rec, dict):
+            return current
+        explicit = rec.get("root_token")
+        parent = rec.get("parent_token")
+        if explicit:
+            return str(explicit)
+        if not parent:
+            return str(current)
+        current = str(parent)
+    return current
+
+
+def _same_chain(data: dict, rec: dict, root: str | None) -> bool:
+    if not root:
+        return False
+    if rec.get("root_token") == root:
+        return True
+    return _root_token(data, rec.get("token")) == root
+
+
 def _append_jsonl(path: Path, entry: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -98,14 +126,17 @@ def create_action(
     at: object | None = None,
 ) -> str:
     token = new_token()
+    data = _load_actions()
     user_event = session_log.find_event_by_message_id(
         reply_to_user_message_id, session_id=session_id, role="user"
     )
     question_event = session_log.find_question_event_by_q_num(
         answered_q_num or q_num, session_id=session_id
     )
+    root_token = _root_token(data, parent_token) if parent_token else token
     rec = {
         "token": token,
+        "root_token": root_token,
         "created_at": _now(at),
         "session_id": session_id,
         "q_num": q_num,
@@ -121,7 +152,6 @@ def create_action(
         "message_ts": None,
         "parent_token": parent_token,
     }
-    data = _load_actions()
     data[token] = rec
     _save_actions(data)
     return token
@@ -133,6 +163,7 @@ def create_remask_action(event: dict, *, parent_token: str | None = None, at: ob
     mid = event.get("telegram_message_id", event.get("message_id"))
     rec = {
         "token": token,
+        "root_token": parent_token or token,
         "created_at": _now(at),
         "session_id": event.get("session_id"),
         "q_num": event.get("q_num"),
@@ -198,6 +229,25 @@ def find_by_message_id(message_id: int | None) -> Optional[dict]:
     return None
 
 
+def is_rateable(rec: dict | None) -> bool:
+    return isinstance(rec, dict) and rec.get("kind") in {"reaction", "regen"}
+
+
+def used_bot_moods(token: str | None) -> set[str]:
+    data = _load_actions()
+    root = _root_token(data, token)
+    out: set[str] = set()
+    for rec in data.values():
+        if not isinstance(rec, dict) or not _same_chain(data, rec, root):
+            continue
+        if rec.get("kind") not in {"reaction", "regen"}:
+            continue
+        mood = rec.get("bot_mood")
+        if mood:
+            out.add(moods.coerce_bot_mood(mood))
+    return out
+
+
 def hydrate_action(rec: dict | None) -> dict:
     """Вернуть тексты для regen из event refs.
 
@@ -222,9 +272,14 @@ def hydrate_action(rec: dict | None) -> dict:
     }
 
 
-def record_mood_feedback(token: str, verdict: str, at: object | None = None) -> bool:
+def record_user_score(token: str, score: float, reason: str, at: object | None = None) -> bool:
+    """Записать явную оценку ответа владельцем.
+
+    `-0.5` = нажал перегенерацию, ответ сильно не понравился.
+    `1.0` = отправил в избранное, ответ понравился.
+    """
     rec = get_action(token)
-    if rec is None or verdict not in {"suitable", "unsuitable"}:
+    if rec is None or not is_rateable(rec):
         return False
     entry = {
         "ts": _now(at),
@@ -233,7 +288,9 @@ def record_mood_feedback(token: str, verdict: str, at: object | None = None) -> 
         "message_id": rec.get("message_id"),
         "action_token": token,
         "bot_mood": rec.get("bot_mood"),
-        "verdict": verdict,
+        "kind": rec.get("kind"),
+        "score": float(score),
+        "reason": reason,
     }
     _append_jsonl(_feedback_file(), entry)
     return True
@@ -250,15 +307,15 @@ def is_liked(token: str | None) -> bool:
     return bool(isinstance(item, dict) and item.get("liked"))
 
 
-def set_liked(token: str, liked: bool | None = None, at: object | None = None) -> Optional[bool]:
+def set_liked(token: str, liked: bool = True, at: object | None = None) -> Optional[bool]:
     rec = get_action(token)
-    if rec is None:
+    if rec is None or not is_rateable(rec):
         return None
     state = _liked_state()
-    current = bool(isinstance(state.get(token), dict) and state[token].get("liked"))
-    new_value = (not current) if liked is None else bool(liked)
+    new_value = bool(liked)
     entry = {
         "liked": new_value,
+        "score": 1.0 if new_value else 0.0,
         "updated_at": _now(at),
         "session_id": rec.get("session_id"),
         "q_num": rec.get("q_num"),

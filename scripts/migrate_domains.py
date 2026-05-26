@@ -62,31 +62,26 @@ _CLASSIFIER_PROMPT = """Ты классификатор концептов в г
 def _classify_with_llm(concept: graph.Concept) -> dict:
     """Синхронный wrapper над LLM-классификатором.
 
-    OpenRouter вызывается через async openai-compatible client, поэтому крутим
+    AITunnel вызывается через async openai-compatible client, поэтому крутим
     в asyncio.run.
     """
     from openai import AsyncOpenAI
 
     from bot.config import (
+        AITUNNEL_API_KEY,
+        AITUNNEL_BASE_URL,
         LLM_FALLBACK_PROCESS,
         LLM_MODEL_PROCESS,
         LLM_TIMEOUT,
-        OPENAI_API_KEY,
-        OPENAI_BASE_URL,
-        OPENROUTER_DATA_COLLECTION,
-        OPENROUTER_ZDR,
     )
 
     client = AsyncOpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url=OPENAI_BASE_URL,
+        api_key=AITUNNEL_API_KEY,
+        base_url=AITUNNEL_BASE_URL,
         timeout=LLM_TIMEOUT,
         max_retries=1,
     )
     models = tuple(dict.fromkeys((LLM_MODEL_PROCESS, *LLM_FALLBACK_PROCESS)))
-    provider = {"data_collection": OPENROUTER_DATA_COLLECTION}
-    if OPENROUTER_ZDR:
-        provider["zdr"] = True
 
     user_msg = (
         f"Концепт:\n"
@@ -109,7 +104,6 @@ def _classify_with_llm(concept: graph.Concept) -> dict:
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=0.0,
-                    extra_body={"provider": provider},
                 )
                 raw = resp.choices[0].message.content or "{}"
                 return json.loads(raw)

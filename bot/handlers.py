@@ -121,28 +121,12 @@ def _ask_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _face_keyboard(token: str, *, liked: bool = False) -> InlineKeyboardMarkup:
-    """Админская клавиатура: регенерация лиц, feedback маски, избранное."""
-    rows: list[list[InlineKeyboardButton]] = []
-    pair: list[InlineKeyboardButton] = []
-    for idx, face in enumerate(moods.BOT_MOODS):
-        pair.append(InlineKeyboardButton(text=face, callback_data=f"face:rg:{token}:{idx}"))
-        if len(pair) == 2:
-            rows.append(pair)
-            pair = []
-    if pair:
-        rows.append(pair)
-    rows.append([
-        InlineKeyboardButton(text="✓ маска подходит", callback_data=f"face:ok:{token}"),
-        InlineKeyboardButton(text="✗ маска не подходит", callback_data=f"face:no:{token}"),
-    ])
-    rows.append([
-        InlineKeyboardButton(
-            text=("★ понравилось" if liked else "☆ понравилось"),
-            callback_data=f"face:like:{token}",
-        )
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _face_keyboard(token: str) -> InlineKeyboardMarkup:
+    """Админская клавиатура под ответом: только перегенерация и избранное."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="♻ пɆ₱ɆгɆнɆ₱и₱Øв₳₮ь", callback_data=f"face:rg:{token}"),
+        InlineKeyboardButton(text="✍в избᎮᏗннᎧᏋ", callback_data=f"face:like:{token}"),
+    ]])
 
 
 def _remask_keyboard(token: str) -> InlineKeyboardMarkup:
@@ -631,7 +615,7 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("face:"))
 async def cb_face_action(callback: CallbackQuery) -> None:
-    """Админские кнопки лица: регенерация, feedback маски, избранное."""
+    """Админские кнопки ответа: регенерация и избранное только для реакций."""
     if not users.is_owner(callback.from_user.id):
         await callback.answer()
         return
@@ -669,7 +653,7 @@ async def cb_face_action(callback: CallbackQuery) -> None:
         parent_token = rec.get("parent_token")
         target_markup = None
         if parent_token:
-            target_markup = _face_keyboard(parent_token, liked=face_actions.is_liked(parent_token))
+            target_markup = _face_keyboard(parent_token)
         try:
             await callback.bot.edit_message_text(
                 chat_id=callback.message.chat.id if callback.message else callback.from_user.id,
@@ -706,37 +690,36 @@ async def cb_face_action(callback: CallbackQuery) -> None:
         await callback.answer("Маску сменил." if edited else "Маску записал, но сообщение не изменилось.")
         return
 
-    if action in {"ok", "no"}:
-        verdict = "suitable" if action == "ok" else "unsuitable"
-        if face_actions.record_mood_feedback(token, verdict):
-            vault.commit_all("mood feedback")
-            await callback.answer("Отметил маску.")
-        else:
-            await callback.answer("Не смог отметить маску", show_alert=True)
-        return
-
     if action == "like":
-        liked = face_actions.set_liked(token, liked=None)
+        if not face_actions.is_rateable(rec):
+            await callback.answer("Вопросы не оцениваю.", show_alert=True)
+            return
+        liked = face_actions.set_liked(token, liked=True)
         if liked is None:
             await callback.answer("Не нашёл реплику Иуды для отметки", show_alert=True)
             return
+        face_actions.record_user_score(token, 1.0, "favorite")
         try:
             if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=_face_keyboard(token, liked=liked))
+                await callback.message.edit_reply_markup(reply_markup=_face_keyboard(token))
         except Exception:
             log.exception("failed to update like keyboard")
         vault.commit_all("liked reply")
-        await callback.answer("Сохранил в понравившиеся." if liked else "Снял отметку.")
+        await callback.answer("В избранном.")
         return
 
-    if action != "rg" or len(parts) < 4:
+    if action != "rg":
         await callback.answer("Неизвестное действие", show_alert=True)
         return
-    try:
-        face_idx = int(parts[3])
-        face = moods.BOT_MOODS[face_idx]
-    except (ValueError, IndexError):
-        await callback.answer("Неизвестное лицо", show_alert=True)
+    if not face_actions.is_rateable(rec):
+        await callback.answer("Вопросы не перегенерирую.", show_alert=True)
+        return
+    face = moods.opposite_bot_mood(
+        rec.get("bot_mood"),
+        exclude=face_actions.used_bot_moods(token),
+    )
+    if face is None:
+        await callback.answer("Все маски для этой реплики уже исчерпаны.", show_alert=True)
         return
     uid = userctx.current_uid()
     if not ratelimit.try_acquire(uid):
@@ -744,6 +727,7 @@ async def cb_face_action(callback: CallbackQuery) -> None:
         await callback.bot.send_message(callback.from_user.id, ratelimit.BUSY_MESSAGE)
         return
     try:
+        face_actions.record_user_score(token, -0.5, "regenerate")
         try:
             action_texts = face_actions.hydrate_action(rec)
             new_text = await regenerate_reaction(
@@ -1025,7 +1009,7 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("like"))
 async def cmd_like(message: Message) -> None:
-    """Отметить reply-реплику Иуды как понравившуюся / снять отметку."""
+    """Отметить reply-реплику Иуды как понравившуюся."""
     if not _is_owner(message):
         return
     s = session.get()
@@ -1048,14 +1032,26 @@ async def cmd_like(message: Message) -> None:
         return
     rec = face_actions.find_by_message_id(message.reply_to_message.message_id)
     if rec is None:
+        event = session_log.find_event_by_message_id(
+            message.reply_to_message.message_id,
+            role="assistant",
+        )
+        if event and event.get("kind") == "question":
+            await message.answer("Вопросы не добавляю в избранное.")
+            return
         await message.answer("Не нашёл реплику Иуды для отметки")
         return
-    liked = face_actions.set_liked(rec.get("token"), liked=None, at=getattr(message, "date", None))
+    if not face_actions.is_rateable(rec):
+        await message.answer("Вопросы не добавляю в избранное.")
+        return
+    token = rec.get("token")
+    liked = face_actions.set_liked(token, liked=True, at=getattr(message, "date", None))
     if liked is None:
         await message.answer("Не нашёл реплику Иуды для отметки")
         return
+    face_actions.record_user_score(token, 1.0, "favorite", at=getattr(message, "date", None))
     vault.commit_all("liked reply")
-    await message.answer("Сохранил в понравившиеся." if liked else "Снял отметку.")
+    await message.answer("В избранном.")
 
 
 @router.message(Command("remask"))

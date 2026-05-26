@@ -17,12 +17,10 @@ import tempfile
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token")
 os.environ.setdefault("OWNER_TELEGRAM_ID", "1")
-os.environ["OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
-os.environ["OPENAI_API_KEY"] = "test-openrouter-key"
-os.environ["LLM_MODEL_DEFAULT"] = "qwen/qwen3-235b-a22b-2507"
-os.environ["LLM_MODEL_FALLBACKS"] = "deepseek/deepseek-v4-flash"
-os.environ["OPENROUTER_DATA_COLLECTION"] = "deny"
-os.environ["OPENROUTER_ZDR"] = "true"
+os.environ["AITUNNEL_BASE_URL"] = "https://api.aitunnel.ru/v1"
+os.environ["AITUNNEL_API_KEY"] = "test-aitunnel-key"
+os.environ["LLM_MODEL_DEFAULT"] = "qwen3-235b-a22b-2507"
+os.environ["LLM_MODEL_FALLBACKS"] = "deepseek-v4-flash"
 # Общий на сессию временный вольт; изоляция между тестами — через уникальный uid.
 os.environ["VAULT_PATH"] = tempfile.mkdtemp(prefix="psycho-test-vault-")
 

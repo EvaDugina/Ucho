@@ -1,7 +1,7 @@
 """Портрет пользователя (per-user): `03_personality/about.md` + журнал дельт.
 
 Гибрид (capture-first):
-- **Live (OpenRouter, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
+- **Live (AITunnel, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
   и дописывает сырую дельту в `03_personality/deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**

@@ -5,21 +5,14 @@ import json
 from bot import face_actions, handlers, moods, session_log, userctx
 
 
-def test_face_keyboard_contains_faces_feedback_and_like(as_user):
+def test_face_keyboard_contains_only_regen_and_favorite(as_user):
     kb = handlers._face_keyboard("tok123")
     buttons = [b for row in kb.inline_keyboard for b in row]
     texts = [b.text for b in buttons]
     callbacks = [b.callback_data for b in buttons]
 
-    for face in moods.BOT_MOODS:
-        assert face in texts
-    assert "✓ маска подходит" in texts
-    assert "✗ маска не подходит" in texts
-    assert "☆ понравилось" in texts
-    assert "face:rg:tok123:0" in callbacks
-    assert "face:ok:tok123" in callbacks
-    assert "face:no:tok123" in callbacks
-    assert "face:like:tok123" in callbacks
+    assert texts == ["♻ пɆ₱ɆгɆнɆ₱и₱Øв₳₮ь", "✍в избᎮᏗннᎧᏋ"]
+    assert callbacks == ["face:rg:tok123", "face:like:tok123"]
 
 
 def test_remask_keyboard_contains_only_face_choices(as_user):
@@ -90,26 +83,33 @@ def test_face_action_feedback_and_liked_state(as_user):
     assert rec["assistant_event_id"] == assistant_event["event_id"]
     assert face_actions.hydrate_action(rec)["assistant_text"] == "Я здесь."
 
-    assert face_actions.record_mood_feedback(token, "suitable", at="2026-05-25T10:02:00")
+    assert face_actions.record_user_score(token, -0.5, "regenerate", at="2026-05-25T10:02:00")
     feedback = userctx.user_root() / "01_mood" / "feedback.jsonl"
-    assert json.loads(feedback.read_text(encoding="utf-8").splitlines()[0])["verdict"] == "suitable"
+    score_entry = json.loads(feedback.read_text(encoding="utf-8").splitlines()[0])
+    assert score_entry["score"] == -0.5
+    assert score_entry["reason"] == "regenerate"
 
-    assert face_actions.set_liked(token, liked=None, at="2026-05-25T10:03:00") is True
+    assert face_actions.set_liked(token, liked=True, at="2026-05-25T10:03:00") is True
+    assert face_actions.record_user_score(token, 1.0, "favorite", at="2026-05-25T10:03:00")
     state = json.loads((userctx.user_root() / "03_personality" / "liked_replies.json").read_text(encoding="utf-8"))
     liked = state[token]
     assert liked["liked"] is True
+    assert liked["score"] == 1.0
     assert "assistant_text" not in liked
     assert "user_text" not in liked
     assert liked["assistant_event_id"] == assistant_event["event_id"]
     assert liked["user_event_id"] == user_event["event_id"]
     assert liked["reply_to_user_message_id"] == 111
 
-    assert face_actions.set_liked(token, liked=None, at="2026-05-25T10:04:00") is False
     log_lines = (
         userctx.user_root() / "03_personality" / "liked_replies_log.jsonl"
     ).read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 2
-    assert json.loads(log_lines[-1])["liked"] is False
+    assert len(log_lines) == 1
+    assert json.loads(log_lines[-1])["liked"] is True
+    score_lines = feedback.read_text(encoding="utf-8").splitlines()
+    assert len(score_lines) == 2
+    assert json.loads(score_lines[-1])["score"] == 1.0
+    assert json.loads(score_lines[-1])["reason"] == "favorite"
 
 
 def test_remask_action_uses_refs_and_updates_bot_mood(as_user):
@@ -141,3 +141,98 @@ def test_remask_action_uses_refs_and_updates_bot_mood(as_user):
 
     assert face_actions.set_bot_mood(token, "насмешка")
     assert face_actions.get_action(token)["bot_mood"] == "насмешка"
+
+
+def test_opposite_bot_mood_uses_different_cluster(as_user):
+    soft_targets = {moods.opposite_bot_mood("насмешка") for _ in range(20)}
+    hard_targets = {moods.opposite_bot_mood("ласка") for _ in range(20)}
+
+    assert soft_targets
+    assert hard_targets
+    assert soft_targets <= {"ласка", "любовь", "вера", "вселение_уверенности", "смирение", "клятва"}
+    assert hard_targets <= {
+        "раскачивание",
+        "насмешка",
+        "подшучивание",
+        "давление_на_больное",
+        "унижение",
+        "перевирание",
+        "сомнение",
+        "холодная_отстранённость",
+    }
+
+
+def test_regen_chain_excludes_already_generated_faces(as_user):
+    session_log.append(
+        session_id="s3",
+        role="assistant",
+        kind="question",
+        text="Что случилось?",
+        at="2026-05-25T10:00:00",
+        message_id=400,
+        q_num=15,
+        domain="everyday",
+    )
+    token = face_actions.create_action(
+        session_id="s3",
+        q_num=16,
+        answered_q_num=15,
+        kind="reaction",
+        bot_mood="вера",
+        assistant_text="Я здесь.",
+        user_text="Мне плохо.",
+        question="Что случилось?",
+        session_context="",
+        reply_to_user_message_id=None,
+    )
+    regen_1 = face_actions.create_action(
+        session_id="s3",
+        q_num=16,
+        answered_q_num=15,
+        kind="regen",
+        bot_mood="насмешка",
+        assistant_text="Не слишком ли красиво страдаешь?",
+        user_text="Мне плохо.",
+        question="Что случилось?",
+        session_context="",
+        parent_token=token,
+    )
+    regen_2 = face_actions.create_action(
+        session_id="s3",
+        q_num=16,
+        answered_q_num=15,
+        kind="regen",
+        bot_mood="ласка",
+        assistant_text="Ну иди сюда, только не лги.",
+        user_text="Мне плохо.",
+        question="Что случилось?",
+        session_context="",
+        parent_token=regen_1,
+    )
+
+    used = face_actions.used_bot_moods(token)
+    assert used == {"вера", "насмешка", "ласка"}
+    assert face_actions.used_bot_moods(regen_2) == used
+
+    next_face = moods.opposite_bot_mood("насмешка", exclude=used)
+    assert next_face not in used
+    assert moods.opposite_bot_mood("насмешка", exclude=set(moods.BOT_MOODS)) is None
+
+
+def test_question_tokens_are_not_rateable(as_user):
+    event = session_log.append(
+        session_id="s4",
+        role="assistant",
+        kind="question",
+        text="Что ты прячешь?",
+        at="2026-05-25T12:00:00",
+        message_id=444,
+        q_num=17,
+        domain="identity",
+    )
+    token = face_actions.create_remask_action(event, at="2026-05-25T12:01:00")
+    rec = face_actions.get_action(token)
+
+    assert face_actions.is_rateable(rec) is False
+    assert face_actions.set_liked(token, liked=True) is None
+    assert face_actions.record_user_score(token, 1.0, "favorite") is False

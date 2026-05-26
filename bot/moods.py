@@ -214,10 +214,35 @@ BOT_MOODS = (
 )
 
 _BRIGHT_Q = {"гордость_самоуверенность", "воодушевление_азарт", "презрение_зависть"}
+_HARD_FACES = (
+    "насмешка", "давление_на_больное", "унижение", "перевирание",
+    "сомнение", "холодная_отстранённость",
+)
+_SOFT_FACES = (
+    "ласка", "любовь", "вера", "вселение_уверенности", "смирение", "клятва",
+)
+_ACTIVE_FACES = ("раскачивание", "подшучивание")
 
 
 def coerce_bot_mood(s) -> str:
     return s if s in BOT_MOODS else "раскачивание"
+
+
+def opposite_bot_mood(s, *, exclude: set[str] | None = None) -> str | None:
+    """Выбрать сильно другую маску для кнопки перегенерации."""
+    current = coerce_bot_mood(s)
+    excluded = {coerce_bot_mood(x) for x in (exclude or set()) if x}
+    excluded.add(current)
+    if current in _SOFT_FACES:
+        pool = _HARD_FACES + _ACTIVE_FACES
+    elif current in _HARD_FACES:
+        pool = _SOFT_FACES
+    else:
+        pool = _HARD_FACES + _SOFT_FACES
+    choices = [m for m in pool if m not in excluded]
+    if not choices:
+        choices = [m for m in BOT_MOODS if m not in excluded]
+    return coerce_bot_mood(random.choice(choices)) if choices else None
 
 
 def _mood_dir() -> "object":

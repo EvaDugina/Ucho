@@ -14,7 +14,7 @@
 - **Язык / фреймворк:** Python 3.12 + aiogram (Telegram), APScheduler (daily-тикер)
 - **СУБД:** не используется (граф в Markdown-файлах внутри Obsidian-vault)
 - **Очередь / брокер:** не используется
-- **AI-провайдер:** OpenRouter через openai-совместимый API. Стартовая live-модель `qwen/qwen3-235b-a22b-2507`, fallback `deepseek/deepseek-v4-flash`. Локального LLM runtime в проекте больше нет.
+- **AI-провайдер:** AITunnel через openai-совместимый API. Стартовая live-модель `qwen3-235b-a22b-2507`; compose/example fallback `deepseek-v4-flash`. Локального LLM runtime в проекте больше нет.
 - **Прочее:** PyYAML (парсинг frontmatter), python-dotenv, git CLI (как safety net и единственный механизм синхронизации vault между окружениями), `pymorphy3` (+`pymorphy3-dicts-ru`) для лемматизации русского ввода под VAD-лексикон NRC-VAD (`bot/data/nrc_vad_ru.tsv`, вшит в образ; собирается `scripts/build_lexicon.py`).
 
 **Переменные окружения:**
@@ -26,12 +26,10 @@
 | `ALLOWED_TELEGRAM_IDS` | доп. доверенные id через запятую (начальный список; рантайм — в `.psycho/users.json`) | `111,222` |
 | `VAULT_HOST_PATH` | абсолютный путь к Obsidian-vault на хосте/сервере; пробрасывается в контейнер как `/vault` | `/srv/psycho/vault` |
 | `VAULT_PATH` | путь внутри контейнера (можно переопределить для тестов) | `/vault` |
-| `OPENAI_BASE_URL` | URL OpenRouter API | `https://openrouter.ai/api/v1` |
-| `OPENAI_API_KEY` | OpenRouter API key | `sk-or-...` |
-| `LLM_MODEL_DEFAULT` | стартовая live-модель | `qwen/qwen3-235b-a22b-2507` |
-| `LLM_MODEL_FALLBACKS` | fallback-модели через запятую | `deepseek/deepseek-v4-flash` |
-| `OPENROUTER_DATA_COLLECTION` | privacy routing: запретить провайдеров с data collection | `deny` |
-| `OPENROUTER_ZDR` | просить zero-data-retention routing, где доступно | `true` |
+| `AITUNNEL_BASE_URL` | URL AITunnel API; compose задаёт дефолт | `https://api.aitunnel.ru/v1` |
+| `AITUNNEL_API_KEY` | AITunnel API key | `ait-...` |
+| `LLM_MODEL_DEFAULT` | стартовая live-модель | `qwen3-235b-a22b-2507` |
+| `LLM_MODEL_FALLBACKS` | fallback-модели через запятую | `deepseek-v4-flash` |
 | `LLM_TIMEOUT` | таймаут одного LLM-вызова, сек (без него sdk ждёт ~600 c) | `90` |
 | `LLM_COOLDOWN_SEC` | мин. интервал между LLM-операциями одного пользователя (anti-DoS) | `4` |
 | `ANALYSIS_ENABLED` | мульти-методный разбор ответа для OWNER: отчёт в `01_mood/analysis/` + durable-ряд `01_mood/timeseries/`; `false` → только базовый разбор настроения в чат | `true` |
@@ -46,19 +44,19 @@
 
 ## architecture
 
-- **Подход:** монолит, асинхронный (aiogram + asyncio + openai async client). В обычном запуске поднимается один процесс бота; LLM-вызовы уходят в OpenRouter.
+- **Подход:** монолит, асинхронный (aiogram + asyncio + openai async client). В обычном запуске поднимается один процесс бота; LLM-вызовы уходят в AITunnel.
 - **Компоненты:**
   - Telegram-бот (`bot/`) — диалоговый слой, маршрутизация команд, форматирование сообщений.
-  - OpenRouter — внешний live-LLM-провайдер.
+  - AITunnel — внешний live-LLM-провайдер.
   - Obsidian-vault на сервере/хосте — хранилище графа и raw-логов; синхронизация и перенос между окружениями идут только через git.
-- **Разделение труда (capture-first):** OpenRouter live-модель только захватывает — диалог, `00_raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенные документы строит сильная модель вручную двумя скиллами (proposal → apply под git): `.agents/skills/reconcista/` — граф знаний (промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, `02_profile/`, MOC, теги, digest); `.agents/skills/depersonalization/` — портрет (`03_personality/about.md`), настроение (`03_personality/mood.md`), психометрика (`03_personality/profile.md`), soft skills (`03_personality/softskills.md`), граф `01_mood/`, `03_personality/user_prompt.md`.
+- **Разделение труда (capture-first):** AITunnel live-модель только захватывает — диалог, `00_raw/`, **черновые** концепты `status: draft` без связей/конфликтов. Выверенные документы строит сильная модель вручную двумя скиллами (proposal → apply под git): `.agents/skills/reconcista/` — граф знаний (промоушн `draft → stable`, дедуп/слияние, связи, реальные противоречия, `02_profile/`, MOC, теги, digest); `.agents/skills/depersonalization/` — портрет (`03_personality/about.md`), настроение (`03_personality/mood.md`), психометрика (`03_personality/profile.md`), soft skills (`03_personality/softskills.md`), граф `01_mood/`, `03_personality/user_prompt.md`.
 - **Multi-user изоляция:** бот обслуживает несколько доверенных пользователей; у каждого — своя база в `<vault>/users/<user_id>/` (`00_raw`, `01_mood`, `02_concepts`, `02_profile`, `02_digest`, `03_personality`, `_index`, `_state`, `_session`). `.psycho/` (manifest, log, startup-check, users.json) и `.git/` — глобальные на корне (один safety net, ключи манифеста — относительные пути). Текущий пользователь — request-scoped через `userctx` (contextvar, async-безопасно): aiogram-middleware ставит его на каждый update; data-слой (vault/graph/moc) маршрутизирует пути по `userctx.user_root()`. Whitelist + роли — `bot/users.py` (`OWNER_TELEGRAM_ID` = админ, гости — env + `.psycho/users.json`). Гостю при первом обращении — disclaimer о приватности.
 - **Потоки данных:**
-  - Пользователь шлёт сообщение → `00_raw/sessions` фиксирует событие до LLM → `01_mood` анализирует тон → LLM (через OpenRouter) возвращает JSON (`observations` — только анализ) → код пишет в vault: `00_raw/qna`, `02_concepts`, `02_profile`, `03_personality/deltas`; slug из имени, дедуп решает create/update → атомарная запись через `git_wrap` → MOC rebuild.
+  - Пользователь шлёт сообщение → `00_raw/sessions` фиксирует событие до LLM → `01_mood` анализирует тон → LLM (через AITunnel) возвращает JSON (`observations` — только анализ) → код пишет в vault: `00_raw/qna`, `02_concepts`, `02_profile`, `03_personality/deltas`; slug из имени, дедуп решает create/update → атомарная запись через `git_wrap` → MOC rebuild.
   - Non-text Telegram-сообщения (файлы, фото, голосовые, caption-only) не доходят до handlers/LLM и не читаются как вложения: middleware отвечает короткой миниатюрой на тему «бедное ухо без глаз» и останавливает обработку.
   - APScheduler раз в день → `send_daily_question` → handler в обход Telegram-входа. Дедуп по дате (`vault.daily_already_sent`/`mark_daily_sent`, поле `last_daily_date` в `_state.json`) — один дневной на пользователя в день, общий для cron / `/dailyall` / догона. При старте `scheduler.catch_up_daily` досылает сегодняшний дневной, если бот лежал в час рассылки (за прошлые дни — нет). Активная сессия/прошлые ответы не блокируют дневной.
   - При старте контейнера → `selfcheck.run()` (механический, без LLM): MOC rebuild всех доменов + валидация связей + `.psycho/startup-check.md`. Затем `session.restore_all()` восстанавливает активные `_session.json`, а `process_pending_on_startup` дожимает pending-события по `pending_answer_event_id` из `00_raw/sessions`. Офлайн-сообщения доезжают из очереди Telegram — polling не выставляет `drop_pending_updates`.
-- **Внешние зависимости:** Telegram Bot API + OpenRouter API. Секреты только в `.env`.
+- **Внешние зависимости:** Telegram Bot API + AITunnel API. Секреты только в `.env`.
 
 **Модули и ответственность:**
 
@@ -71,13 +69,13 @@
 - `bot/services/session_messages.py` — публичная transport-утилита отправки вопроса/реакции: формат Telegram HTML, `qmap/questions/session` bookkeeping и обязательная запись assistant event в `00_raw/sessions`.
 - `bot/services/answer_service.py` — запись `observations` в граф: `00_raw/qna` дословно + домен сессии → `02_profile` → slug=`slugify(name)`, дедуп `resolve_slug`/Jaccard → draft/append evidence → MOC; плюс `about.apply_delta`. Связи/конфликты в live НЕ строит — это reconcista.
 - `bot/qmap.py` — совместимая восстановимая обёртка: `append`/`mark_answered` no-op, `find_by_message_id` и `find_by_q_num` читают `00_raw/sessions`. Отдельный `_qmap.json` не создаётся.
-- `bot/llm.py` — OpenRouter-обёртка openai-клиента с task-aware routing/fallback. Режимы `ask` / `process` + `about_present` (портрет; `iuda.md` + `about.md`) + `classify_mood` (категории настроения `sign/energy/direction/quality/dominance`; принимает лексиконный `vad`-якорь) + `analyze_psych` (OCEAN/PANAS для owner-анализа) + `regenerate_reaction` (только новая реплика в выбранном лице, без записи графа). JSON-вызовы идут с `response_format={"type":"json_object"}`, privacy body `provider.data_collection=deny` + `zdr=true`; primary/fallback по умолчанию: `qwen/qwen3-235b-a22b-2507` → `deepseek/deepseek-v4-flash`. Если все модели маршрута недоступны, бот пишет предупреждение в `.psycho/log.md` и отправляет человеку понятное сообщение. Системный промпт = `iuda` + `base` + `mood.md` + addendum + `user_prompt` + портрет.
+- `bot/llm.py` — AITunnel-обёртка openai-клиента с task-aware routing/fallback. Режимы `ask` / `process` + `about_present` (портрет; `iuda.md` + `about.md`) + `classify_mood` (категории настроения `sign/energy/direction/quality/dominance`; принимает лексиконный `vad`-якорь) + `analyze_psych` (OCEAN/PANAS для owner-анализа) + `regenerate_reaction` (только новая реплика в выбранном лице, без записи графа). JSON-вызовы идут с `response_format={"type":"json_object"}`; provider-specific `extra_body.provider` больше не отправляется. Primary по умолчанию: `qwen3-235b-a22b-2507`; compose/example fallback — `deepseek-v4-flash`; task-specific env может переопределить маршрут. Если все модели маршрута недоступны, бот пишет предупреждение в `.psycho/log.md` и отправляет человеку понятное сообщение. Системный промпт = `iuda` + `base` + `mood.md` + addendum + `user_prompt` + портрет.
 - `bot/moods.py` — настроение и лица. Шкала — **PAD**: размерные valence/arousal/**dominance** (∈[-1..1]) + дискретные `QUALITIES` (~12), `direction`, `stability`. `classify_mood`-результат → `session_mood` (recency-взвешенный вектор по сессии + затухающий prior из `mood_file.baseline()` (v,a,d) + устойчивость через дисперсию), `pick_bot_mood` (контраст + per-user `01_mood/_mood_map.json`; ось dominance — приоритетная: «придавлен→поддержи / властен→осади»), `log_turn` (`01_mood/events/YYYY-MM.jsonl`, с `dominance` + `lex_*`). Граф `01_mood/` и карту строит depersonalization. **Весь пайплайн в `handlers._handle_probe_locked` запускается только для OWNER** (`_is_owner`); при `ANALYSIS_ENABLED=true` инструментальный разбор пишется в `01_mood/analysis/`, при `false` базовый `_format_mood` уходит в чат. Для остальных доверенных `bot_mood=None` → лицо выбирает сама LLM.
 - `bot/lexicon.py` — нативный русский VAD-сигнал (NRC-VAD, русская ветка). `score(text)` лемматизирует токены (`pymorphy3`) и усредняет valence/arousal/dominance по словам из вшитого `bot/data/nrc_vad_ru.tsv`, решейл [0..1]→[-1..1]; `run_in_executor`, LRU на леммы. Инструментальная подсказка арбитру `classify_mood` (не приговор). Нет файла/совпадений/сбой → `None` (пайплайн работает на одном LLM-классификаторе). Заменил связку Argos-перевод→VADER. Лексикон собирается `scripts/build_lexicon.py`.
 - `bot/emolex.py` — эмоции по NRC-EmoLex (Плутчик-8 + pos/neg), нативный русский лексикон (`bot/data/nrc_emolex_ru.tsv`, собирается `scripts/build_emolex.py`). `score_sync` лемматизирует (общий pymorphy3 из `lexicon`), усредняет доли эмоций. Метод сравнения. Нет файла/совпадений → None.
 - `bot/sentiment_dvk.py` — тональность через Dostoevsky (FastText/RuSentiment, 5 классов). **Graceful-optional**: ставится в Dockerfile (`--no-deps` + `fasttext-wheel`), модель тянется на build через официальный downloader, а при недоступности storage.b-labs.pro обучается совместимый FastText fallback по публичному RuSentiment CSV; нет библиотеки/модели → None (провайдер молча отключается).
 - `bot/analysis.py` — оркестратор инструментального анализа (OWNER-тестирование): `run_all` гоняет провайдеры конкурентно (переиспользует `mood_vec` из пайплайна настроения + `emolex` + `dostoevsky`, затем считает code-derived PANAS), `format_report` пишет в `01_mood/analysis/YYYY-MM-DD.md` только итоговые поля: **PAD: эмоция + выбранное лицо Иуды**, **NRC-EmoLex: ведущие эмоции + полярность**, **Dostoevsky**, **PANAS**; в Telegram отчёт не отправляется. `append_point` пишет точку в **durable** помесячный ряд `01_mood/timeseries/YYYY-MM.jsonl` (append-only, без ротации — основа для графиков день/неделя/месяц/сезон/год), `rebuild_chart` перегенерирует заметку `01_mood/График настроения.md` с блоком Obsidian Charts (дневное среднее PAD; рисует community-плагин, Python не нужен), `aggregate_daily` — чистая агрегация. Гейт — OWNER + `ANALYSIS_ENABLED`. Big Five/OCEAN не считается в live-анализе: его пишет только depersonalization в `03_personality/profile.md` по корпусу `00_raw/`.
-- `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на OpenRouter-контур): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
+- `bot/ratelimit.py` — per-user ограничитель LLM-операций (anti-DoS на AITunnel-контур): single-flight (1 активный вызов на пользователя) + cooldown. `try_acquire`/`release`, встроен во все пользовательские LLM-точки `handlers.py` (тикер/recovery — без лимита).
 - `bot/graph.py` — `Concept` dataclass, `save_concept` (с drift check + slug sanitize + atomic write), `_render` (callouts), `_parse_file` (обе версии формата), `resolve_slug`, `find_similar_concept` (Jaccard).
 - `bot/storage/git.py`, `transaction.py`, `layout.py`, `log.py` — git plumbing/scoped commits, `git_wrap`, per-user layout и глобальный `.psycho/log.md` с ротацией.
 - `bot/repositories/raw_repo.py`, `state_repo.py` — file-backed repositories: `append_raw`, `append_note`, `append_profile`, history lookup, `_state.json`, `next_q_num`, daily marker.
@@ -95,7 +93,7 @@
 - `prompts/base.md` (механика, домены, концепты, формат) + `prompts/iuda.md` (персона и голос) + `prompts/ask.md` / `process.md` / `about.md` / `mood.md` / `questions_examples.md` — промпты по режимам. `llm._system(kind)` собирает общий слой + addendum режима + портрет; JSON-контракт строгий. (`review.md`, `summarize.md`, `seeds.md` удалены.)
 - `bot/sessions.py` — восстановимая обёртка поверх `00_raw/sessions`: `snapshot` no-op, `load`/`find_by_message_id` для reply-resume.
 - `bot/session_log.py` — машинный append-only журнал всех сообщений активной сессии в `00_raw/sessions/<session_id>.jsonl`: user/assistant, даты Telegram, kind, message_id, q_num, domain, bot_mood.
-- `bot/face_actions.py` — per-user action records для админских кнопок лиц: `03_personality/face_actions.json`, `01_mood/feedback.jsonl`, `03_personality/liked_replies.json`, `03_personality/liked_replies_log.jsonl`.
+- `bot/face_actions.py` — per-user action records для кнопок реакции владельца: `03_personality/face_actions.json`, оценки `01_mood/feedback.jsonl`, избранное `03_personality/liked_replies.json` и `03_personality/liked_replies_log.jsonl`.
 - `bot/about.py` — портрет носителя (`03_personality/about.md` + `03_personality/deltas.jsonl`): `apply_delta` (live машинные поля + журнал), `render_for_prompt` (инъекция в системный промпт), `ensure` (создаёт пустой скелет). Настроения здесь нет.
 - `bot/mood_file.py` — живой черновик настроения `03_personality/mood.md` (capture-first): `set_current` (код пишет снимок из `moods`: эмоция/V/A/D/устойчивость/лицо), `baseline` (prior `mood_baseline` "v,a,d", back-compat "v,a"; пишет depersonalization), `render_for_prompt` (короткая строка настроения в промпт персоны), `ensure` (пустой скелет). Тело-нарратив анализа настроения пишет depersonalization (код тело сохраняет). Выверенный граф настроений — в `01_mood/`.
 - `scripts/migrate_domains.py` — одноразовый CLI-скрипт миграции 4→10 доменов.
@@ -110,7 +108,7 @@
 - **State** (`_state.json`): `{last_q_num: int, last_daily_date?: str}`.
 - **Session** (`_session.json`): compact runtime-состояние активной сессии: `id`, `mode`, `domain`, `last_question`, `current_q_num`, timestamps, `pending_answer_event_id`, короткие восстановимые `message_ids`; `history` записывается пустым. Полная переписка — только `00_raw/sessions`.
 - **Sessions/QMap/Questions**: отдельные `_sessions/_qmap/_questions` не создаются; `bot/sessions.py`, `bot/qmap.py`, `bot/questions.py` читают `00_raw/sessions`.
-- **Face actions / feedback / likes**: `03_personality/face_actions.json` хранит короткоживущие action-token записи с `session_id`/`event_id` refs, лицом и message_id, без копий полного user/assistant текста. `01_mood/feedback.jsonl` — append-only события `suitable|unsuitable` по маске. `03_personality/liked_replies.json` — текущее состояние избранных реплик по token/message_id, `03_personality/liked_replies_log.jsonl` — история toggle-действий; хранят refs на session events. `/remask` создаёт такой же короткий token, но меняет только metadata `bot_mood` выбранного bot-события и HTML-подпись сообщения; новый raw Q&A и концепты не создаются.
+- **Face actions / feedback / likes**: `03_personality/face_actions.json` хранит короткоживущие action-token записи с `session_id`/`event_id` refs, лицом, `root_token` цепочки регенераций и message_id, без копий полного user/assistant текста. `01_mood/feedback.jsonl` — append-only оценки ответов: `-0.5` за перегенерацию, `1` за избранное. `03_personality/liked_replies.json` — текущее состояние избранных ответов по token/message_id, `03_personality/liked_replies_log.jsonl` — история добавлений; хранят refs на session events. Вопросы не имеют rateable action и не пишут feedback. `/remask` создаёт такой же короткий token, но меняет только metadata `bot_mood` выбранного bot-события и HTML-подпись сообщения; новый raw Q&A и концепты не создаются.
 - **Разрешённые runtime-файлы бота:** per-user `00_raw/sessions/*.jsonl`, `00_raw/qna/*.md`, `00_raw/notes/*.md`, `01_mood/events/*.jsonl`, `01_mood/analysis/*.md`, `01_mood/timeseries/*.jsonl`, `01_mood/График настроения.md`, `01_mood/feedback.jsonl`, `02_concepts/<domain>/*.md`, `02_concepts/<domain>/<DOMAIN>.md`, `02_profile/<domain>.md`, `03_personality/about.md`, `03_personality/mood.md`, `03_personality/deltas.jsonl`, `03_personality/face_actions.json`, `03_personality/liked_replies.json`, `03_personality/liked_replies_log.jsonl`, `_state.json`, `_session.json`, `_index.md`, `.obsidian/graph.json`; global `.psycho/manifest.json`, `.psycho/log.md`, `.psycho/startup-check.md`, `.psycho/users.json`.
 - **Запрещённые legacy-файлы:** бот не создаёт `raw/inbox`, корневые `raw/`, `concepts/`, `profile/`, `digests/`, `personality/`, `mood/`, `notes/`, а также `_qmap.json`, `_questions.json`, `_sessions.json`, `_mood_log.jsonl`, `_user_deltas.jsonl`, `_face_actions.json`, `_mood_feedback.jsonl`, `_liked_replies*.json*` в корне пользователя.
 - **Personality** (`03_personality/about.md` + `03_personality/mood.md` + `03_personality/profile.md` + `03_personality/softskills.md`): портрет носителя (`bot/about.py`, 20 секций, описательно от 3-го лица; `03_personality/deltas.jsonl` копит live-ключи `speech_note/trigger/motif/fact/rapport/style/passion/letdown/epistemics/attachment/routine/limits/power/selfhood/finitude/roots/vocation`, проза — depersonalization) + живой черновик настроения (`bot/mood_file.py`: эмоция/V/A/D/устойчивость/лицо + `mood_baseline`; нарратив — depersonalization) + психометрический профиль (`profile.md`: OCEAN/MBTI/DISC, LLM-native, **пишет ТОЛЬКО depersonalization** — бот не создаёт, в live-промпт не идёт) + soft skills (`softskills.md`: 20 навыков в 4 группах, баллы 0–100 или `н/д`, confidence и evidence; **пишет ТОЛЬКО depersonalization**, бот не создаёт, live-контракт не расширяется, в системный промпт файл напрямую не идёт). about/mood инъецируются в системный промпт.
@@ -139,7 +137,7 @@ Psycho/
 │   ├── middleware.py       AccessMiddleware (whitelist + userctx на update)
 │   ├── recovery.py         старт: pending-recovery + офлайн-бэклог
 │   ├── errors.py           иерархия исключений (Psycho/LLM/Vault/Validation)
-│   ├── llm.py              обёртка над OpenRouter (ask/process/about/classify_mood)
+│   ├── llm.py              обёртка над AITunnel (ask/process/about/classify_mood)
 │   ├── services/
 │   │   ├── answer_service.py       запись observations в граф (дедуп/MOC/git_wrap)
 │   │   ├── conversation_service.py ответ в открытой probe-сессии
@@ -207,19 +205,19 @@ docker compose logs -f bot
 ```
 
 Перед запуском заполнить в `.env`: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`,
-`OPENAI_API_KEY`, `VAULT_HOST_PATH`. Локальную модель скачивать не нужно.
+`AITUNNEL_API_KEY`, `VAULT_HOST_PATH`. Локальную модель скачивать не нужно.
 
 ### Развёртывание
 
-`deploy.sh` пока **нет**. Проект single-user на собственной машине, развёртывание = `docker compose up -d --build` после `git pull` и обновления `.env` при смене OpenRouter-моделей.
+`deploy.sh` пока **нет**. Проект single-user на собственной машине/сервере, развёртывание = `docker compose up -d --build` после `git pull` и обновления `.env` при смене AITunnel-моделей.
 
 Если когда-то выложим на shared сервер — нужен полноценный `deploy.sh` с idempotent-режимом (см. notes → active plans).
 
 ### Тестирование
 
-- **Сценарии:** pytest-набор на изолированном vault (`VAULT_PATH=/tmp/psycho-test`). Покрывает stage-хранилище 00–03, session-log до LLM, `/ucho` durability, service-layer use cases, OpenRouter-routing/fallback, отсутствие legacy-файлов, atomic writes, drift detection, wikilink validation, slug sanitization, callout render/parser roundtrip, alias resolve, Jaccard dedup и MOC rebuild.
+- **Сценарии:** pytest-набор на изолированном vault (`VAULT_PATH=/tmp/psycho-test`). Покрывает stage-хранилище 00–03, session-log до LLM, `/ucho` durability, service-layer use cases, AITunnel-routing/fallback, отсутствие legacy-файлов, atomic writes, drift detection, wikilink validation, slug sanitization, callout render/parser roundtrip, alias resolve, Jaccard dedup и MOC rebuild.
 - **Команда запуска:** `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest`.
-- **Smoke:** `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke` проверяет note `/ucho`, answer path и recovery-facing pending event без живого Telegram/OpenRouter.
+- **Smoke:** `docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke` проверяет note `/ucho`, answer path и recovery-facing pending event без живого Telegram/AITunnel.
 - **Статика:** `docker compose run --rm --no-deps bot ruff check bot tests`.
 - **Целевое покрытие:** не отслеживается (PoC B). Главное — happy path всех 10 доменов + drift-сценарий.
 
@@ -256,7 +254,7 @@ docker compose logs -f bot
 ### Безопасность
 
 - **Whitelist доверенных пользователей** (`OWNER_TELEGRAM_ID`, `ALLOWED_TELEGRAM_IDS`, `.psycho/users.json`) — обычные команды доступны только доверенным, админские действия гейтятся `_is_owner()`. Подсказки команд видны только доверенным через `BotCommandScopeChat`; админ-блок — только владельцу.
-- **Секреты только в `.env`**: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `OPENAI_API_KEY`. `.env` в `.gitignore`.
+- **Секреты только в `.env`**: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`, `AITUNNEL_API_KEY`. `.env` в `.gitignore`.
 - **Валидация ввода пользователя** (`bot/validation.py`):
   - `safe_user_text` — лимит 10 000 символов, control-байты выкинуты.
   - `escape_raw_block` — zero-width префикс ломает попытки подделать `## Q<n>` / `**Q:**` / `**A:**` в начале строки.
@@ -304,7 +302,7 @@ docker compose logs -f bot
 
 PoC B техчасть считается принятой, когда:
 
-- `docker compose up -d` запускает бота после `cp .env.example .env` и заполнения OpenRouter key.
+- `docker compose up -d` запускает бота после `cp .env.example .env` и заполнения AITunnel key.
 - Pytest, smoke и ruff проходят в Docker командами из `## instructions`.
 - Бот работает неделю без падений на реальном vault владельца.
 - `.psycho/log.md` создан, наполняется, читаемый глазами.
@@ -324,12 +322,12 @@ PoC B техчасть считается принятой, когда:
 
 - **Диалог:** главный вопрос (`/ask`/`/echo`/`/requestion`/дневной) открывает сессию-обсуждение; на каждый ответ — реакция-укол от 1-го лица (НЕ вопрос), сессия открыта, пока не задан новый вопрос или не выполнена любая команда (`/pebble`, `/like`, `/remask` — исключения, не трогают сессию). Уточняющих вопросов бот не задаёт. Reply на любую реплику из `00_raw/sessions` её продолжает (`bot/sessions.py`, `session.resume`).
 - **Голос:** в чат — от первого лица, на «ты», себя не называет. Досье (`summary` концептов, `03_personality/about.md`) — описательно от 3-го лица. Промпты разнесены: `prompts/iuda.md` (персона: голос/характер/правила общения) + `base.md` (домены, концепты, формат JSON) + аддендумы `ask`/`process`; `about` = `iuda.md` + `about.md` (голос из общей персоны); примеры стиля вопросов — `questions_examples.md` (`llm._system(kind)` = iuda + base + addendum + портрет).
-- **Capture-first:** OpenRouter live-модель только захватывает — `process` отдаёт `observations` + `reaction` + `user_delta`; запись/идентичность (raw дословно, slug из имени, дедуп, верификация цитаты) на коде. Связи, реальные противоречия, промоушн `draft→stable`, доменные `02_profile/` и MOC — Claude вручную (`reconcista`); портрет, настроение, `03_personality/profile.md` и `03_personality/softskills.md` — `depersonalization`.
+- **Capture-first:** AITunnel live-модель только захватывает — `process` отдаёт `observations` + `reaction` + `user_delta`; запись/идентичность (raw дословно, slug из имени, дедуп, верификация цитаты) на коде. Связи, реальные противоречия, промоушн `draft→stable`, доменные `02_profile/` и MOC — Codex вручную (`reconcista`); портрет, настроение, `03_personality/profile.md` и `03_personality/softskills.md` — `depersonalization`.
 - **Портрет носителя** `03_personality/about.md` (`bot/about.py`): live-дельты в frontmatter + журнал, инъекция в системный промпт; прозу 20 секций пишет depersonalization. `/about` показывает портрет словами. Настроение — в `03_personality/mood.md` (`bot/mood_file.py`), пишется кодом каждый ход. `03_personality/profile.md` и `03_personality/softskills.md` — выверенные документы depersonalization; бот их не создаёт и не подмешивает напрямую в live-промпт.
 - **Команды:** `/ask /echo /ucho /about /requestion /history /pebble /start /help` + админ (`/adduser`/`/removeuser`/`/users`/`/dailyall`/`/like`/`/remask`). `/history` — последние 25 главных вопросов (`bot/questions.py`). Индикатор «Думаю» — один стикер 🎰, только для `/ask` и `/about`.
 - **Надёжность:** любой user-текст активной/возобновлённой сессии сначала пишется в `00_raw/sessions`; двухфазный коммит ответа (`pending_answer_event_id`) + recovery на старте; склейка офлайн-сообщений per-user до поллинга (`process_offline_backlog`); реконструкция reply из тела сообщения как фолбэк к session-log.
 - **Service/storage split:** conversation/note/daily use cases вынесены в `bot/services/*`; `handlers.py` остался transport-слоем. `vault.py` — совместимый фасад, реализация разнесена по `bot/storage/*` и `bot/repositories/*`. `userctx.user_root()` теперь fail-fast без uid.
-- **MVP A readiness:** `tests/smoke/` проверяет note/answer/recovery-facing пути без живых Telegram/OpenRouter; `requirements-lock.txt` фиксирует установленное Docker-окружение; `diagramma-output/` untracked+ignored; ruff зелёный.
+- **MVP A readiness:** `tests/smoke/` проверяет note/answer/recovery-facing пути без живых Telegram/AITunnel; `requirements-lock.txt` фиксирует установленное Docker-окружение; `diagramma-output/` untracked+ignored; ruff зелёный.
 
 **Сверх POC B (оставлено осознанно):**
 
@@ -389,8 +387,9 @@ PoC B техчасть считается принятой, когда:
 - **2026-05-23:** папка `03_personality/` — `about.md` (бывший `about_user.md`) + новый `mood.md` (живой черновик настроения, `bot/mood_file.py`). mood-поля (`01_mood/bot_mood/mood_baseline`) переехали из about в mood.md (один источник правды); `mood_file.baseline()` — prior для `session_mood`; в промпт персоны настроение инжектится из mood.md. Граф настроений и timeseries остаются в `01_mood/`. *(Позже в тот же день legacy-механика `about_user.md` убрана: `ensure()` создаёт только пустые скелеты, миграции/фолбэка нет — данные уже в `03_personality/`.)*
 - **2026-05-23:** durable временной ряд настроения + текстовые пояснения в отчёте. Выводы всех методов теперь пишутся в **помесячный append-only** ряд `01_mood/timeseries/YYYY-MM.jsonl` (`append_point`, без ротации — заменил кольцевой `_analysis_log.jsonl`); это основа для графиков колебаний день/неделя/месяц/сезон/год. Человекочитаемый отчёт `format_report` больше не отправляется в Telegram: `append_report` дописывает его в `01_mood/analysis/YYYY-MM-DD.md`. `rebuild_chart` перегенерирует `01_mood/График настроения.md` (блок Obsidian Charts, дневное среднее PAD; рисует community-плагин). В `format_report` после каждого числа добавлена русская расшифровка. (Проблемы транслит-имён/дублей/отсутствия связей у свежих draft — штатный жизненный цикл draft→reconcista, не баг.)
 - **2026-05-25:** live-анализ сообщений больше не считает Big Five/OCEAN. Психометрика OCEAN остаётся только в `03_personality/profile.md`, который вручную пишет depersonalization по истории `00_raw/` + дельтам; бот не делает per-message психотипирование. Итоговый инструментальный отчёт в `01_mood/analysis/` сужен до PAD-эмоции + выбранного лица Иуды, EmoLex-эмоций/полярности, Dostoevsky и PANAS (code-derived). Dostoevsky-модель в Dockerfile теперь устанавливается через `scripts/install_dostoevsky_model.py`: официальный downloader first, затем совместимый fallback FastText по RuSentiment, если storage.b-labs.pro недоступен.
-- **2026-05-25:** админский UI лиц Иуды. OWNER видит подпись `лицо Иуды: <face>` под реакцией и inline-кнопки: регенерация во всех `BOT_MOODS`, `✓/✗ маска`, `★ понравилось`. Регенерация вызывает `llm.regenerate_reaction`, шлёт новый reply к реплике, на кнопке которой нажали, и НЕ запускает `_apply_processed`/raw Markdown/concepts. Action context хранится в `03_personality/face_actions.json` как refs на session events; feedback маски пишется в `01_mood/feedback.jsonl`; избранные реакции и regen-ответы — в `03_personality/liked_replies.json` + `03_personality/liked_replies_log.jsonl` тоже как refs. Полный машинный лог сообщений активной сессии пишется в `00_raw/sessions/<session_id>.jsonl`.
-- **2026-05-25:** live-LLM мигрирован на OpenRouter. Локальная `qwen2.5:14b-instruct`/Ollama исключена из runtime и fallback; compose-сервис `ollama` удалён. Default primary сначала был free-контуром, затем переключён на платный privacy-friendly маршрут `qwen/qwen3-235b-a22b-2507` → `deepseek/deepseek-v4-flash`; все JSON-вызовы идут с `response_format={"type":"json_object"}` и OpenRouter privacy body `provider.data_collection=deny`, `zdr=true`. Историческая Qwen остаётся только baseline в таблице сравнения.
+- **2026-05-26:** UI лиц Иуды упрощён. OWNER видит подпись `лицо Иуды: <face>` под ответом и только две inline-кнопки: `♻ пɆ₱ɆгɆнɆ₱и₱Øв₳₮ь` и `✍в избᎮᏗннᎧᏋ`. Перегенерация выбирает сильно другую маску, исключает уже использованные маски той же цепочки, вызывает `llm.regenerate_reaction`, шлёт отдельный новый reply к реплике, на кнопке которой нажали, пишет score `-0.5` и НЕ запускает `_apply_processed`/raw Markdown/concepts. Избранное пишет score `1` и refs на session events. Вопросы не оцениваются и не перегенерируются; меню всех лиц доступно только через reply-команду `/remask`. Action context хранится в `03_personality/face_actions.json`, оценки — в `01_mood/feedback.jsonl`, избранные обычные и regen-ответы — в `03_personality/liked_replies.json` + `03_personality/liked_replies_log.jsonl`. Полный машинный лог сообщений активной сессии пишется в `00_raw/sessions/<session_id>.jsonl`.
+- **2026-05-26:** live-LLM мигрирован на AITunnel. OpenAI-compatible клиент сохранён, но дефолтный endpoint теперь `https://api.aitunnel.ru/v1`, ключ — `AITUNNEL_API_KEY`, модель — `qwen3-235b-a22b-2507` без provider-prefix. Provider-specific `extra_body.provider` удалён; compose/example fallback — `deepseek-v4-flash`.
+- **2026-05-25:** локальная `qwen2.5:14b-instruct`/Ollama исключена из runtime и fallback; compose-сервис `ollama` удалён. Live-контур остался внешним openai-compatible API; историческая Qwen остаётся только baseline в таблице сравнения.
 - **2026-05-22:** мульти-методное сравнение оценок настроения/состояния (OWNER-тестирование). `bot/analysis.py` гоняет на каждый ответ владельца несколько методов: PAD (LLM+код), NRC-VAD-лексикон, NRC-EmoLex (Плутчик-8, `bot/emolex.py`), Dostoevsky (тональность RuSentiment, `bot/sentiment_dvk.py`, graceful-optional). Единый отчёт пишется в `01_mood/analysis/`, выводы — в durable-ряд `01_mood/timeseries/` для выбора лучших методов. Гейт OWNER + `ANALYSIS_ENABLED`. CEDR/torch и RusLICA отложены (вес/приватность). Dostoevsky ставится `--no-deps` + `fasttext-wheel` (пин fasttext не собирается на py3.12), модель — нефатально в Dockerfile.
 - **2026-05-22:** анализ настроения загейчен на OWNER. Блок настроения в `_handle_probe_locked` обёрнут в `if _is_owner(message)`; для не-владельцев `bot_mood=None` (LLM сама выбирает лицо), `record_mood`/`set_mood`/`log_turn` не вызываются. Изначально базовый разбор (`_format_mood`: эмоция, V/A/D, направленность, устойчивость, лицо, лексиконный VAD) слался владельцу отдельным сообщением; сейчас при `ANALYSIS_ENABLED=true` итоговый разбор пишется в `01_mood/analysis/`, а не в чат.
 - **2026-05-22:** ось **Dominance** (V/A→PAD) + замена инструментального сигнала. Шкала настроения расширена третьей осью контроль↔бессилие (Мехрабиан): `classify_mood` отдаёт `dominance`, `session_mood` считает её recency+prior, `pick_bot_mood` использует приоритетно (формализует контраст-политику `mood.md`). Инструментальный сигнал переведён с VADER-по-переводу на нативный русский VAD-лексикон NRC-VAD (`bot/lexicon.py` + `pymorphy3` + вшитый `bot/data/nrc_vad_ru.tsv`, собран `scripts/build_lexicon.py`). Удалены `bot/translate.py`, `vaderSentiment`, `argostranslate` и build-шаг модели ru→en в `Dockerfile`. `01_mood/events/YYYY-MM.jsonl` теперь несёт `dominance` + `lex_valence/arousal/dominance` (вместо `vader_compound`); `mood_baseline` пишется как `"v,a,d"`. Лексикон NRC-VAD — лицензия research/non-commercial (для PoC B ок). Без новых контейнеров, без облака (hard-правило приватности соблюдено).
@@ -399,10 +398,10 @@ PoC B техчасть считается принятой, когда:
 
 ### Технический долг
 
-- Юнит-тесты чистых функций и сервис-слоя оформлены (`tests/`, pytest в Docker, изолированный tmp-вольт); smoke-набор главного пути есть в `tests/smoke/`. Полноценный E2E через эмулятор Telegram/живой OpenRouter по-прежнему не заведен.
+- Юнит-тесты чистых функций и сервис-слоя оформлены (`tests/`, pytest в Docker, изолированный tmp-вольт); smoke-набор главного пути есть в `tests/smoke/`. Полноценный E2E через эмулятор Telegram/живой AITunnel по-прежнему не заведён.
 - `ruff check bot tests` зелёный на 2026-05-26.
 - `deploy.sh` отсутствует — для single-user покрыто `docker compose up -d`, но для MVP A нужен runbook/deploy script.
-- E2E-сценарии Telegram/OpenRouter остаются ручными: нужны моки Telegram update/send и OpenRouter non-JSON/timeout/rate-limit, чтобы проверять recovery без живой сети.
+- E2E-сценарии Telegram/AITunnel остаются ручными: нужны моки Telegram update/send и AITunnel non-JSON/timeout/rate-limit, чтобы проверять recovery без живой сети.
 - Промпты LLM (`prompts/base.md` + `process.md`) стоит дополнительно проверить на соответствие stage-схеме 00–03 при следующей ревизии: runtime-контракт JSON актуален, но текстовые пояснения промптов должны оставаться синхронными с документацией.
 - Бэкап-стратегия: сейчас полагаемся на git внутри vault и серверный git remote. До MVP A нужна явная стратегия бэкапов и тест восстановления.
 
@@ -415,18 +414,17 @@ PoC B техчасть считается принятой, когда:
 ## ai_pipeline
 
 - **Разделение труда (две модели, разные роли):**
-  - **OpenRouter live-модель** — захват: режимы `ask`, `process` (capture-first: только черновики + evidence, без связей/конфликтов), `classify_mood`, `analyze_psych`, `regenerate_reaction` и `about_present` (портрет). Текущий primary `qwen/qwen3-235b-a22b-2507`, fallback `deepseek/deepseek-v4-flash`.
+  - **AITunnel live-модель** — захват: режимы `ask`, `process` (capture-first: только черновики + evidence, без связей/конфликтов), `classify_mood`, `analyze_psych`, `regenerate_reaction` и `about_present` (портрет). Текущий primary `qwen3-235b-a22b-2507`, fallback `deepseek-v4-flash`.
   - **Сильная модель (Claude в Claude Code, вручную)** — два скилла: `reconcista` (граф знаний: промоушн draft→stable, дедуп/слияние, связи, противоречия, `02_profile`, MOC, теги, digest) и `depersonalization` (портрет `03_personality/about.md`, настроение `03_personality/mood.md`, психометрика `03_personality/profile.md`, soft skills `03_personality/softskills.md`, граф `01_mood/`, `03_personality/user_prompt.md`). Не в контейнере, запускается пользователем.
-  - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → тот же OpenRouter process-route, temperature=0.
+  - Классификация при миграции 4→10 (`scripts/migrate_domains.py`) → тот же AITunnel process-route, temperature=0.
   - Embeddings → не используются (live-дедуп через slug+alias+Jaccard). Векторный дедуп/поиск — кандидат на MVP A.
-- **Провайдер:** OpenRouter, openai-совместимый API через `OPENAI_BASE_URL=https://openrouter.ai/api/v1`.
+- **Провайдер:** AITunnel, openai-совместимый API через `AITUNNEL_BASE_URL=https://api.aitunnel.ru/v1`.
 - **Таблица сравнения моделей (зафиксирована 2026-05-25):**
   | # | Модель | Цена | Оценка | Лучшее применение |
   |---:|---|---:|---:|---|
-  | 1 | `nvidia/nemotron-3-super-120b-a12b:free` | free | **8.4** | Сильный free-кандидат для JSON и длинного контекста, но не default из-за OpenRouter privacy/data-policy ограничений. |
-  | 2 | `qwen/qwen3-next-80b-a3b-instruct:free` | free | **8.2** | Free fallback-кандидат для русского и структурного анализа, но нестабилен по upstream rate-limit. |
-  | 3 | `qwen/qwen3-235b-a22b-2507` | `$0.071 / $0.10` | **9.6** | Текущий primary: лучший баланс качества, русского и цены при сохранении privacy-policy. |
-  | 4 | `deepseek/deepseek-v4-flash` | `$0.10 / $0.20` | **9.1** | Текущий fallback для JSON, mood и структуры. |
+  | 1 | `qwen3-235b-a22b-2507` | AITunnel tariff | **9.6** | Текущий primary: лучший баланс качества русского и JSON-структуры из проверенных live-кандидатов. |
+  | 2 | `deepseek-v4-flash` | AITunnel tariff | **9.1** | Текущий fallback для JSON, mood и структуры. |
+  | 3 | `qwen3-next-80b-a3b-instruct` | AITunnel tariff | **8.2** | Возможный быстрый fallback-кандидат для русского и структурного анализа. |
   | 5 | `qwen/qwen3.5-flash-02-23` | `$0.065 / $0.26` | **8.9** | Дешёвый классификатор: mood, psych, PANAS/OCEAN, короткий JSON. |
   | 6 | `deepseek/deepseek-v3.2` | `$0.252 / $0.378` | **8.7** | Сложная структурация, спорные концепты, fallback для `process_answer`. |
   | 7 | `qwen/qwen-plus-2025-07-28` | `$0.26 / $0.78` | **8.6** | Живая русская речь, вопросы, реакции. |

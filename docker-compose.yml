@@ -7,9 +7,10 @@ services:
       - .env
     environment:
       # Non-secret runtime route. Overrides stale model values in .env; secrets
-      # like OPENAI_API_KEY still live only in .env.
-      LLM_MODEL_DEFAULT: qwen/qwen3-235b-a22b-2507
-      LLM_MODEL_FALLBACKS: deepseek/deepseek-v4-flash
+      # like AITUNNEL_API_KEY still live only in .env.
+      AITUNNEL_BASE_URL: https://api.aitunnel.ru/v1
+      LLM_MODEL_DEFAULT: qwen3-235b-a22b-2507
+      LLM_MODEL_FALLBACKS: deepseek-v4-flash
     volumes:
       # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
       # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,

@@ -21,7 +21,7 @@ class LLMError(PsychoError):
 
     def __init__(self, message: str, *, user_message: str | None = None):
         super().__init__(message)
-        self.user_message = user_message or "Модели OpenRouter сейчас недоступны. Попробуй позже."
+        self.user_message = user_message or "Модели AITunnel сейчас недоступны. Попробуй позже."
 
 
 class VaultError(PsychoError):
