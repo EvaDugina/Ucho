@@ -9,6 +9,7 @@ from aiogram import Bot
 
 from .. import mood_file, moods, session, userctx, users, vault
 from ..config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
+from ..errors import LLMError
 from ..llm import ask_next
 from .session_messages import question_field_with_face, send_question
 
@@ -28,7 +29,7 @@ def daily_targets() -> list[int]:
     return sorted(targets)
 
 
-async def _send_next_question(bot: Bot, chat_id: int, domain: str | None = None) -> int:
+async def _send_next_question(bot: Bot, chat_id: int, domain: str | None = None) -> int | None:
     s = session.get()
     if s is None:
         s = session.start(mode="probe", domain=domain)
@@ -47,14 +48,18 @@ async def _send_next_question(bot: Bot, chat_id: int, domain: str | None = None)
     except Exception:
         log.exception("daily mood pick failed (non-fatal)")
 
-    result = await ask_next(
-        domain=domain,
-        context_concepts="",
-        recent_raw="",
-        hint=None,
-        bot_mood=bot_mood,
-        mode=s.mode,
-    )
+    try:
+        result = await ask_next(
+            domain=domain,
+            context_concepts="",
+            recent_raw="",
+            hint=None,
+            bot_mood=bot_mood,
+            mode=s.mode,
+        )
+    except LLMError:
+        log.warning("daily ask_next LLM error; user reply suppressed")
+        return None
     q_num = vault.next_q_num()
     session.set_question(question_field_with_face(result["question"], bot_mood), result["domain"], q_num=q_num)
     s.main_question = result["question"]
@@ -75,6 +80,8 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
         log.info("daily skipped: already sent today uid=%s", uid)
         return False
     session.start(mode="probe", domain=None)
-    await _send_next_question(bot, uid, domain=None)
+    q_num = await _send_next_question(bot, uid, domain=None)
+    if q_num is None:
+        return False
     vault.mark_daily_sent(DAILY_TZ)
     return True

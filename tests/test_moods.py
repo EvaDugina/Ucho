@@ -153,6 +153,11 @@ def test_record_mask_like_follows_curve_and_never_reaches_one(as_user):
     assert draft["coefficients"]["вера"] < 1.0
 
 
+def test_pebble_fallback_replies_cover_all_masks():
+    assert set(moods.PEBBLE_FALLBACK_REPLIES) == set(moods.BOT_MOODS)
+    assert all(moods.PEBBLE_FALLBACK_REPLIES[m].strip() for m in moods.BOT_MOODS)
+
+
 def test_mood_label_includes_dominance():
     mv = moods.session_mood(
         [{"sign": "-", "energy": "low", "dominance": "low", "quality": "грусть_тоска"}]

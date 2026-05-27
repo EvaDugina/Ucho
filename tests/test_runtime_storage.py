@@ -121,6 +121,56 @@ async def test_probe_does_not_call_llm_when_session_log_required_fails(as_user, 
 
 
 @pytest.mark.asyncio
+async def test_probe_llm_error_is_silent_to_user(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что важно?", "everyday", q_num=1)
+    message = _FakeMessage("ответ")
+
+    async def fail_process_probe_answer(*args, **kwargs):
+        raise LLMError("down")
+
+    monkeypatch.setattr(conversation_service, "process_probe_answer", fail_process_probe_answer)
+
+    await handlers._handle_probe_locked(message, "ответ")
+
+    assert message.answers == []
+
+
+@pytest.mark.asyncio
+async def test_pebble_llm_error_answers_generated_fallback(as_user, monkeypatch):
+    message = _FakeMessage("/pebble")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    async def fail_pebble_reply():
+        raise LLMError("down")
+
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(handlers, "pebble_reply", fail_pebble_reply)
+    monkeypatch.setattr(handlers.moods.random, "choice", lambda seq: seq[0])
+
+    await handlers.cmd_pebble(message)
+
+    assert [a["text"] for a in message.answers] == [
+        moods.PEBBLE_FALLBACK_REPLIES["раскачивание"]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ask_next_llm_error_is_silent_to_user(as_user, monkeypatch):
+    bot = _FakeBot()
+    session.start(mode="probe", domain="everyday")
+
+    async def fail_ask_next(**kwargs):
+        raise LLMError("down")
+
+    monkeypatch.setattr(handlers, "ask_next", fail_ask_next)
+
+    await handlers._send_next_question(bot, 123, domain="everyday")
+
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
 async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
     bot = _FakeBot()
     message = _FakeMessage("/ucho держи мысль", bot=bot)

@@ -169,9 +169,9 @@ def _format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str
     return conversation_service.format_mood(mv, bot_mood, vad)
 
 
-def _llm_user_message(exc: LLMError, fallback: str) -> str:
-    """Человекочитаемое сообщение о сбое LLM без технического traceback."""
-    return getattr(exc, "user_message", None) or fallback
+def _log_llm_silence(where: str) -> None:
+    """LLM unavailable: log internally, never tell the user."""
+    log.warning("%s LLM error; user reply suppressed", where)
 
 
 def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
@@ -862,9 +862,9 @@ async def cmd_pebble(message: Message) -> None:
         except Exception:
             pass
         text = await pebble_reply()
-    except LLMError as exc:
+    except LLMError:
         log.warning("pebble_reply LLM error")
-        text = _llm_user_message(exc, "Камень долетел, а голос — нет.")
+        text = moods.pebble_fallback_reply()
     finally:
         ratelimit.release(uid)
     await message.answer(safe_chat_html(text), parse_mode="HTML")
@@ -894,12 +894,11 @@ async def cmd_about(message: Message) -> None:
     thinking = await _start_thinking(message)
     try:
         text = await about_present(portrait)
-    except LLMError as exc:
-        # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
-        # не глушим: уходят в глобальный @dp.errors().
-        log.warning("about_present LLM error")
+    except LLMError:
+        # Ожидаемый сбой модели молчит наружу. Прочие исключения (баги) не
+        # глушим: уходят в глобальный @dp.errors().
+        _log_llm_silence("about_present")
         await _stop_thinking(thinking)
-        await message.answer(_llm_user_message(exc, "Не вышло собрать портрет словами. Попробуй позже."))
         return
     finally:
         ratelimit.release(uid)
@@ -1096,9 +1095,8 @@ async def cmd_regen(message: Message, command: CommandObject) -> None:
         except Exception:
             pass
         new_text = await regenerate_reaction(question, user_text, bot_mood=face, mode="probe")
-    except LLMError as exc:
-        log.warning("regenerate_reaction LLM error")
-        await message.answer(_llm_user_message(exc, "Не вышло перегенерировать. Попробуй позже."))
+    except LLMError:
+        _log_llm_silence("regenerate_reaction")
         return
     finally:
         ratelimit.release(uid)
@@ -1292,15 +1290,10 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             ),
             is_owner=_is_owner(message),
         )
-    except LLMError as exc:
-        # Ожидаемый сбой модели → нейтральная фраза, pending_answer остаётся —
-        # recovery дожмёт на следующем старте. Прочие исключения (баги) не
-        # глушим: уходят в глобальный @dp.errors().
-        log.warning("process_answer LLM error")
-        await message.answer(
-            _llm_user_message(exc, "Не получилось разобрать ответ.")
-            + " Ответ оставлен в очереди обработки; можно повторить позже или /start (смыв)."
-        )
+    except LLMError:
+        # Ожидаемый сбой модели молчит наружу; pending_answer остаётся, recovery
+        # дожмёт на следующем старте. Прочие исключения (баги) не глушим.
+        _log_llm_silence("process_answer")
         return
     if payload is None:
         return
@@ -1379,15 +1372,11 @@ async def _send_next_question(
             bot_mood=bot_mood,
             mode=s.mode,
         )
-    except LLMError as exc:
-        # Ожидаемый сбой модели → нейтральная фраза. Прочие исключения (баги)
-        # не глушим: уходят в глобальный @dp.errors().
-        log.warning("ask_next LLM error")
+    except LLMError:
+        # Ожидаемый сбой модели молчит наружу. Прочие исключения (баги) не
+        # глушим: уходят в глобальный @dp.errors().
+        _log_llm_silence("ask_next")
         await _stop_thinking(thinking)
-        await bot.send_message(
-            chat_id,
-            _llm_user_message(exc, "Не вышло сформулировать вопрос. Попробуй ещё раз."),
-        )
         session.clear()
         return
     await _stop_thinking(thinking)
