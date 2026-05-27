@@ -3,16 +3,7 @@ from __future__ import annotations
 import json
 
 from bot import face_actions, handlers, moods, session_log, userctx
-
-
-def test_face_keyboard_contains_only_regen_and_favorite(as_user):
-    kb = handlers._face_keyboard("tok123")
-    buttons = [b for row in kb.inline_keyboard for b in row]
-    texts = [b.text for b in buttons]
-    callbacks = [b.callback_data for b in buttons]
-
-    assert texts == ["♻ пɆ₱ɆгɆнɆ₱и₱Øв₳₮ь", "✍в избᎮᏗннᎧᏋ"]
-    assert callbacks == ["face:rg:tok123", "face:like:tok123"]
+from bot.services import session_messages
 
 
 def test_remask_keyboard_contains_only_face_choices(as_user):
@@ -24,6 +15,14 @@ def test_remask_keyboard_contains_only_face_choices(as_user):
     assert texts == list(moods.BOT_MOODS)
     assert callbacks[0] == "face:rm:tok123:0"
     assert all(cb.startswith("face:rm:tok123:") for cb in callbacks)
+
+
+def test_mask_postscript_is_italic_for_comments_but_not_questions(as_user):
+    rendered = session_messages.with_face_signature("Я здесь.", "сомнение")
+
+    assert rendered == "Я здесь.\n\n<i>Не верю ни единому слову.</i>"
+    assert "лицо Иуды" not in rendered
+    assert "<i>Не верю" not in session_messages.format_q(1, "probe", "everyday", "Что болит?")
 
 
 def test_face_action_feedback_and_liked_state(as_user):
@@ -83,14 +82,9 @@ def test_face_action_feedback_and_liked_state(as_user):
     assert rec["assistant_event_id"] == assistant_event["event_id"]
     assert face_actions.hydrate_action(rec)["assistant_text"] == "Я здесь."
 
-    assert face_actions.record_user_score(token, -0.5, "regenerate", at="2026-05-25T10:02:00")
-    feedback = userctx.user_root() / "01_mood" / "feedback.jsonl"
-    score_entry = json.loads(feedback.read_text(encoding="utf-8").splitlines()[0])
-    assert score_entry["score"] == -0.5
-    assert score_entry["reason"] == "regenerate"
-
     assert face_actions.set_liked(token, liked=True, at="2026-05-25T10:03:00") is True
     assert face_actions.record_user_score(token, 1.0, "favorite", at="2026-05-25T10:03:00")
+    feedback = userctx.user_root() / "01_mood" / "feedback.jsonl"
     state = json.loads((userctx.user_root() / "03_personality" / "liked_replies.json").read_text(encoding="utf-8"))
     liked = state[token]
     assert liked["liked"] is True
@@ -107,7 +101,7 @@ def test_face_action_feedback_and_liked_state(as_user):
     assert len(log_lines) == 1
     assert json.loads(log_lines[-1])["liked"] is True
     score_lines = feedback.read_text(encoding="utf-8").splitlines()
-    assert len(score_lines) == 2
+    assert len(score_lines) == 1
     assert json.loads(score_lines[-1])["score"] == 1.0
     assert json.loads(score_lines[-1])["reason"] == "favorite"
 
@@ -137,7 +131,8 @@ def test_remask_action_uses_refs_and_updates_bot_mood(as_user):
 
     found = session_log.find_question_by_message_id(333)
     assert found["bot_mood"] == "насмешка"
-    assert found["text"].endswith("лицо Иуды: насмешка")
+    assert found["text"] == "Что ты прячешь?"
+    assert "лицо Иуды" not in found["text"]
 
     assert face_actions.set_bot_mood(token, "насмешка")
     assert face_actions.get_action(token)["bot_mood"] == "насмешка"
@@ -149,7 +144,21 @@ def test_opposite_bot_mood_uses_different_cluster(as_user):
 
     assert soft_targets
     assert hard_targets
-    assert soft_targets <= {"ласка", "любовь", "вера", "вселение_уверенности", "смирение", "клятва"}
+    assert soft_targets <= {
+        "ласка",
+        "любовь",
+        "вера",
+        "вселение_уверенности",
+        "смирение",
+        "клятва",
+        "покорность",
+        "жалостливость",
+        "боязливость",
+        "доброта",
+        "милость",
+        "забота",
+        "бережность",
+    }
     assert hard_targets <= {
         "раскачивание",
         "насмешка",

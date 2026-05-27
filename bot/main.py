@@ -26,6 +26,9 @@ BOT_COMMANDS = [
     BotCommand(command="requestion", description="Повторить выбранный вопрос N"),
     BotCommand(command="about", description="Каким я тебя вижу"),
     BotCommand(command="history", description="Последние вопросы"),
+    BotCommand(command="regen", description="Перегенерировать reply-комментарий"),
+    BotCommand(command="like", description="Отметить reply-реплику Иуды"),
+    BotCommand(command="remask", description="Выбрать маску reply-реплики"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Кнопка смыва"),
 ]
@@ -36,8 +39,6 @@ ADMIN_COMMANDS = [
     BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
     BotCommand(command="users", description="Список доверенных"),
     BotCommand(command="dailyall", description="Разослать дневной вопрос всем сейчас"),
-    BotCommand(command="like", description="Отметить reply-реплику Иуды"),
-    BotCommand(command="remask", description="Сменить лицо reply-вопросу или комментарию"),
 ]
 
 

@@ -340,14 +340,7 @@ def question_field_text(event: dict | None) -> str:
     """
     if not isinstance(event, dict):
         return ""
-    text = str(event.get("text") or "")
-    bot_mood = str(event.get("bot_mood") or "").strip()
-    if not bot_mood:
-        return text
-    marker = f"лицо Иуды: {bot_mood}"
-    if marker in text:
-        return text
-    return f"{text}\n\n{marker}"
+    return str(event.get("text") or "")
 
 
 def _is_answered(q_num: object) -> bool:

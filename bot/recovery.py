@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import logging
+import random
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
-from . import ratelimit, session, userctx, users, vault
+from . import moods, ratelimit, session, session_log, userctx, users, vault
 from .config import DOMAINS
 from .errors import LLMError
 from .llm import process_answer
@@ -49,6 +50,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         return
     q_num = s.current_q_num or vault.next_q_num()
     question = s.last_question or s.main_question or ""
+    pending_event_id = s.pending_answer_event_id
 
     vault.append_log(
         "warn",
@@ -70,6 +72,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     if not s.history or s.history[-1].get("role") != "user" or s.history[-1].get("content") != text:
         s.record_user(text)
     session_context = s.render_transcript()
+    bot_mood = random.choice(moods.BOT_MOODS)
 
     try:
         result = await process_answer(
@@ -77,6 +80,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             answer=text,
             domain_hint=real_hint,
             context_concepts=context_concepts,
+            bot_mood=bot_mood,
             session_context=session_context,
             mode=s.mode,
         )
@@ -120,12 +124,27 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
     new_n = vault.next_q_num()
     next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(session_messages.question_field_with_face(reaction, None), next_domain, q_num=new_n)
+    session.set_question(session_messages.question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
     session.persist()
     try:
+        user_event = session_log.find_event(pending_event_id)
         await session_messages.send_question(
             bot, uid,
             q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
+            bot_mood=bot_mood,
+            admin_controls=bool(bot_mood),
+            action_context={
+                "session_id": s.id,
+                "answered_q_num": q_num,
+                "kind": "reaction",
+                "user_text": text,
+                "question": question,
+                "session_context": session_context,
+                "reply_to_user_message_id": (
+                    user_event.get("telegram_message_id", user_event.get("message_id"))
+                    if user_event else None
+                ),
+            },
         )
     except Exception:
         log.exception("recovery: failed to send reaction")
@@ -192,13 +211,6 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
     if not combined:
         return
     carrier = msgs[-1]  # реальный Message (с привязанным ботом) — для answer/typing
-    try:
-        await bot.send_message(
-            uid, f"Пока меня не было, ты прислал {len(msgs)} сообщ. — отвечаю разом."
-        )
-    except Exception:
-        log.exception("offline backlog: notify failed for uid=%s", uid)
-
     s = session.get()
     if s is not None and s.mode == "probe" and s.last_question:
         if not ratelimit.try_acquire(uid):
@@ -230,7 +242,7 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
                     text=payload.text,
                     plain=True,
                     bot_mood=payload.bot_mood,
-                    admin_controls=users.is_owner(uid) and bool(payload.bot_mood),
+                    admin_controls=bool(payload.bot_mood),
                     action_context={
                         "session_id": payload.session_id,
                         "answered_q_num": payload.answered_q_num,
@@ -238,7 +250,9 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
                         "user_text": payload.user_text,
                         "question": payload.answered_question,
                         "session_context": payload.session_context,
-                        "reply_to_user_message_id": payload.reply_to_user_message_id,
+                        "reply_to_user_message_id": (
+                            payload.reply_to_user_message_id or getattr(carrier, "message_id", None)
+                        ),
                     },
                 )
             vault.commit_all("offline batch")
@@ -275,6 +289,16 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
                     text=payload.text,
                     plain=True,
                     bot_mood=payload.bot_mood,
+                    admin_controls=bool(payload.bot_mood),
+                    action_context={
+                        "session_id": payload.session_id,
+                        "answered_q_num": payload.answered_q_num,
+                        "kind": "reaction",
+                        "user_text": payload.user_text,
+                        "question": payload.answered_question,
+                        "session_context": payload.session_context,
+                        "reply_to_user_message_id": payload.reply_to_user_message_id,
+                    },
                 )
         finally:
             ratelimit.release(uid)

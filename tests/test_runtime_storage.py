@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import handlers, qmap, questions, session, session_log, sessions, userctx
+from bot import face_actions, handlers, moods, qmap, questions, session, session_log, sessions, userctx
 from bot.errors import LLMError, VaultError
 from bot.services import conversation_service, note_service
 
@@ -124,8 +124,10 @@ async def test_probe_does_not_call_llm_when_session_log_required_fails(as_user, 
 async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
     bot = _FakeBot()
     message = _FakeMessage("/ucho держи мысль", bot=bot)
+    captured = {}
 
     async def fake_process_answer(**kwargs):
+        captured.update(kwargs)
         return {"observations": [], "reaction": "Вот теперь слышу трещину.", "user_delta": {}}
 
     monkeypatch.setattr(note_service, "process_answer", fake_process_answer)
@@ -137,6 +139,13 @@ async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
     assert "держи мысль" in note_text
     assert bot.sent
     assert "Вот теперь слышу трещину." in bot.sent[-1]["text"]
+    assert "<i>" in bot.sent[-1]["text"]
+    assert "лицо Иуды" not in bot.sent[-1]["text"]
+    assert "reply_markup" not in bot.sent[-1]["kwargs"]
+    rec = face_actions.find_by_message_id(bot.sent[-1]["message"].message_id)
+    assert rec is not None
+    assert rec["kind"] == "reaction"
+    assert captured["bot_mood"] in moods.BOT_MOODS
     assert "Заметка сохранена" not in bot.sent[-1]["text"]
     assert "+0" not in bot.sent[-1]["text"]
     assert message.answers == []

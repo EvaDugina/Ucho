@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime
 
-from .. import session, vault
+from .. import moods, session, vault
 from ..config import DOMAINS
 from ..errors import LLMError
 from ..llm import process_answer
@@ -23,6 +24,12 @@ class NoteReactionPayload:
     domain: str
     text: str
     bot_mood: str | None = None
+    answered_q_num: int | None = None
+    answered_question: str = "(свободная заметка)"
+    session_id: str | None = None
+    user_text: str = ""
+    session_context: str = ""
+    reply_to_user_message_id: int | None = None
 
 
 async def ingest_note(clean: str, *, at: datetime | None = None) -> NoteReactionPayload | None:
@@ -49,12 +56,14 @@ async def ingest_note(clean: str, *, at: datetime | None = None) -> NoteReaction
 
     q_num = vault.next_q_num()
     note_question = "(свободная заметка)"
+    bot_mood = random.choice(moods.BOT_MOODS)
     try:
         result = await process_answer(
             question=note_question,
             answer=clean,
             domain_hint=None,
             context_concepts=context_for_domain(None),
+            bot_mood=bot_mood,
             session_context=session_context,
             mode="probe",
         )
@@ -72,11 +81,24 @@ async def ingest_note(clean: str, *, at: datetime | None = None) -> NoteReaction
     new_n = vault.next_q_num()
     next_domain = "everyday"
     if s is not None:
-        session.set_question(question_field_with_face(reaction, None), next_domain, q_num=new_n)
+        session.set_question(question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
         session.persist()
         mode = s.mode
+        session_id = s.id
     else:
         mode = "probe"
+        session_id = None
     if next_domain not in DOMAINS:
         next_domain = "everyday"
-    return NoteReactionPayload(q_num=new_n, mode=mode, domain=next_domain, text=reaction)
+    return NoteReactionPayload(
+        q_num=new_n,
+        mode=mode,
+        domain=next_domain,
+        text=reaction,
+        bot_mood=bot_mood,
+        answered_q_num=q_num,
+        answered_question=note_question,
+        session_id=session_id,
+        user_text=clean,
+        session_context=session_context,
+    )

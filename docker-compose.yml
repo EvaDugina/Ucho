@@ -11,6 +11,7 @@ services:
       AITUNNEL_BASE_URL: https://api.aitunnel.ru/v1
       LLM_MODEL_DEFAULT: qwen3-235b-a22b-2507
       LLM_MODEL_FALLBACKS: deepseek-v4-flash
+      LLM_MODEL_FAST: deepseek-v4-flash
     volumes:
       # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
       # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,

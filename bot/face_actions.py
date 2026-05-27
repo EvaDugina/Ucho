@@ -275,7 +275,6 @@ def hydrate_action(rec: dict | None) -> dict:
 def record_user_score(token: str, score: float, reason: str, at: object | None = None) -> bool:
     """Записать явную оценку ответа владельцем.
 
-    `-0.5` = нажал перегенерацию, ответ сильно не понравился.
     `1.0` = отправил в избранное, ответ понравился.
     """
     rec = get_action(token)

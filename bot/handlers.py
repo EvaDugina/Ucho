@@ -29,7 +29,7 @@ from . import (
 )
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError
-from .llm import about_present, ask_next, regenerate_reaction
+from .llm import about_present, ask_next, pebble_reply, regenerate_reaction
 from .services import conversation_service, daily_service, note_service, session_messages
 from .validation import (
     MAX_USER_TEXT,
@@ -121,14 +121,6 @@ def _ask_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _face_keyboard(token: str) -> InlineKeyboardMarkup:
-    """Админская клавиатура под ответом: только перегенерация и избранное."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="♻ пɆ₱ɆгɆнɆ₱и₱Øв₳₮ь", callback_data=f"face:rg:{token}"),
-        InlineKeyboardButton(text="✍в избᎮᏗннᎧᏋ", callback_data=f"face:like:{token}"),
-    ]])
-
-
 def _remask_keyboard(token: str) -> InlineKeyboardMarkup:
     """Админская клавиатура выбора лица для уже отправленного bot-сообщения."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -148,7 +140,7 @@ def _with_face_signature(text: str, bot_mood: str | None) -> str:
 
 
 def _question_field_with_face(text: str, bot_mood: str | None) -> str:
-    """Plain-text question field для LLM/raw: текст + выбранная маска без HTML."""
+    """Plain-text question field для LLM/raw. Маска хранится только metadata."""
     return session_messages.question_field_with_face(text, bot_mood)
 
 
@@ -390,6 +382,62 @@ def _context_for_domain(domain: str | None) -> str:
     return conversation_service.context_for_domain(domain)
 
 
+def _record_command_event(message: Message) -> None:
+    s = session.get()
+    if s is None:
+        return
+    session_log.append(
+        session_id=s.id,
+        role="user",
+        kind="command",
+        text=message.text or "",
+        at=getattr(message, "date", None),
+        message_id=getattr(message, "message_id", None),
+        reply_to_message_id=(
+            message.reply_to_message.message_id if message.reply_to_message is not None else None
+        ),
+        q_num=s.current_q_num,
+        domain=s.last_domain,
+    )
+
+
+def _parse_face_arg(raw: str | None) -> str | None:
+    value = (raw or "").strip().lower().replace(" ", "_")
+    return value if value in moods.BOT_MOODS else None
+
+
+def _ensure_action_for_reply_message(message_id: int | None) -> dict | None:
+    rec = face_actions.find_by_message_id(message_id)
+    if rec is not None:
+        return rec
+    event = session_log.find_event_by_message_id(message_id, role="assistant")
+    if not event or event.get("kind") not in {"reaction", "regen"}:
+        return None
+    sid = event.get("session_id")
+    reply_mid = event.get("reply_to_message_id")
+    user_event = session_log.find_event_by_message_id(reply_mid, session_id=sid, role="user")
+    answered_q_num = user_event.get("q_num") if user_event else event.get("q_num")
+    question_event = session_log.find_question_event_by_q_num(answered_q_num, session_id=sid)
+    token = face_actions.create_action(
+        session_id=sid,
+        q_num=event.get("q_num"),
+        answered_q_num=answered_q_num,
+        kind=str(event.get("kind") or "reaction"),
+        bot_mood=event.get("bot_mood") or "раскачивание",
+        assistant_text=str(event.get("text") or ""),
+        user_text=str(user_event.get("text") or "") if user_event else "",
+        question=str(question_event.get("text") or "") if question_event else "",
+        session_context="",
+        reply_to_user_message_id=reply_mid,
+    )
+    face_actions.set_message(
+        token,
+        event.get("telegram_message_id", event.get("message_id")),
+        at=event.get("ts"),
+    )
+    return face_actions.get_action(token)
+
+
 # ---------- commands ----------
 
 
@@ -411,17 +459,22 @@ _HELP_BODY = (
     "<b>/history</b> — последние вопросы"
 )
 
+_HELP_FACE = (
+    "<b>Реплики Иуды</b>\n"
+    "<b>/regen</b> <i>[маска]</i> — reply на комментарий: новая реплика в другой маске\n"
+    "<b>/like</b> — reply на комментарий: добавить в избранное\n"
+    "<b>/remask</b> — reply на вопрос или комментарий: выбрать маску"
+)
+
 _HELP_ADMIN = (
     "<b>Админ</b>\n"
     "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
     "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
     "<b>/users</b> — список доверенных\n"
-    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас\n"
-    "<b>/like</b> — отметить reply-реплику Иуды\n"
-    "<b>/remask</b> — сменить лицо reply-вопросу или комментарию Иуды"
+    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас"
 )
 
-_HELP_PEBBLE = "<b>/pebble</b> — бросить камень → «буль.»"
+_HELP_PEBBLE = "<b>/pebble</b> — бросить камень → короткая реплика"
 
 _HELP_FOOTER = (
     f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
@@ -452,6 +505,7 @@ async def cmd_help(message: Message) -> None:
     if not _is_allowed(message):
         return
     parts = [_HELP_BODY]
+    parts.append(_HELP_FACE)
     if _is_owner(message):
         parts.append(_HELP_ADMIN)  # после основных групп
     parts.append(_HELP_PEBBLE)     # /pebble — отдельной группой, после админских
@@ -615,8 +669,8 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("face:"))
 async def cb_face_action(callback: CallbackQuery) -> None:
-    """Админские кнопки ответа: регенерация и избранное только для реакций."""
-    if not users.is_owner(callback.from_user.id):
+    """Callback-меню выбора лица из /remask. Старые кнопки ответа не действуют."""
+    if not users.is_allowed(callback.from_user.id):
         await callback.answer()
         return
     userctx.set_user(callback.from_user.id)
@@ -650,17 +704,12 @@ async def cb_face_action(callback: CallbackQuery) -> None:
             return
 
         edited = False
-        parent_token = rec.get("parent_token")
-        target_markup = None
-        if parent_token:
-            target_markup = _face_keyboard(parent_token)
         try:
             await callback.bot.edit_message_text(
                 chat_id=callback.message.chat.id if callback.message else callback.from_user.id,
                 message_id=int(rec.get("message_id")),
                 text=_render_event_with_face(event, face),
                 parse_mode="HTML",
-                reply_markup=target_markup,
             )
             edited = True
         except Exception:
@@ -668,6 +717,7 @@ async def cb_face_action(callback: CallbackQuery) -> None:
 
         session_log.set_event_bot_mood(rec.get("assistant_event_id"), face)
         face_actions.set_bot_mood(token, face)
+        parent_token = rec.get("parent_token")
         if parent_token:
             face_actions.set_bot_mood(parent_token, face)
 
@@ -691,104 +741,13 @@ async def cb_face_action(callback: CallbackQuery) -> None:
         return
 
     if action == "like":
-        if not face_actions.is_rateable(rec):
-            await callback.answer("Вопросы не оцениваю.", show_alert=True)
-            return
-        liked = face_actions.set_liked(token, liked=True)
-        if liked is None:
-            await callback.answer("Не нашёл реплику Иуды для отметки", show_alert=True)
-            return
-        face_actions.record_user_score(token, 1.0, "favorite")
-        try:
-            if callback.message:
-                await callback.message.edit_reply_markup(reply_markup=_face_keyboard(token))
-        except Exception:
-            log.exception("failed to update like keyboard")
-        vault.commit_all("liked reply")
-        await callback.answer("В избранном.")
+        await callback.answer("Теперь добавляй reply-командой /like.", show_alert=True)
         return
 
     if action != "rg":
         await callback.answer("Неизвестное действие", show_alert=True)
         return
-    if not face_actions.is_rateable(rec):
-        await callback.answer("Вопросы не перегенерирую.", show_alert=True)
-        return
-    face = moods.opposite_bot_mood(
-        rec.get("bot_mood"),
-        exclude=face_actions.used_bot_moods(token),
-    )
-    if face is None:
-        await callback.answer("Все маски для этой реплики уже исчерпаны.", show_alert=True)
-        return
-    uid = userctx.current_uid()
-    if not ratelimit.try_acquire(uid):
-        await callback.answer()
-        await callback.bot.send_message(callback.from_user.id, ratelimit.BUSY_MESSAGE)
-        return
-    try:
-        face_actions.record_user_score(token, -0.5, "regenerate")
-        try:
-            action_texts = face_actions.hydrate_action(rec)
-            new_text = await regenerate_reaction(
-                action_texts.get("question") or "",
-                action_texts.get("user_text") or "",
-                bot_mood=face,
-                session_context=action_texts.get("session_context") or "",
-            )
-        except LLMError as exc:
-            await callback.answer(_llm_user_message(exc, "Не получилось перегенерировать."), show_alert=True)
-            return
-        if not new_text:
-            new_text = "Складно. Слишком складно."
-        new_token = face_actions.create_action(
-            session_id=rec.get("session_id"),
-            q_num=rec.get("q_num"),
-            answered_q_num=rec.get("answered_q_num"),
-            kind="regen",
-            bot_mood=face,
-            assistant_text=new_text,
-            user_text=action_texts.get("user_text") or "",
-            question=action_texts.get("question") or "",
-            session_context=action_texts.get("session_context") or "",
-            reply_to_user_message_id=rec.get("reply_to_user_message_id"),
-            parent_token=token,
-        )
-        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
-        sent = await callback.bot.send_message(
-            chat_id,
-            _with_face_signature(new_text, face),
-            parse_mode="HTML",
-            reply_to_message_id=rec.get("message_id"),
-            reply_markup=_face_keyboard(new_token),
-        )
-        s = session.get()
-        log_session_id = s.id if s is not None else rec.get("session_id")
-        log_domain = s.last_domain if s is not None else rec.get("domain")
-        if s is not None:
-            try:
-                s.add_message_id(sent.message_id)
-                s.record_assistant(new_text, at=getattr(sent, "date", None))
-            except Exception:
-                log.exception("failed to record regen in session")
-        if log_session_id:
-            session_log.append(
-                session_id=log_session_id,
-                role="assistant",
-                kind="regen",
-                text=new_text,
-                at=getattr(sent, "date", None),
-                message_id=getattr(sent, "message_id", None),
-                reply_to_message_id=rec.get("message_id"),
-                q_num=rec.get("q_num"),
-                domain=log_domain,
-                bot_mood=face,
-            )
-        face_actions.set_message(new_token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
-        vault.commit_all("face regen")
-        await callback.answer("Перегенерировал.")
-    finally:
-        ratelimit.release(uid)
+    await callback.answer("Теперь перегенерируй reply-командой /regen.", show_alert=True)
 
 
 @router.message(Command("history"))
@@ -888,12 +847,27 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
-    """Бросить камень: бот жив → «буль.». Прозрачен для сессии — НЕ открывает и
+    """Бросить камень: короткая fast-реплика. Прозрачен для сессии — НЕ открывает и
     НЕ закрывает её (исключён из close-on-command в AccessMiddleware), чтобы можно
     было проверить бота, пока ждёшь реакцию, и эта реакция не оборвалась."""
     if not _is_allowed(message):
         return
-    await message.answer("буль.")
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        try:
+            await message.bot.send_chat_action(message.chat.id, "typing")
+        except Exception:
+            pass
+        text = await pebble_reply()
+    except LLMError as exc:
+        log.warning("pebble_reply LLM error")
+        text = _llm_user_message(exc, "Камень долетел, а голос — нет.")
+    finally:
+        ratelimit.release(uid)
+    await message.answer(safe_chat_html(text), parse_mode="HTML")
 
 
 @router.message(Command("about"))
@@ -972,6 +946,19 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
     try:
         session.start(mode="probe", domain=None)
         _anchor_user_cmd(message)
+        if (message.text or "").lstrip().startswith("/"):
+            s = session.get()
+            if s is not None:
+                session_log.append(
+                    session_id=s.id,
+                    role="user",
+                    kind="note",
+                    text=clean,
+                    at=getattr(message, "date", None),
+                    message_id=getattr(message, "message_id", None),
+                    q_num=s.current_q_num,
+                    domain=s.last_domain,
+                )
         try:
             payload = await note_service.ingest_note(clean, at=getattr(message, "date", None))
         except Exception:
@@ -984,6 +971,18 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
             message.bot, message.chat.id,
             q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
             bot_mood=payload.bot_mood,
+            admin_controls=bool(payload.bot_mood),
+            action_context={
+                "session_id": payload.session_id,
+                "answered_q_num": payload.answered_q_num,
+                "kind": "reaction",
+                "user_text": payload.user_text,
+                "question": payload.answered_question,
+                "session_context": payload.session_context,
+                "reply_to_user_message_id": (
+                    payload.reply_to_user_message_id or getattr(message, "message_id", None)
+                ),
+            },
         )
     finally:
         ratelimit.release(uid)
@@ -1010,27 +1009,13 @@ async def cmd_ucho(message: Message, command: CommandObject) -> None:
 @router.message(Command("like"))
 async def cmd_like(message: Message) -> None:
     """Отметить reply-реплику Иуды как понравившуюся."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
-    s = session.get()
-    if s is not None:
-        session_log.append(
-            session_id=s.id,
-            role="user",
-            kind="command",
-            text=message.text or "",
-            at=getattr(message, "date", None),
-            message_id=getattr(message, "message_id", None),
-            reply_to_message_id=(
-                message.reply_to_message.message_id if message.reply_to_message is not None else None
-            ),
-            q_num=s.current_q_num,
-            domain=s.last_domain,
-        )
+    _record_command_event(message)
     if message.reply_to_message is None:
         await message.answer("Ответь командой /like на реплику Иуды.")
         return
-    rec = face_actions.find_by_message_id(message.reply_to_message.message_id)
+    rec = _ensure_action_for_reply_message(message.reply_to_message.message_id)
     if rec is None:
         event = session_log.find_event_by_message_id(
             message.reply_to_message.message_id,
@@ -1054,26 +1039,116 @@ async def cmd_like(message: Message) -> None:
     await message.answer("В избранном.")
 
 
+@router.message(Command("regen"))
+async def cmd_regen(message: Message, command: CommandObject) -> None:
+    """Reply-команда: перегенерировать комментарий Иуды новой маской."""
+    if not _is_allowed(message):
+        return
+    _record_command_event(message)
+    if message.reply_to_message is None:
+        await message.answer("Ответь командой /regen на комментарий Иуды.")
+        return
+    rec = _ensure_action_for_reply_message(message.reply_to_message.message_id)
+    if rec is None or not face_actions.is_rateable(rec):
+        event = session_log.find_event_by_message_id(
+            message.reply_to_message.message_id,
+            role="assistant",
+        )
+        if event and event.get("kind") == "question":
+            await message.answer("Вопросы не перегенерирую.")
+            return
+        await message.answer("Не нашёл комментарий Иуды для перегенерации.")
+        return
+
+    token = rec.get("token")
+    used = face_actions.used_bot_moods(token)
+    requested_face = _parse_face_arg(command.args)
+    if command.args and requested_face is None:
+        await message.answer(
+            "Не знаю такую маску. Доступные: " + ", ".join(moods.BOT_MOODS)
+        )
+        return
+    if requested_face and requested_face in used:
+        await message.answer("Эта маска уже была в этой цепочке.")
+        return
+    face = requested_face or moods.opposite_bot_mood(rec.get("bot_mood"), exclude=used)
+    if face is None:
+        await message.answer("Все маски этой цепочки уже использованы.")
+        return
+
+    hydrated = face_actions.hydrate_action(rec)
+    question = hydrated.get("question") or ""
+    user_text = hydrated.get("user_text") or ""
+    if not user_text:
+        await message.answer("Не нашёл исходный ответ человека для перегенерации.")
+        return
+
+    uid = userctx.current_uid()
+    if not ratelimit.try_acquire(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    try:
+        try:
+            await message.bot.send_chat_action(message.chat.id, "typing")
+        except Exception:
+            pass
+        new_text = await regenerate_reaction(question, user_text, bot_mood=face, mode="probe")
+    except LLMError as exc:
+        log.warning("regenerate_reaction LLM error")
+        await message.answer(_llm_user_message(exc, "Не вышло перегенерировать. Попробуй позже."))
+        return
+    finally:
+        ratelimit.release(uid)
+
+    session_id = rec.get("session_id") or session_log.find_session_by_message_id(
+        message.reply_to_message.message_id
+    )
+    if not session_id:
+        await message.answer("Не нашёл session-log этой реплики.")
+        return
+
+    parent_token = str(token)
+    new_token = face_actions.create_action(
+        session_id=session_id,
+        q_num=rec.get("q_num"),
+        answered_q_num=rec.get("answered_q_num"),
+        kind="regen",
+        bot_mood=face,
+        assistant_text=new_text,
+        user_text=user_text,
+        question=question,
+        session_context="",
+        reply_to_user_message_id=rec.get("reply_to_user_message_id"),
+        parent_token=parent_token,
+        at=getattr(message, "date", None),
+    )
+    sent = await message.answer(
+        _with_face_signature(new_text, face),
+        parse_mode="HTML",
+        reply_to_message_id=message.reply_to_message.message_id,
+    )
+    session_log.append_required(
+        session_id=session_id,
+        role="assistant",
+        kind="regen",
+        text=new_text,
+        at=getattr(sent, "date", None),
+        message_id=getattr(sent, "message_id", None),
+        reply_to_message_id=message.reply_to_message.message_id,
+        q_num=rec.get("q_num"),
+        domain=rec.get("domain"),
+        bot_mood=face,
+    )
+    face_actions.set_message(new_token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
+    vault.commit_all("regen reply")
+
+
 @router.message(Command("remask"))
 async def cmd_remask(message: Message) -> None:
     """Открыть меню выбора лица для reply-вопроса или reply-комментария Иуды."""
-    if not _is_owner(message):
+    if not _is_allowed(message):
         return
-    s = session.get()
-    if s is not None:
-        session_log.append(
-            session_id=s.id,
-            role="user",
-            kind="command",
-            text=message.text or "",
-            at=getattr(message, "date", None),
-            message_id=getattr(message, "message_id", None),
-            reply_to_message_id=(
-                message.reply_to_message.message_id if message.reply_to_message is not None else None
-            ),
-            q_num=s.current_q_num,
-            domain=s.last_domain,
-        )
+    _record_command_event(message)
     if message.reply_to_message is None:
         await message.answer("Ответь командой /remask на вопрос или комментарий Иуды.")
         return
@@ -1232,7 +1307,7 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
         message.bot, message.chat.id,
         q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
         bot_mood=payload.bot_mood,
-        admin_controls=_is_owner(message) and bool(payload.bot_mood),
+        admin_controls=bool(payload.bot_mood),
         action_context={
             "session_id": payload.session_id,
             "answered_q_num": payload.answered_q_num,

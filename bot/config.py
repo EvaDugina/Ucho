@@ -9,6 +9,7 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 _AITUNNEL_BASE_URL = "https://api.aitunnel.ru/v1"
 _AITUNNEL_PRIMARY_MODEL = "qwen3-235b-a22b-2507"
+_AITUNNEL_FAST_MODEL = "deepseek-v4-flash"
 _AITUNNEL_FALLBACK_MODELS = ("deepseek-v4-flash",)
 
 
@@ -64,6 +65,7 @@ LLM_MODEL_PSYCH = _model_from_env(os.getenv("LLM_MODEL_PSYCH"), LLM_MODEL_DEFAUL
 LLM_MODEL_ASK = _model_from_env(os.getenv("LLM_MODEL_ASK"), LLM_MODEL_DEFAULT)
 LLM_MODEL_ABOUT = _model_from_env(os.getenv("LLM_MODEL_ABOUT"), LLM_MODEL_DEFAULT)
 LLM_MODEL_REACTION = _model_from_env(os.getenv("LLM_MODEL_REACTION"), LLM_MODEL_DEFAULT)
+LLM_MODEL_FAST = _model_from_env(os.getenv("LLM_MODEL_FAST"), _AITUNNEL_FAST_MODEL)
 
 LLM_FALLBACK_PROCESS = _parse_model_list(os.getenv("LLM_FALLBACK_PROCESS"), LLM_MODEL_FALLBACKS)
 LLM_FALLBACK_MOOD = _parse_model_list(os.getenv("LLM_FALLBACK_MOOD"), LLM_MODEL_FALLBACKS)
@@ -71,6 +73,7 @@ LLM_FALLBACK_PSYCH = _parse_model_list(os.getenv("LLM_FALLBACK_PSYCH"), LLM_MODE
 LLM_FALLBACK_ASK = _parse_model_list(os.getenv("LLM_FALLBACK_ASK"), LLM_MODEL_FALLBACKS)
 LLM_FALLBACK_ABOUT = _parse_model_list(os.getenv("LLM_FALLBACK_ABOUT"), LLM_MODEL_FALLBACKS)
 LLM_FALLBACK_REACTION = _parse_model_list(os.getenv("LLM_FALLBACK_REACTION"), LLM_MODEL_FALLBACKS)
+LLM_FALLBACK_FAST = _parse_model_list(os.getenv("LLM_FALLBACK_FAST"), ())
 
 # Таймаут одного LLM-вызова (сек). Без него openai-sdk ждёт ~600 c — при
 # зависшем/недоступном AITunnel бот висел бы минутами. По истечении —

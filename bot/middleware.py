@@ -5,6 +5,8 @@ callback. На КАЖДЫЙ update: проверяем whitelist (не в спи
 ставим ``userctx`` (per-user маршрутизация данных), один раз показываем
 disclaimer о приватности новым гостям и закрываем активную сессию-обсуждение на
 любой команде (кроме ``/pebble``).
+команды reply-действий (``/like``, ``/regen``, ``/remask``) тоже не закрывают
+обсуждение.
 """
 from __future__ import annotations
 
@@ -87,11 +89,10 @@ class AccessMiddleware(BaseMiddleware):
         # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
         # её можно продолжить reply на любое её сообщение). Команды-открыватели
         # (/ask, /echo, /requestion, /about) затем заведут новую.
-        # ИСКЛЮЧЕНИЯ: /pebble — проверка живости; /like и /remask — админские
+        # ИСКЛЮЧЕНИЯ: /pebble — проверка живости; /like, /regen и /remask —
         # действия над reply-сообщением, они не должны закрывать текущую сессию.
-        # на уже отправленную реплику, не должна прерывать обсуждение.
         if isinstance(event, Message) and (event.text or "").startswith("/"):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
-            if cmd not in {"pebble", "like", "remask"} and session.close():
+            if cmd not in {"pebble", "like", "regen", "remask"} and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)

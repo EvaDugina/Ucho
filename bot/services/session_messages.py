@@ -33,21 +33,49 @@ TG_MSG_LIMIT = 4000
 USER_DOMAIN = "user"
 USER_DOMAIN_LABEL = "пользовательский"
 
+_FACE_POSTSCRIPTS = {
+    "раскачивание": "Я трясу эту клетку, пока она не признается, что жива.",
+    "насмешка": "Я смеюсь, потому что слишком ясно вижу шов.",
+    "подшучивание": "Я поддеваю легко, но целюсь точно.",
+    "давление_на_больное": "Я давлю туда, где ты берег боль как святыню.",
+    "унижение": "Я опускаю голос ниже, чтобы ты услышал землю.",
+    "перевирание": "Я криво повторяю твои слова, чтобы выдать их горб.",
+    "сомнение": "Не верю ни единому слову.",
+    "холодная_отстранённость": "Я стою в стороне и не грею ложь дыханием.",
+    "ласка": "Я глажу осторожно, но не обещаю не задеть рану.",
+    "любовь": "Я люблю тебя так, что не даю тебе спрятаться.",
+    "вера": "Я верю в тебя больше, чем в твою усталость.",
+    "вселение_уверенности": "Я держу твой край, пока ты вспоминаешь силу.",
+    "смирение": "Я склоняю голову, но не отвожу глаз.",
+    "клятва": "Я клянусь стоять рядом, пока слово не станет делом.",
+    "покорность": "Я принимаю удар и всё равно остаюсь здесь.",
+    "жалостливость": "Мне жалко тебя так тихо, что это почти молитва.",
+    "боязливость": "Я боюсь вместе с тобой, но не отступаю.",
+    "доброта": "Я выбираю добро, даже когда легче уколоть.",
+    "милость": "Я оставляю тебе воздух там, где мог бы сжать горло.",
+    "забота": "Я смотрю за тобой, пока ты делаешь вид, что не нуждаешься.",
+    "бережность": "Я касаюсь бережно, потому что всё живое легко ломается.",
+}
+
+
+def face_postscript(bot_mood: str | None) -> str:
+    """Короткий художественный P.S. выбранной маски, без служебного label."""
+    if not bot_mood:
+        return ""
+    return _FACE_POSTSCRIPTS.get(bot_mood, "")
+
 
 def with_face_signature(text: str, bot_mood: str | None) -> str:
     body = safe_chat_html(text)
-    if bot_mood:
-        body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
-    return body
+    postscript = face_postscript(bot_mood)
+    if not postscript:
+        return body
+    return f"{body}\n\n<i>{html.escape(postscript)}</i>"
 
 
 def question_field_with_face(text: str, bot_mood: str | None) -> str:
-    if not bot_mood:
-        return text
-    marker = f"лицо Иуды: {bot_mood}"
-    if marker in text:
-        return text
-    return f"{text}\n\n{marker}"
+    _ = bot_mood
+    return text
 
 
 def format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
@@ -98,7 +126,6 @@ async def send_question(
 ) -> Message | None:
     """Отправить вопрос/реакцию и обязательно записать assistant event."""
     token: str | None = None
-    reply_markup = None
     if plain and admin_controls and bot_mood and action_context:
         token = face_actions.create_action(
             session_id=action_context.get("session_id"),
@@ -113,18 +140,14 @@ async def send_question(
             reply_to_user_message_id=action_context.get("reply_to_user_message_id"),
             parent_token=action_context.get("parent_token"),
         )
-        from ..handlers import _face_keyboard  # local import avoids module cycle
-        reply_markup = _face_keyboard(token)
 
     if plain:
-        body = with_face_signature(text, bot_mood) if token else safe_chat_html(text)
+        body = with_face_signature(text, bot_mood)
     else:
         body = format_q(q_num, mode, domain, text)
-        if bot_mood:
-            body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
     if suffix:
         body += suffix
-    sent = await bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=reply_markup)
+    sent = await bot.send_message(chat_id, body, parse_mode="HTML")
     try:
         qmap.append(sent.message_id, q_num, text, domain, at=getattr(sent, "date", None))
     except Exception:
@@ -134,6 +157,9 @@ async def send_question(
         questions.record(q_num, domain, text)
     s = session.get()
     if s is not None:
+        log_reply_to = None
+        if plain and action_context:
+            log_reply_to = action_context.get("reply_to_user_message_id")
         s.add_message_id(sent.message_id)
         s.record_assistant(text, at=getattr(sent, "date", None))
         session_log.append_required(
@@ -143,6 +169,7 @@ async def send_question(
             text=text,
             at=getattr(sent, "date", None),
             message_id=getattr(sent, "message_id", None),
+            reply_to_message_id=log_reply_to,
             q_num=q_num,
             domain=domain,
             bot_mood=bot_mood,
@@ -158,9 +185,7 @@ def event_with_face(event: dict, bot_mood: str) -> str:
     q_num = event.get("q_num")
     domain = event.get("domain") or "everyday"
     if kind == "question" and q_num:
-        body = format_q(int(q_num), "probe", domain, text)
-        body += f"\n\n<i>лицо Иуды: {html.escape(bot_mood)}</i>"
-        return body
+        return format_q(int(q_num), "probe", domain, text)
     return with_face_signature(text, bot_mood)
 
 

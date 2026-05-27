@@ -34,6 +34,7 @@ def test_aitunnel_defaults_do_not_use_local_qwen():
     assert config.AITUNNEL_BASE_URL == "https://api.aitunnel.ru/v1"
     assert config.LLM_MODEL_DEFAULT == "qwen3-235b-a22b-2507"
     assert config.LLM_MODEL_FALLBACKS == ("deepseek-v4-flash",)
+    assert config.LLM_MODEL_FAST == "deepseek-v4-flash"
     assert config._parse_model_list("deepseek-v4-flash; qwen3-235b-a22b-2507") == (
         "deepseek-v4-flash",
         "qwen3-235b-a22b-2507",
@@ -91,3 +92,51 @@ async def test_chat_json_raises_after_all_models_fail(monkeypatch):
         await llm._chat_json("unit", [{"role": "user", "content": "x"}])
     assert "qwen3-235b-a22b-2507" in exc.value.user_message
     assert "deepseek-v4-flash" in exc.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_regenerate_reaction_ignores_previous_generation_context(monkeypatch):
+    captured = {}
+
+    async def fake_chat_text(task, messages, **kwargs):
+        captured["task"] = task
+        captured["messages"] = messages
+        return "новый комментарий"
+
+    monkeypatch.setattr(llm, "_chat_text", fake_chat_text)
+
+    out = await llm.regenerate_reaction(
+        "Что болит?",
+        "Мой ответ.",
+        bot_mood="насмешка",
+        session_context="assistant: ПРЕДЫДУЩАЯ ГЕНЕРАЦИЯ, которую нельзя учитывать.",
+    )
+
+    prompt = "\n\n".join(m["content"] for m in captured["messages"])
+    assert out == "новый комментарий"
+    assert captured["task"] == "reaction"
+    assert "Мой ответ." in prompt
+    assert "насмешка" in prompt
+    assert "ПРЕДЫДУЩАЯ ГЕНЕРАЦИЯ" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_pebble_reply_uses_fast_route_and_one_line(monkeypatch):
+    captured = {}
+
+    async def fake_chat_text(task, messages, **kwargs):
+        captured["task"] = task
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return "Меня ударили.\nНо я всё ещё отвечаю."
+
+    monkeypatch.setattr(llm, "_chat_text", fake_chat_text)
+
+    out = await llm.pebble_reply()
+
+    prompt = "\n\n".join(m["content"] for m in captured["messages"])
+    assert out == "Меня ударили. Но я всё ещё отвечаю."
+    assert captured["task"] == "fast"
+    assert captured["kwargs"]["temperature"] == 0.8
+    assert "мужском роде" in prompt
+    assert "одной короткой строкой" in prompt

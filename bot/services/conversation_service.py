@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -146,6 +147,8 @@ async def process_probe_answer(
                 log.exception("analysis report failed (non-fatal)")
         except Exception:
             log.exception("mood detection failed (non-fatal)")
+    if bot_mood is None:
+        bot_mood = random.choice(moods.BOT_MOODS)
 
     result = await process_answer(
         question=s.last_question,
