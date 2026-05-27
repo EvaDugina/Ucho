@@ -29,7 +29,7 @@ from . import (
 )
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError
-from .llm import about_present, ask_next, pebble_reply, regenerate_reaction
+from .llm import about_present, ask_next, regenerate_reaction
 from .services import conversation_service, daily_service, note_service, session_messages
 from .validation import (
     MAX_USER_TEXT,
@@ -847,27 +847,12 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
-    """Бросить камень: короткая fast-реплика. Прозрачен для сессии — НЕ открывает и
+    """Бросить камень: статичная короткая реплика. Прозрачен для сессии — НЕ открывает и
     НЕ закрывает её (исключён из close-on-command в AccessMiddleware), чтобы можно
     было проверить бота, пока ждёшь реакцию, и эта реакция не оборвалась."""
     if not _is_allowed(message):
         return
-    uid = userctx.current_uid()
-    if not ratelimit.try_acquire(uid):
-        await message.answer(ratelimit.BUSY_MESSAGE)
-        return
-    try:
-        try:
-            await message.bot.send_chat_action(message.chat.id, "typing")
-        except Exception:
-            pass
-        text = await pebble_reply()
-    except LLMError:
-        log.warning("pebble_reply LLM error")
-        text = moods.pebble_fallback_reply()
-    finally:
-        ratelimit.release(uid)
-    await message.answer(safe_chat_html(text), parse_mode="HTML")
+    await message.answer("Больно.")
 
 
 @router.message(Command("about"))
@@ -1097,7 +1082,7 @@ async def cmd_regen(message: Message, command: CommandObject) -> None:
         new_text = await regenerate_reaction(question, user_text, bot_mood=face, mode="probe")
     except LLMError:
         _log_llm_silence("regenerate_reaction")
-        return
+        new_text = moods.llm_error_fallback_reply()
     finally:
         ratelimit.release(uid)
 
@@ -1291,9 +1276,13 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
             is_owner=_is_owner(message),
         )
     except LLMError:
-        # Ожидаемый сбой модели молчит наружу; pending_answer остаётся, recovery
-        # дожмёт на следующем старте. Прочие исключения (баги) не глушим.
+        # Ожидаемый сбой модели: отвечаем заготовленным комментарием, но pending
+        # оставляем, чтобы recovery позже дожал полноценный разбор.
         _log_llm_silence("process_answer")
+        await message.answer(
+            safe_chat_html(moods.llm_error_fallback_reply()),
+            parse_mode="HTML",
+        )
         return
     if payload is None:
         return

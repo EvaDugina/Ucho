@@ -121,7 +121,7 @@ async def test_probe_does_not_call_llm_when_session_log_required_fails(as_user, 
 
 
 @pytest.mark.asyncio
-async def test_probe_llm_error_is_silent_to_user(as_user, monkeypatch):
+async def test_probe_llm_error_answers_generated_fallback(as_user, monkeypatch):
     session.start(mode="probe", domain="everyday")
     session.set_question("Что важно?", "everyday", q_num=1)
     message = _FakeMessage("ответ")
@@ -130,29 +130,93 @@ async def test_probe_llm_error_is_silent_to_user(as_user, monkeypatch):
         raise LLMError("down")
 
     monkeypatch.setattr(conversation_service, "process_probe_answer", fail_process_probe_answer)
+    monkeypatch.setattr(handlers.moods.random, "choice", lambda seq: seq[0])
 
     await handlers._handle_probe_locked(message, "ответ")
 
-    assert message.answers == []
+    assert [a["text"] for a in message.answers] == [
+        moods.LLM_ERROR_FALLBACK_REPLIES["раскачивание"]
+    ]
 
 
 @pytest.mark.asyncio
-async def test_pebble_llm_error_answers_generated_fallback(as_user, monkeypatch):
+async def test_pebble_always_answers_static_bolno(as_user, monkeypatch):
     message = _FakeMessage("/pebble")
     message.from_user = SimpleNamespace(id=as_user)
 
-    async def fail_pebble_reply():
-        raise LLMError("down")
-
     monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
-    monkeypatch.setattr(handlers, "pebble_reply", fail_pebble_reply)
-    monkeypatch.setattr(handlers.moods.random, "choice", lambda seq: seq[0])
 
     await handlers.cmd_pebble(message)
 
-    assert [a["text"] for a in message.answers] == [
-        moods.PEBBLE_FALLBACK_REPLIES["раскачивание"]
-    ]
+    assert [a["text"] for a in message.answers] == ["Больно."]
+
+
+@pytest.mark.asyncio
+async def test_regen_llm_error_answers_generated_fallback(as_user, monkeypatch):
+    session_id = "s-regen-fallback"
+    session_log.append(
+        session_id=session_id,
+        role="assistant",
+        kind="question",
+        text="Что болит?",
+        at="2026-05-26T12:00:00",
+        message_id=10,
+        q_num=1,
+        domain="everyday",
+    )
+    session_log.append(
+        session_id=session_id,
+        role="user",
+        kind="answer",
+        text="Болит язык.",
+        at="2026-05-26T12:01:00",
+        message_id=11,
+        reply_to_message_id=10,
+        q_num=1,
+        domain="everyday",
+    )
+    session_log.append(
+        session_id=session_id,
+        role="assistant",
+        kind="reaction",
+        text="Старый комментарий.",
+        at="2026-05-26T12:02:00",
+        message_id=12,
+        reply_to_message_id=11,
+        q_num=1,
+        domain="everyday",
+        bot_mood="сомнение",
+    )
+    token = face_actions.create_action(
+        session_id=session_id,
+        q_num=1,
+        answered_q_num=1,
+        kind="reaction",
+        bot_mood="сомнение",
+        assistant_text="Старый комментарий.",
+        user_text="Болит язык.",
+        question="Что болит?",
+        session_context="",
+        reply_to_user_message_id=11,
+    )
+    face_actions.set_message(token, 12)
+    message = _FakeMessage("/regen")
+    message.from_user = SimpleNamespace(id=as_user)
+    message.reply_to_message = SimpleNamespace(message_id=12)
+
+    async def fail_regenerate_reaction(*args, **kwargs):
+        raise LLMError("down")
+
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(handlers, "regenerate_reaction", fail_regenerate_reaction)
+    monkeypatch.setattr(handlers.moods.random, "choice", lambda seq: seq[0])
+
+    await handlers.cmd_regen(message, SimpleNamespace(args=None))
+
+    assert moods.LLM_ERROR_FALLBACK_REPLIES["раскачивание"] in message.answers[-1]["text"]
+    rec = face_actions.find_by_message_id(message.answers[-1]["message"].message_id)
+    assert rec is not None
+    assert rec["kind"] == "regen"
 
 
 @pytest.mark.asyncio

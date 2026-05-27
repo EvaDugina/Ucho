@@ -217,7 +217,7 @@ BOT_MOODS = (
     "доброта", "милость", "забота", "бережность",
 )
 
-PEBBLE_FALLBACK_REPLIES = {
+LLM_ERROR_FALLBACK_REPLIES = {
     "раскачивание": "Я бы ответил, но язык выбили первым.",
     "насмешка": "Я бы съязвил, да говорить уже нечем.",
     "подшучивание": "Я бы пошутил, но язык не дослужился.",
@@ -241,6 +241,7 @@ PEBBLE_FALLBACK_REPLIES = {
     "забота": "Я берегу слова: им не на чем держаться.",
     "бережность": "Я молчу бережно: речь отломана.",
 }
+PEBBLE_FALLBACK_REPLIES = LLM_ERROR_FALLBACK_REPLIES
 
 _BRIGHT_Q = {"гордость_самоуверенность", "воодушевление_азарт", "презрение_зависть"}
 _HARD_FACES = (
@@ -486,9 +487,14 @@ def random_bot_mood() -> str:
     return weighted_bot_mood(BOT_MOODS) or "раскачивание"
 
 
+def llm_error_fallback_reply() -> str:
+    """Fallback comment when the live model cannot answer the user's reply."""
+    return random.choice(tuple(LLM_ERROR_FALLBACK_REPLIES.values()))
+
+
 def pebble_fallback_reply() -> str:
-    """Fallback for /pebble when LLM is unavailable: short, generated variants."""
-    return random.choice(tuple(PEBBLE_FALLBACK_REPLIES.values()))
+    """Back-compat alias for older callers; /pebble itself is static now."""
+    return llm_error_fallback_reply()
 
 
 def opposite_bot_mood(s, *, exclude: set[str] | None = None) -> str | None:

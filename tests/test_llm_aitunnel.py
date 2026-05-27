@@ -119,24 +119,3 @@ async def test_regenerate_reaction_ignores_previous_generation_context(monkeypat
     assert "насмешка" in prompt
     assert "ПРЕДЫДУЩАЯ ГЕНЕРАЦИЯ" not in prompt
 
-
-@pytest.mark.asyncio
-async def test_pebble_reply_uses_fast_route_and_one_line(monkeypatch):
-    captured = {}
-
-    async def fake_chat_text(task, messages, **kwargs):
-        captured["task"] = task
-        captured["messages"] = messages
-        captured["kwargs"] = kwargs
-        return "Меня ударили.\nНо я всё ещё отвечаю."
-
-    monkeypatch.setattr(llm, "_chat_text", fake_chat_text)
-
-    out = await llm.pebble_reply()
-
-    prompt = "\n\n".join(m["content"] for m in captured["messages"])
-    assert out == "Меня ударили. Но я всё ещё отвечаю."
-    assert captured["task"] == "fast"
-    assert captured["kwargs"]["temperature"] == 0.8
-    assert "мужском роде" in prompt
-    assert "одной короткой строкой" in prompt

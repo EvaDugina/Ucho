@@ -580,27 +580,6 @@ async def regenerate_reaction(
     return strip_extra_punctuation(text).strip()
 
 
-async def pebble_reply() -> str:
-    """Короткая cheap/fast реплика на /pebble без записи в граф."""
-    sys = "\n\n".join([
-        _iuda_prompt,
-        "В тебя бросили камень. Ответь одной короткой строкой от первого лица, "
-        "в мужском роде, голосом Иуды. Без JSON, без пояснений, без списка.",
-    ])
-    text = await _chat_text(
-        "fast",
-        [
-            {"role": "system", "content": sys},
-            {"role": "user", "content": "Мне бросили камень. Ответь не длиннее одной строки."},
-        ],
-        temperature=0.8,
-    )
-    line = " ".join(strip_extra_punctuation(text).strip().splitlines()).strip()
-    if len(line) > 220:
-        line = line[:220].rstrip(" ,") + "."
-    return line or "Я услышал камень."
-
-
 async def about_present(portrait: str) -> str:
     """Показать пользователю его портрет (/about) — отформатированный текст от
     1-го лица. portrait — это render_for_prompt() (компактная опись). Plain text.
