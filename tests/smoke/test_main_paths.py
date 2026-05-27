@@ -4,7 +4,7 @@ from datetime import datetime
 
 import pytest
 
-from bot import graph, session, session_log, userctx
+from bot import graph, moods, session, session_log, userctx
 from bot.services import conversation_service, note_service
 
 
@@ -21,6 +21,7 @@ def _fake_result(reaction: str = "Слышу, где слово скрипит."
         ],
         "reaction": reaction,
         "user_delta": {},
+        "mask_frequency_draft": {"постирония": 0.11},
     }
 
 
@@ -43,6 +44,7 @@ async def test_smoke_ucho_note_is_durable_and_returns_reaction_payload(as_user, 
     assert "Записал не как отчёт" in payload.text
     assert "Заметка сохранена" not in payload.text
     assert "+created" not in payload.text
+    assert moods.load_mask_frequency_draft()["coefficients"]["постирония"] == 0.11
 
 
 @pytest.mark.asyncio
@@ -65,6 +67,9 @@ async def test_smoke_answer_logs_before_llm_creates_draft_and_clears_pending(as_
     )
 
     assert payload is not None
+    draft = moods.load_mask_frequency_draft()
+    assert draft["coefficients"]["постирония"] == 0.11
+    assert draft["answer_count"] == 1
     assert session.get().pending_answer_event_id is None
     slug = graph.resolve_slug("Честность", domain="ethics")
     assert slug == "chestnost"
@@ -93,4 +98,3 @@ def test_smoke_recovery_reads_pending_text_from_session_log(as_user):
     assert session.has_pending(s)
     assert session.pending_answer_text(s) == "честность важна даже когда неудобна"
     assert session_log.find_event(event["event_id"])["text"] == "честность важна даже когда неудобна"
-

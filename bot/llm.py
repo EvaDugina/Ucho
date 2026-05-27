@@ -389,7 +389,8 @@ async def process_answer(
     Returns dict с ключами:
         observations: [{domain, type, name, summary, quote}],
         reaction (реплика-укол от 1-го лица, НЕ вопрос),
-        user_delta (портрет пользователя).
+        user_delta (портрет пользователя),
+        mask_frequency_draft (опциональный draft коэффициентов лиц).
     """
     user_msg = "\n\n".join(x for x in [
         "mode: process",

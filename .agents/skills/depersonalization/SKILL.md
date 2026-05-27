@@ -5,7 +5,8 @@ description: >-
   personality/about.md (20 секций), связного анализа настроения в personality/mood.md,
   психометрического профиля personality/profile.md (OCEAN/Big Five + MBTI + DISC по
   корпусу raw/), оценки soft skills в personality/softskills.md, выверенный граф
-  настроений mood/ (вердикты лиц, _mood_map.json), mood_baseline и user_prompt.md.
+  настроений mood/ (вердикты лиц, _mood_map.json), curated mask_frequencies.json,
+  mood_baseline и user_prompt.md.
   Локальный бот (Qwen 14B) только захватывает
   live-дельты и снимок настроения — описательные документы выверяет этот скилл сильной
   моделью. Запускать вручную. НЕ трогает concepts/, profile/, digests/ (это скилл
@@ -51,12 +52,17 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
   (бот файл не создаёт, Qwen live-контракт не расширяется, в системный промпт файл
   напрямую не инжектится).
 - `mood/` — граф настроений (узлы quality/лица, рёбра-вердикты), `mood/_mood_map.json`.
+- `03_personality/mask_frequencies.json` — выверенные коэффициенты частоты лиц
+  `{mask: 0..1}` для конкретного пользователя. Пишешь ТОЛЬКО ты; бот читает файл
+  read-only и ведёт рядом только draft.
 - `user_prompt.md` — директивная подстройка персоны под человека.
 
 **Нельзя (территория бота / другого скилла / источники истины):**
 - `raw/**` — источник правды (только чтение).
 - `_mood_feedback.jsonl`, `_liked_replies.json`, `_liked_replies_log.jsonl`,
   `_face_actions.json`, `raw/sessions/**` — источники наблюдений/feedback (только чтение).
+- `03_personality/mask_frequencies_draft.json` — live-черновик бота из ответов и
+  лайков. Только читать и учитывать; не редактировать руками, кроме явной миграции.
 - `concepts/**`, `profile/**`, `digests/**`, `_tags.md` — зона `reconcista`.
 - `personality/mood.md` frontmatter (кроме `mood_baseline`) — живой снимок кода.
 - `_session.json`, `_state.json`, `.psycho/manifest.json`, `_index.md` — служебное бота.
@@ -202,6 +208,15 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
 и `_liked_replies_log.jsonl` — позитивные примеры удачного лица и формулировки; учитывай
 их для mood-map и `user_prompt.md`, но не переписывай эти файлы.
 
+**Частоты лиц:** `03_personality/mask_frequencies.json` — curated-слой, который
+пишет этот скилл. Все маски из `BOT_MOODS` должны присутствовать, значения `0..1`.
+`0` = нет предпочтения/не усиливать, ближе к `1` = чаще выбирать автоматически.
+Учитывай `03_personality/mask_frequencies_draft.json`: `llm_coefficients` как слабый
+сигнал, `like_coefficients` как сильный позитивный сигнал от пользователя. Не копируй
+draft механически: выверяй по raw/feedback, сглаживай шум, оставляй спорные маски
+низкими. Бот при выборе берёт максимум curated и draft, поэтому curated не обязан
+дублировать каждый свежий лайк.
+
 **Graph view:** фильтр `path:mood`; цвет по `kind` (user vs bot). Граф концептов
 (`path:concepts`) папку `mood/` не захватывает — они независимы.
 
@@ -238,6 +253,8 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
    (как человек реагировал ПОСЛЕ хода — зашло лицо или оттолкнуло):
    - Каждой паре — **вердикт** `терпимо | нейтрально | отвергнуто`, обнови рёбра `mood/`.
    - Пересобери `mood/_mood_map.json` (ключ `quality(знак)`: `prefer`/`avoid` лиц).
+   - Перезапиши curated `03_personality/mask_frequencies.json`: все лица из `BOT_MOODS`,
+     коэффициенты `0..1`, с учётом liked/draft, но без механического копирования draft.
    - Уточни `personality/mood.md → mood_baseline` (`"valence,arousal,dominance"` — типичный фон).
 4. **Профиль личности `personality/profile.md`** — оцени по всему корпусу `raw/`
    (+ дельты): **OCEAN** (рубрики BFI-2/IPIP, баллы 0–100), **MBTI** (4 дихотомии +
@@ -269,9 +286,11 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
    - **soft skills:** записать/перезаписать `personality/softskills.md` (20 навыков,
      оценки/`н/д`, confidence, evidence, сводка сильных сторон/рисков/рабочего поведения).
    - **граф настроений:** обнови узлы/рёбра `mood/` (вердикты), перезапиши
-     `mood/_mood_map.json`, уточни `mood_baseline`, перепиши `user_prompt.md` (с выжимкой
-     профиля). После — **очистить/ротировать `_mood_log.jsonl`**; `_mood_feedback.jsonl`
-     и liked-файлы не чисть без явной команды, это пользовательский feedback.
+     `mood/_mood_map.json`, curated `03_personality/mask_frequencies.json`, уточни
+     `mood_baseline`, перепиши `user_prompt.md` (с выжимкой профиля). После —
+     **очистить/ротировать `_mood_log.jsonl`**; `_mood_feedback.jsonl`, draft
+     `mask_frequencies_draft.json` и liked-файлы не чисть без явной команды, это
+     пользовательский/live feedback.
 3. **Финальный коммит:** `git -C <vault> add -A && git -C <vault> commit -m "depersonalization <YYYY-WNN>: applied"`.
 
 ### Фаза 3 — LINT (проверка целостности, действие)
@@ -297,6 +316,10 @@ MOC ведёт отдельный скилл **`reconcista`**. Здесь — т
   вердикт+счётчик; явный `_mood_feedback.jsonl` учтён сильнее косвенных сигналов,
   понравившиеся реплики учтены как позитивные примеры; `user_prompt.md` компактен
   (≤~300 токенов) и директивен.
+- **Частоты лиц:** `03_personality/mask_frequencies.json` — валидный JSON, все ключи
+  из `BOT_MOODS` присутствуют, лишних ключей нет, значения числа `0..1`; draft
+  `03_personality/mask_frequencies_draft.json` не изменён, кроме явно согласованной
+  миграции.
 - **Неприкосновенное не тронуто:** `raw/`, `concepts/`, `profile/`, `_session.json`,
   `_state.json`, `.psycho/manifest.json` (`git diff --name-only` checkpoint..HEAD).
 

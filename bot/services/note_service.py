@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -56,7 +55,7 @@ async def ingest_note(clean: str, *, at: datetime | None = None) -> NoteReaction
 
     q_num = vault.next_q_num()
     note_question = "(свободная заметка)"
-    bot_mood = random.choice(moods.BOT_MOODS)
+    bot_mood = moods.random_bot_mood()
     try:
         result = await process_answer(
             question=note_question,
@@ -70,6 +69,12 @@ async def ingest_note(clean: str, *, at: datetime | None = None) -> NoteReaction
     except LLMError:
         log.warning("process_answer LLM error in note ingest")
         return None
+
+    moods.record_mask_frequency_draft(
+        result.get("mask_frequency_draft"),
+        bot_mood=bot_mood,
+        at=when,
+    )
 
     try:
         apply_processed(result, q_num, when, note_question, clean)

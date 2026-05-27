@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import logging
 import random
+from datetime import datetime
 
 from . import userctx
-from .atomic import atomic_write_text
+from .atomic import atomic_write_json, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -210,6 +211,7 @@ def map_key(mv: dict) -> str:
 BOT_MOODS = (
     "раскачивание", "насмешка", "подшучивание", "давление_на_больное",
     "унижение", "перевирание", "сомнение", "холодная_отстранённость",
+    "постирония",
     "ласка", "любовь", "вера", "вселение_уверенности", "смирение", "клятва",
     "покорность", "жалостливость", "боязливость",
     "доброта", "милость", "забота", "бережность",
@@ -225,11 +227,238 @@ _SOFT_FACES = (
     "покорность", "жалостливость", "боязливость",
     "доброта", "милость", "забота", "бережность",
 )
-_ACTIVE_FACES = ("раскачивание", "подшучивание")
+_ACTIVE_FACES = ("раскачивание", "подшучивание", "постирония")
+
+DEFAULT_MASK_FREQUENCY = 0.0
+MASK_FREQUENCIES_FILE = "mask_frequencies.json"
+MASK_FREQUENCIES_DRAFT_FILE = "mask_frequencies_draft.json"
+LIKE_CURVE_SCALE = 4.0
+LIKE_CURVE_X1 = 0.0
+LIKE_CURVE_Y1 = 0.85
+LIKE_CURVE_X2 = 1.0
+LIKE_CURVE_Y2 = 0.08
+
+
+def _frequency_path() -> "object":
+    return userctx.user_root() / "03_personality" / MASK_FREQUENCIES_FILE
+
+
+def _draft_frequency_path() -> "object":
+    return userctx.user_root() / "03_personality" / MASK_FREQUENCIES_DRAFT_FILE
+
+
+def _now_iso(at: object | None = None) -> str:
+    if isinstance(at, datetime):
+        return at.isoformat(timespec="seconds")
+    if isinstance(at, str):
+        return at
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _read_json_obj(path) -> dict:
+    try:
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        log.exception("read mask frequency json failed (non-fatal): %s", path)
+        return {}
 
 
 def coerce_bot_mood(s) -> str:
     return s if s in BOT_MOODS else "раскачивание"
+
+
+def _clamp_frequency(value) -> float:
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MASK_FREQUENCY
+    return round(max(0.0, min(1.0, x)), 3)
+
+
+def default_mask_frequencies() -> dict[str, float]:
+    return {m: DEFAULT_MASK_FREQUENCY for m in BOT_MOODS}
+
+
+def _normalize_coefficients(data: object, *, default: float = DEFAULT_MASK_FREQUENCY) -> dict[str, float]:
+    raw = data if isinstance(data, dict) else {}
+    return {m: _clamp_frequency(raw.get(m, default)) for m in BOT_MOODS}
+
+
+def _normalize_counts(data: object) -> dict[str, int]:
+    raw = data if isinstance(data, dict) else {}
+    out: dict[str, int] = {}
+    for mask in BOT_MOODS:
+        try:
+            count = int(raw.get(mask, 0))
+        except (TypeError, ValueError):
+            count = 0
+        out[mask] = max(0, count)
+    return out
+
+
+def _cubic(p1: float, p2: float, t: float) -> float:
+    inv = 1.0 - t
+    return (3 * inv * inv * t * p1) + (3 * inv * t * t * p2) + (t * t * t)
+
+
+def _bezier_y_for_x(x: float) -> float:
+    """CSS cubic-bezier(0,.85,1,.08): x -> y через инверсию кривой."""
+    target = max(0.0, min(1.0, float(x)))
+    lo, hi = 0.0, 1.0
+    for _ in range(28):
+        mid = (lo + hi) / 2
+        if _cubic(LIKE_CURVE_X1, LIKE_CURVE_X2, mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return _cubic(LIKE_CURVE_Y1, LIKE_CURVE_Y2, (lo + hi) / 2)
+
+
+def mask_like_coefficient(likes: int) -> float:
+    """Плавный рост от лайков по заданной bezier-кривой, с асимптотой ниже единицы."""
+    count = max(0, int(likes))
+    if count == 0:
+        return 0.0
+    x = count / (count + LIKE_CURVE_SCALE)
+    return round(min(0.999, _bezier_y_for_x(x)), 3)
+
+
+def _combine_coefficients(*layers: dict[str, float]) -> dict[str, float]:
+    out = default_mask_frequencies()
+    for layer in layers:
+        for mask in BOT_MOODS:
+            out[mask] = max(out[mask], _clamp_frequency(layer.get(mask, 0.0)))
+    return out
+
+
+def load_curated_mask_frequencies() -> dict[str, float]:
+    """Read-only curated coefficients owned by depersonalization skill."""
+    if userctx.current_uid() is None:
+        return default_mask_frequencies()
+    raw = _read_json_obj(_frequency_path())
+    return _normalize_coefficients(raw)
+
+
+def load_mask_frequency_draft() -> dict:
+    """Bot-owned runtime draft: LLM proposal + liked-mask curve."""
+    defaults = default_mask_frequencies()
+    if userctx.current_uid() is None:
+        return {
+            "version": 1,
+            "source": "bot-runtime-draft",
+            "coefficients": defaults,
+            "llm_coefficients": defaults,
+            "like_counts": {m: 0 for m in BOT_MOODS},
+            "like_coefficients": defaults,
+        }
+
+    raw = _read_json_obj(_draft_frequency_path())
+    llm_src = raw.get("llm_coefficients")
+    if not isinstance(llm_src, dict):
+        # Back-compat для раннего draft-формата, где были только coefficients.
+        llm_src = raw.get("coefficients") if isinstance(raw.get("coefficients"), dict) else {}
+    llm_coefficients = _normalize_coefficients(llm_src)
+    like_counts = _normalize_counts(raw.get("like_counts") or raw.get("likes"))
+    like_coefficients = {m: mask_like_coefficient(like_counts[m]) for m in BOT_MOODS}
+    coefficients = _combine_coefficients(llm_coefficients, like_coefficients)
+    answer_count = raw.get("answer_count", 0)
+    try:
+        answer_count = max(0, int(answer_count))
+    except (TypeError, ValueError):
+        answer_count = 0
+    return {
+        "version": 1,
+        "source": "bot-runtime-draft",
+        "updated_at": raw.get("updated_at"),
+        "last_answer_at": raw.get("last_answer_at"),
+        "last_like_at": raw.get("last_like_at"),
+        "last_bot_mood": coerce_bot_mood(raw.get("last_bot_mood")),
+        "answer_count": answer_count,
+        "coefficients": coefficients,
+        "llm_coefficients": llm_coefficients,
+        "like_counts": like_counts,
+        "like_coefficients": like_coefficients,
+    }
+
+
+def _write_mask_frequency_draft(draft: dict) -> dict:
+    atomic_write_json(_draft_frequency_path(), draft)
+    return draft
+
+
+def record_mask_frequency_draft(
+    llm_coefficients: object | None = None,
+    *,
+    bot_mood: str | None = None,
+    at: object | None = None,
+) -> dict:
+    """Refresh runtime draft after a processed answer.
+
+    `mask_frequencies.json` остаётся read-only для бота; сюда пишется только
+    draft, который depersonalization может потом учесть и выверить.
+    """
+    if userctx.current_uid() is None:
+        return load_mask_frequency_draft()
+    draft = load_mask_frequency_draft()
+    if isinstance(llm_coefficients, dict):
+        draft["llm_coefficients"] = _normalize_coefficients(llm_coefficients)
+    draft["coefficients"] = _combine_coefficients(
+        draft["llm_coefficients"], draft["like_coefficients"]
+    )
+    draft["updated_at"] = _now_iso(at)
+    draft["last_answer_at"] = _now_iso(at)
+    draft["last_bot_mood"] = coerce_bot_mood(bot_mood)
+    draft["answer_count"] = int(draft.get("answer_count") or 0) + 1
+    return _write_mask_frequency_draft(draft)
+
+
+def record_mask_like(bot_mood: str | None, *, at: object | None = None) -> dict:
+    """Increase draft coefficient for a liked mask without touching curated file."""
+    if userctx.current_uid() is None:
+        return load_mask_frequency_draft()
+    mask = coerce_bot_mood(bot_mood)
+    draft = load_mask_frequency_draft()
+    counts = _normalize_counts(draft.get("like_counts"))
+    counts[mask] += 1
+    like_coefficients = {m: mask_like_coefficient(counts[m]) for m in BOT_MOODS}
+    draft["like_counts"] = counts
+    draft["like_coefficients"] = like_coefficients
+    draft["coefficients"] = _combine_coefficients(draft["llm_coefficients"], like_coefficients)
+    draft["updated_at"] = _now_iso(at)
+    draft["last_like_at"] = _now_iso(at)
+    draft["last_bot_mood"] = mask
+    return _write_mask_frequency_draft(draft)
+
+
+def load_mask_frequencies() -> dict[str, float]:
+    """Effective per-user coefficients used for automatic mask choice.
+
+    Curated `mask_frequencies.json` пишет только depersonalization. Бот пишет
+    только `mask_frequencies_draft.json`; выбор использует максимум двух слоёв.
+    """
+    curated = load_curated_mask_frequencies()
+    draft = load_mask_frequency_draft().get("coefficients", {})
+    return _combine_coefficients(curated, draft)
+
+
+def weighted_bot_mood(candidates: list[str] | tuple[str, ...]) -> str | None:
+    """Выбрать маску из candidates с учётом per-user частот 0..1."""
+    options = [m for m in candidates if m in BOT_MOODS]
+    if not options:
+        return None
+    freqs = load_mask_frequencies()
+    weights = [max(0.0, min(1.0, float(freqs.get(m, DEFAULT_MASK_FREQUENCY)))) for m in options]
+    if any(w > 0 for w in weights):
+        return coerce_bot_mood(random.choices(options, weights=weights, k=1)[0])
+    # All-zero — не падаем в проде; считаем это ручной ошибкой настройки.
+    return coerce_bot_mood(random.choice(options))
+
+
+def random_bot_mood() -> str:
+    return weighted_bot_mood(BOT_MOODS) or "раскачивание"
 
 
 def opposite_bot_mood(s, *, exclude: set[str] | None = None) -> str | None:
@@ -246,7 +475,7 @@ def opposite_bot_mood(s, *, exclude: set[str] | None = None) -> str | None:
     choices = [m for m in pool if m not in excluded]
     if not choices:
         choices = [m for m in BOT_MOODS if m not in excluded]
-    return coerce_bot_mood(random.choice(choices)) if choices else None
+    return weighted_bot_mood(choices)
 
 
 def _mood_dir() -> "object":
@@ -311,7 +540,7 @@ def pick_bot_mood(mood_vec: dict) -> str:
         candidates = [m for m in (entry.get("prefer") or []) if m in BOT_MOODS and m not in avoid]
     if not candidates:
         candidates = _default_faces(mood_vec)
-    return coerce_bot_mood(random.choice(candidates) if candidates else "раскачивание")
+    return weighted_bot_mood(candidates) or "раскачивание"
 
 
 def log_turn(mood_vec: dict, bot_mood: str, vad: dict | None = None) -> None:

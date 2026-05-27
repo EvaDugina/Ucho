@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -148,7 +147,7 @@ async def process_probe_answer(
         except Exception:
             log.exception("mood detection failed (non-fatal)")
     if bot_mood is None:
-        bot_mood = random.choice(moods.BOT_MOODS)
+        bot_mood = moods.random_bot_mood()
 
     result = await process_answer(
         question=s.last_question,
@@ -158,6 +157,11 @@ async def process_probe_answer(
         bot_mood=bot_mood,
         session_context=session_context,
         mode=s.mode,
+    )
+    moods.record_mask_frequency_draft(
+        result.get("mask_frequency_draft"),
+        bot_mood=bot_mood,
+        at=at,
     )
 
     try:

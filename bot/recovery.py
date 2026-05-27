@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import logging
-import random
-
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
@@ -72,7 +70,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     if not s.history or s.history[-1].get("role") != "user" or s.history[-1].get("content") != text:
         s.record_user(text)
     session_context = s.render_transcript()
-    bot_mood = random.choice(moods.BOT_MOODS)
+    bot_mood = moods.random_bot_mood()
 
     try:
         result = await process_answer(
@@ -108,6 +106,8 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         except Exception:
             pass
         return  # pending ref сохранён — повторим в следующий раз.
+
+    moods.record_mask_frequency_draft(result.get("mask_frequency_draft"), bot_mood=bot_mood)
 
     try:
         apply_processed(result, q_num, s.asked_at, question, text, session_domain=real_hint)

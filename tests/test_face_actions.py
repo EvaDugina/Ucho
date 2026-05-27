@@ -21,6 +21,7 @@ def test_mask_postscript_is_italic_for_comments_but_not_questions(as_user):
     rendered = session_messages.with_face_signature("Я здесь.", "сомнение")
 
     assert rendered == "Я здесь.\n\n<i>Не верю ни единому слову.</i>"
+    assert all(session_messages.face_postscript(m) for m in moods.BOT_MOODS)
     assert "лицо Иуды" not in rendered
     assert "<i>Не верю" not in session_messages.format_q(1, "probe", "everyday", "Что болит?")
 
@@ -163,6 +164,7 @@ def test_opposite_bot_mood_uses_different_cluster(as_user):
         "раскачивание",
         "насмешка",
         "подшучивание",
+        "постирония",
         "давление_на_больное",
         "унижение",
         "перевирание",

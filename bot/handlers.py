@@ -1030,11 +1030,14 @@ async def cmd_like(message: Message) -> None:
         await message.answer("Вопросы не добавляю в избранное.")
         return
     token = rec.get("token")
+    already_liked = face_actions.is_liked(token)
     liked = face_actions.set_liked(token, liked=True, at=getattr(message, "date", None))
     if liked is None:
         await message.answer("Не нашёл реплику Иуды для отметки")
         return
     face_actions.record_user_score(token, 1.0, "favorite", at=getattr(message, "date", None))
+    if liked and not already_liked:
+        moods.record_mask_like(rec.get("bot_mood"), at=getattr(message, "date", None))
     vault.commit_all("liked reply")
     await message.answer("В избранном.")
 
