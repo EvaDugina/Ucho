@@ -112,7 +112,10 @@ def _git_commit(
     if not _git_available() or not _is_git_repo():
         return None
     try:
-        _git("add", scope if scope else "-A")
+        if scope:
+            _git("add", "--", scope)
+        else:
+            _git("add", "-A")
         args = ["commit", "-m", message]
         if allow_empty:
             args.append("--allow-empty")
@@ -120,7 +123,10 @@ def _git_commit(
             args += ["--", scope]
         _git(*args)
         result = _git("rev-parse", "HEAD")
-        return result.stdout.strip() or None
+        sha = result.stdout.strip() or None
+        if sha:
+            _git_push()
+        return sha
     except subprocess.CalledProcessError as exc:
         log.warning("git commit failed (%s): %s", message, exc.stderr.strip())
         return None
@@ -129,6 +135,51 @@ def _git_commit(
 def commit_all(message: str, allow_empty: bool = False) -> Optional[str]:
     scope, label = _scope()
     return _git_commit(f"psycho({label}): {message}", scope=scope, allow_empty=allow_empty)
+
+
+def _git_current_branch() -> Optional[str]:
+    try:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+    if not branch or branch == "HEAD":
+        return None
+    return branch
+
+
+def _git_push(remote: str = "origin") -> bool:
+    """Best-effort push after a successful vault commit.
+
+    A local/dev vault may not have a remote yet; that should not break the bot.
+    In production, a configured `origin` makes every scoped user commit leave the
+    container immediately after it is created.
+    """
+    if not _git_available() or not _is_git_repo():
+        return False
+    branch = _git_current_branch()
+    if not branch:
+        log.warning("git push skipped: detached HEAD")
+        return False
+    remotes = _git("remote", check=False)
+    if remote not in (remotes.stdout or "").split():
+        log.warning("git push skipped: remote %s is not configured", remote)
+        return False
+    upstream = _git(
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        "@{u}",
+        check=False,
+    )
+    try:
+        if upstream.returncode == 0:
+            _git("push")
+        else:
+            _git("push", "-u", remote, branch)
+        return True
+    except subprocess.CalledProcessError as exc:
+        log.warning("git push failed: %s", exc.stderr.strip())
+        return False
 
 
 def _git_reset_hard(sha: str) -> bool:
@@ -155,4 +206,3 @@ def _restore_scope(sha: str, scope: Optional[str]) -> bool:
     except subprocess.CalledProcessError as exc:
         log.error("git restore %s -- %s failed: %s", sha, scope, exc.stderr.strip())
         return False
-

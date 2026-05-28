@@ -235,6 +235,29 @@ async def test_ask_next_llm_error_is_silent_to_user(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ask_next_commits_after_successful_question(as_user, monkeypatch):
+    bot = _FakeBot()
+    session.start(mode="probe", domain="everyday")
+    commits: list[str] = []
+
+    async def fake_ask_next(**kwargs):
+        _ = kwargs
+        return {"question": "Что держит форму?", "domain": "everyday"}
+
+    monkeypatch.setattr(handlers, "ask_next", fake_ask_next)
+    monkeypatch.setattr(
+        handlers.vault,
+        "commit_all",
+        lambda message, allow_empty=False: commits.append(message) or "sha",
+    )
+
+    await handlers._send_next_question(bot, 123, domain="everyday")
+
+    assert bot.sent
+    assert commits == ["ask question"]
+
+
+@pytest.mark.asyncio
 async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
     bot = _FakeBot()
     message = _FakeMessage("/ucho держи мысль", bot=bot)

@@ -1382,6 +1382,7 @@ async def _send_next_question(
         q_num=q_num, mode=s.mode, domain=result["domain"], text=result["question"],
         bot_mood=bot_mood,
     )
+    vault.commit_all("ask question")
 
 
 async def send_daily_question(bot: Bot, uid: int) -> bool:

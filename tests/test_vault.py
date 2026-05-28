@@ -1,6 +1,7 @@
 """Юнит-тесты хранилища: сквозная нумерация, атомарная запись, git-транзакция."""
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime
 
 import pytest
@@ -87,6 +88,63 @@ def test_commit_all_commits_only_current_user_scope(as_user):
         "status", "--short", "--untracked-files=all", "--", f"users/{uid2}"
     ).stdout
     assert "two.md" in other_status
+
+
+def test_commit_all_pushes_only_current_user_scope(as_user, tmp_path):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    uid1 = as_user
+    uid2 = uid1 + 10_000
+    remote = tmp_path / "vault-remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    vault._git("remote", "remove", "origin", check=False)
+    vault._git("remote", "add", "origin", str(remote))
+    try:
+        note1 = userctx.user_root() / "00_raw" / "notes" / "push-one.md"
+        note1.parent.mkdir(parents=True, exist_ok=True)
+        note1.write_text("user one pushed\n", encoding="utf-8")
+
+        userctx.set_user(uid2)
+        vault.ensure_layout()
+        note2 = userctx.user_root() / "00_raw" / "notes" / "push-two.md"
+        note2.parent.mkdir(parents=True, exist_ok=True)
+        note2.write_text("user two must stay local\n", encoding="utf-8")
+
+        userctx.set_user(uid1)
+        sha = vault.commit_all("scope push isolation")
+        assert sha
+
+        remote_head = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+        assert remote_head == sha
+
+        changed = [
+            line.strip()
+            for line in vault._git("show", "--name-only", "--format=", sha).stdout.splitlines()
+            if line.strip()
+        ]
+        assert changed
+        assert all(line.startswith(f"users/{uid1}/") for line in changed)
+        assert not any(line.startswith(f"users/{uid2}/") for line in changed)
+
+        other_status = vault._git(
+            "status", "--short", "--untracked-files=all", "--", f"users/{uid2}"
+        ).stdout
+        assert "push-two.md" in other_status
+    finally:
+        vault._git("remote", "remove", "origin", check=False)
 
 
 def test_git_wrap_rolls_back_on_error(as_user):

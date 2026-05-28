@@ -84,4 +84,5 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
     if q_num is None:
         return False
     vault.mark_daily_sent(DAILY_TZ)
+    vault.commit_all("daily question")
     return True
