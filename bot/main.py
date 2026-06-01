@@ -29,6 +29,7 @@ BOT_COMMANDS = [
     BotCommand(command="regen", description="Перегенерировать reply-комментарий"),
     BotCommand(command="like", description="Отметить reply-реплику Иуды"),
     BotCommand(command="remask", description="Выбрать маску reply-реплики"),
+    BotCommand(command="cancel", description="Убрать отложенный ответ"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Кнопка смыва"),
 ]
@@ -76,8 +77,11 @@ async def main() -> None:
     # Восстановление сессий всех пользователей + список pending для recovery.
     restored = session.restore_all()
     pending_uids = [uid for uid, s in restored if session.has_pending(s)]
+    queued_uids = [uid for uid, s in restored if session.has_queued(s)]
     for uid in pending_uids:
         log.info("pending_answer detected for uid=%s — recovery will run after startup", uid)
+    for uid in queued_uids:
+        log.info("queued_answer detected for uid=%s — recovery will run after pending", uid)
 
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
@@ -108,6 +112,14 @@ async def main() -> None:
             await recovery.process_pending_on_startup(bot, uid)
         except Exception:
             log.exception("pending recovery failed for uid=%s", uid)
+
+    # Durable merge-slot сообщений, пришедших во время прошлой генерации, дожимаем
+    # после pending recovery: он не должен обгонять уже взятый в LLM ответ.
+    for uid in queued_uids:
+        try:
+            await recovery.process_queued_on_startup(bot, uid)
+        except Exception:
+            log.exception("queued recovery failed for uid=%s", uid)
 
     # Сообщения, пришедшие пока контейнер лежал, — обработать склеенными в один
     # ответ (один итоговый комментарий), ДО старта обычного поллинга.

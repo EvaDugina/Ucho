@@ -1,7 +1,7 @@
 """Юнит-тесты сервис-слоя записи в граф (вынесено из handlers).
 
 apply_processed принимает готовый ``result``-dict (как от llm.process_answer) —
-поэтому тестируется без Telegram/AITunnel, на изолированном tmp-вольте.
+поэтому тестируется без Telegram/live-LLM provider, на изолированном tmp-вольте.
 """
 from __future__ import annotations
 

@@ -8,8 +8,9 @@
 
 Связи между концептами, реальные противоречия, промоушн `draft → stable` и выверенная проза портрета собираются отдельными ручными проходами сильной моделью (`reconcista`, `depersonalization`), а не live-ботом.
 
-**Приватность:** live-LLM работает через AITunnel. Тексты диалога уходят во внешний
-AI-провайдер по AITunnel API; бот по-прежнему молчит со всеми, кроме доверенных
+**Приватность:** live-LLM работает через внешний OpenAI-compatible provider:
+OpenRouter при непустом `OPENROUTER_API_KEY`, иначе AITunnel. Тексты диалога уходят во внешний
+AI-провайдер; бот по-прежнему молчит со всеми, кроме доверенных
 пользователей (whitelist по `OWNER_TELEGRAM_ID` + `ALLOWED_TELEGRAM_IDS`).
 
 Стадия: **POC B**. Граф пишется в папку, заданную `VAULT_HOST_PATH`; при серверном запуске это путь к vault на сервере (например `/srv/psycho/vault`). Синхронизация хранилища между машинами — только через git.
@@ -49,12 +50,13 @@ Psycho/
 ### 1. Среда
 
 - Docker Desktop с **WSL 2 based engine**.
-- AITunnel API key.
+- OpenRouter API key (preferred) или AITunnel API key (fallback).
 
 ### 2. Токены
 
 - Telegram: [@BotFather](https://t.me/BotFather) → `/newbot` → токен.
-- AITunnel: создай ключ в личном кабинете и положи его в `AITUNNEL_API_KEY`.
+- OpenRouter: создай ключ и положи его в `OPENROUTER_API_KEY`.
+- AITunnel fallback: если OpenRouter не используешь, положи ключ в `AITUNNEL_API_KEY`.
 - Свой Telegram user_id: [@userinfobot](https://t.me/userinfobot) → `/start`.
 - В @BotFather: `/setjoingroups` → Disable; `/setprivacy` → Enable.
 
@@ -64,7 +66,7 @@ Psycho/
 cp .env.example .env
 # обязательно заполни:
 #   TELEGRAM_BOT_TOKEN
-#   AITUNNEL_API_KEY
+#   OPENROUTER_API_KEY  (или AITUNNEL_API_KEY)
 #   OWNER_TELEGRAM_ID
 #   VAULT_HOST_PATH  (если хранишь вольт не по дефолтному пути)
 ```
@@ -79,6 +81,22 @@ docker compose logs -f bot
 ```
 
 Compose поднимает только `bot`; локального LLM-сервиса в проекте больше нет.
+
+### 5. Серверный deploy
+
+Для Ubuntu 24.04/Timeweb есть готовый runbook и скрипты в `deploy/`:
+
+```bash
+deploy/deploy.sh   # первый запуск на сервере
+deploy/update.sh   # git pull кода + git pull vault + rebuild/restart
+deploy/stop.sh     # остановить контейнер bot
+```
+
+Docker build берёт базовый образ Python через `PYTHON_BASE_IMAGE`; дефолт в
+deploy-скриптах и compose — `mirror.gcr.io/library/python:3.12-slim`, чтобы не
+упираться в anonymous pull limit Docker Hub на свежем VPS.
+
+Подробная инструкция: `deploy/README.md`.
 
 ## Команды бота
 
@@ -96,15 +114,22 @@ Compose поднимает только `bot`; локального LLM-серв
 | `/regen [маска]` | Reply на комментарий Иуды: новая реплика в другой/выбранной маске |
 | `/like` | Reply на реплику Иуды: добавить её в избранное |
 | `/remask` | Reply на вопрос или комментарий Иуды: открыть меню смены лица |
+| `/cancel` | Убрать отложенный ответ, если он ещё не ушёл в LLM |
 | `/start` | Смыв: закрыть сессию (данные целы) |
 | `/help` | Список команд |
 | `/adduser` `/removeuser` `/users` `/dailyall` | Админ (только владелец) |
 
-Команды, кроме `/pebble`, `/regen`, `/like`, `/remask`, **закрывают** активную сессию; её можно продолжить reply,
+Команды, кроме `/pebble`, `/regen`, `/like`, `/remask`, `/cancel`, **закрывают** активную сессию; её можно продолжить reply,
 потому что полный transcript лежит в `00_raw/sessions`. `/ask` `/echo` `/ucho` `/about` `/requestion` затем открывают новую.
 Индикатор «Думаю» (🎰 + текст) показывается только при генерации вопроса (`/ask`) и
 портрета (`/about`); реакции в диалоге идут молча. Подсказки команд при наборе `/`
 видны **только доверенным** (`BotCommandScopeChat`); админ-блок — только владельцу.
+
+Если человек пишет новый текст, пока предыдущий ответ уже обрабатывается, бот
+склеивает эти сообщения в один отложенный ответ через пустую строку и отвечает
+`Ещё думаю.`. `/echo <текст>` в этот момент тоже добавляет текст в очередь, а
+другие команды только получают `Ещё думаю.`. `/cancel` удаляет очередь, если она
+ещё не ушла в LLM, но не прерывает уже начатую генерацию.
 
 ## Модель диалога
 
@@ -115,7 +140,7 @@ Compose поднимает только `bot`; локального LLM-серв
 ```
 
 - Бот **не задаёт уточняющих вопросов** — на каждый ответ даёт короткую **реакцию от первого лица** и ждёт следующего сообщения.
-- Сессия закрывается, только когда задан новый главный вопрос или выполнена **любая команда**, кроме `/pebble`, `/regen`, `/like`, `/remask`. Открыта всегда ≤1 сессия.
+- Сессия закрывается, только когда задан новый главный вопрос или выполнена **любая команда**, кроме `/pebble`, `/regen`, `/like`, `/remask`, `/cancel`. Открыта всегда ≤1 сессия.
 - **Reply-resume:** ответив (reply) на любое сообщение старой сессии, можно её продолжить; поиск идёт по `00_raw/sessions`.
 - Промпты разнесены: `prompts/iuda.md` (персона — характер, голос от 1-го лица) + `base.md` (домены, концепты, формат JSON) + аддендумы `ask.md` / `process.md` + отдельный `about.md`. Примеры стиля вопросов — `questions_examples.md`.
 
@@ -133,9 +158,18 @@ Compose поднимает только `bot`; локального LLM-серв
 
 `<vault>/users/<uid>/_state.json` — сквозной счётчик `last_q_num` и daily marker. Тоже переживает рестарт.
 
-## Модели AITunnel
+## Live-LLM provider
 
-Дефолтный live-контур:
+OpenRouter включается с приоритетом, если `OPENROUTER_API_KEY` непустой:
+
+```powershell
+OPENROUTER_API_KEY=...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL_DEFAULT=qwen/qwen3-235b-a22b-2507
+OPENROUTER_MODEL_FALLBACKS=deepseek/deepseek-v4-flash
+```
+
+Если `OPENROUTER_API_KEY` пустой, используется AITunnel fallback:
 
 ```powershell
 AITUNNEL_BASE_URL=https://api.aitunnel.ru/v1
@@ -144,7 +178,7 @@ LLM_MODEL_DEFAULT=qwen3-235b-a22b-2507
 LLM_MODEL_FALLBACKS=deepseek-v4-flash
 ```
 
-Локальный LLM-контур удалён из runtime. Если AITunnel-модель недоступна, бот
+Локальный LLM-контур удалён из runtime. Если модель провайдера недоступна, бот
 не сообщает об этом пользователю; при сбое комментария к ответу он берёт короткую
 заготовленную реплику, остальные LLM-сбои логируются служебно.
 

@@ -130,6 +130,67 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         log.exception("recovery: failed to send reaction")
 
 
+async def process_queued_on_startup(bot: Bot, uid: int) -> None:
+    """Дожать durable queued_answer после pending recovery и до offline backlog."""
+    userctx.set_user(uid)
+    s = session.get()
+    if s is None or not session.has_queued(s):
+        return
+    while session.has_queued(s):
+        item = session.pop_queued_answer()
+        if not isinstance(item, dict):
+            return
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        fragments = item.get("fragments")
+        last = fragments[-1] if isinstance(fragments, list) and fragments else {}
+        try:
+            await bot.send_chat_action(uid, "typing")
+        except Exception:
+            log.exception("queued recovery: failed to send chat action")
+        try:
+            payload = await conversation_service.process_probe_answer(
+                text,
+                message_id=last.get("message_id"),
+                at=last.get("at"),
+                reply_to_message_id=last.get("reply_to_message_id"),
+                is_owner=users.is_owner(uid),
+                question=str(item.get("question") or ""),
+                domain_hint=item.get("domain"),
+                q_num=vault.next_q_num(),
+                asked_at=item.get("asked_at"),
+                session_context_snapshot=str(item.get("session_context") or ""),
+                mode=str(item.get("mode") or "probe"),
+            )
+        except LLMError:
+            log.warning("queued recovery: process_answer LLM error; user reply suppressed")
+            return
+        except Exception:
+            log.exception("queued recovery failed")
+            return
+        if payload is None:
+            continue
+        if payload.mood_message:
+            await bot.send_message(uid, payload.mood_message)
+        await session_messages.send_question(
+            bot, uid,
+            q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+            bot_mood=payload.bot_mood,
+            admin_controls=bool(payload.bot_mood),
+            action_context={
+                "session_id": payload.session_id,
+                "answered_q_num": payload.answered_q_num,
+                "kind": "reaction",
+                "user_text": payload.user_text,
+                "question": payload.answered_question,
+                "session_context": payload.session_context,
+                "reply_to_user_message_id": payload.reply_to_user_message_id,
+            },
+        )
+        vault.commit_all("queued answer")
+
+
 async def process_offline_backlog(bot: Bot, dp: Dispatcher) -> None:
     """Слить бэклог Telegram ДО старта поллинга и обработать офлайн-сообщения.
 

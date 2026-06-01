@@ -82,6 +82,17 @@ def context_for_domain(domain: str | None) -> str:
     return graph.context_snapshot(concepts)
 
 
+def _coerce_datetime(value: object | None, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return fallback
+    return fallback
+
+
 async def process_probe_answer(
     text: str,
     *,
@@ -89,16 +100,36 @@ async def process_probe_answer(
     at: object | None = None,
     reply_to_message_id: int | None = None,
     is_owner: bool = False,
+    question: str | None = None,
+    domain_hint: str | None = None,
+    q_num: int | None = None,
+    asked_at: object | None = None,
+    session_context_snapshot: str | None = None,
+    mode: str | None = None,
 ) -> ReactionPayload | None:
     """Обработать уже принятый user text и вернуть payload реакции для отправки."""
     s = session.get()
     if s is None:
         return None
-    if s.current_q_num is None:
+    if s.current_q_num is None and q_num is None:
         log.warning("session has no current_q_num; assigning fresh")
         s.current_q_num = vault.next_q_num()
         session.persist()
-    real_hint = real_domain(s.last_domain) or real_domain(s.domain)
+    active_q_num = q_num if q_num is not None else s.current_q_num
+    active_question = question if question is not None else s.last_question
+    if domain_hint is not None:
+        active_domain = real_domain(domain_hint)
+    else:
+        active_domain = real_domain(s.last_domain) or real_domain(s.domain)
+    active_asked_at = _coerce_datetime(asked_at, s.asked_at)
+    active_mode = mode or s.mode
+    if active_q_num is None:
+        active_q_num = vault.next_q_num()
+    display_domain = domain_hint if domain_hint is not None else active_domain
+    s.current_q_num = active_q_num
+    s.last_question = active_question
+    s.last_domain = str(display_domain or s.last_domain or "")
+    s.asked_at = active_asked_at
     event = session_log.append_required(
         session_id=s.id,
         role="user",
@@ -107,15 +138,15 @@ async def process_probe_answer(
         at=at,
         message_id=message_id,
         reply_to_message_id=reply_to_message_id,
-        q_num=s.current_q_num,
-        domain=real_hint,
+        q_num=active_q_num,
+        domain=active_domain,
     )
     s.pending_answer_event_id = event.get("event_id")
     s.pending_answer = None
     session.persist()
     s.record_user(text, at=at)
-    session_context = s.render_transcript()
-    context_concepts = context_for_domain(real_hint)
+    session_context = session_context_snapshot or s.render_transcript()
+    context_concepts = context_for_domain(active_domain)
 
     mood_vec = None
     bot_mood = None
@@ -150,13 +181,13 @@ async def process_probe_answer(
         bot_mood = moods.random_bot_mood()
 
     result = await process_answer(
-        question=s.last_question,
+        question=active_question,
         answer=text,
-        domain_hint=real_hint,
+        domain_hint=active_domain,
         context_concepts=context_concepts,
         bot_mood=bot_mood,
         session_context=session_context,
-        mode=s.mode,
+        mode=active_mode,
     )
     moods.record_mask_frequency_draft(
         result.get("mask_frequency_draft"),
@@ -165,7 +196,7 @@ async def process_probe_answer(
     )
 
     try:
-        apply_processed(result, s.current_q_num, s.asked_at, s.last_question, text, session_domain=real_hint)
+        apply_processed(result, active_q_num, active_asked_at, active_question, text, session_domain=active_domain)
     except Exception:
         log.exception("apply_processed failed")
 
@@ -177,15 +208,15 @@ async def process_probe_answer(
         moods.log_turn(mood_vec, bot_mood, vad=vad)
 
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
-    answered_question = s.last_question
-    answered_q_num = s.current_q_num
+    answered_question = active_question
+    answered_q_num = active_q_num
     new_n = vault.next_q_num()
-    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
+    next_domain = active_domain if active_domain in DOMAINS else "everyday"
     session.set_question(question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
     session.persist()
     return ReactionPayload(
         q_num=new_n,
-        mode=s.mode,
+        mode=active_mode,
         domain=next_domain,
         text=reaction,
         bot_mood=bot_mood,

@@ -1,4 +1,4 @@
-"""Обёртка над AITunnel через openai-совместимый API.
+"""Обёртка над live-LLM provider через openai-совместимый API.
 
 Функции по режимам system-prompt:
 - ask_next        → mode: ask (главный вопрос; примеры стиля из questions_examples.md)
@@ -17,9 +17,10 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from . import about, mood_file, moods, vault
 from .config import (
-    AITUNNEL_API_KEY,
-    AITUNNEL_BASE_URL,
     DOMAINS,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_DEFAULT_HEADERS,
     LLM_FALLBACK_ABOUT,
     LLM_FALLBACK_ASK,
     LLM_FALLBACK_FAST,
@@ -34,23 +35,27 @@ from .config import (
     LLM_MODEL_PROCESS,
     LLM_MODEL_PSYCH,
     LLM_MODEL_REACTION,
+    LLM_PROVIDER_NAME,
     LLM_TIMEOUT,
     PROMPTS_DIR,
 )
 from .errors import LLMError
-from .validation import strip_extra_punctuation
+from .validation import strip_comment_punctuation
 
 log = logging.getLogger(__name__)
 
-# timeout — чтобы зависший/недоступный AITunnel не держал бота ~600 c (дефолт sdk).
+# timeout — чтобы зависший/недоступный provider не держал бота ~600 c (дефолт sdk).
 # max_retries=1 — один повтор на транзиентный сбой, без многократного умножения
 # ожидания (worst case ≈ 2 × LLM_TIMEOUT, а не 600 c).
-_client = AsyncOpenAI(
-    api_key=AITUNNEL_API_KEY,
-    base_url=AITUNNEL_BASE_URL,
-    timeout=LLM_TIMEOUT,
-    max_retries=1,
-)
+_client_kwargs = {
+    "api_key": LLM_API_KEY,
+    "base_url": LLM_BASE_URL,
+    "timeout": LLM_TIMEOUT,
+    "max_retries": 1,
+}
+if LLM_DEFAULT_HEADERS:
+    _client_kwargs["default_headers"] = LLM_DEFAULT_HEADERS
+_client = AsyncOpenAI(**_client_kwargs)
 
 # Системный промпт JSON-режимов: персона (iuda) + механика графа (base) + addendum.
 # iuda.md — характер/голос/правила общения, нужен везде, где модель говорит человеку.
@@ -183,25 +188,25 @@ def _models_for(task: str) -> tuple[str, ...]:
 def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, ...]) -> None:
     summary = " → ".join(models) if models else "нет настроенных моделей"
     detail = "; ".join(errors)
-    log.warning("LLM %s all models unavailable: %s", task, detail)
+    log.warning("LLM %s all %s models unavailable: %s", task, LLM_PROVIDER_NAME, detail)
     try:
         vault.append_log(
             "warn",
             "llm_models_unavailable",
-            f"task={task}; route={summary}; {detail}",
+            f"provider={LLM_PROVIDER_NAME}; task={task}; route={summary}; {detail}",
         )
     except Exception:
         log.exception("failed to write LLM unavailable warning")
     raise LLMError(
         "LLM request failed for all models: " + detail,
-        user_message=f"Модели AITunnel сейчас недоступны: {summary}. Попробуй позже.",
+        user_message=f"Модели {LLM_PROVIDER_NAME} сейчас недоступны: {summary}. Попробуй позже.",
     )
 
 
 async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) -> dict:
     """Вызов LLM с принудительным JSON-выводом.
 
-    Сбой запроса и неразбираемый ответ пробуют следующий AITunnel fallback.
+    Сбой запроса и неразбираемый ответ пробуют следующий provider fallback.
     Если все модели сорвались — ``LLMError``; вызывающий хэндлер ловит её и
     отвечает нейтральной фразой.
     """
@@ -232,7 +237,7 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
 
 
 async def _chat_text(task: str, messages: list[dict], temperature: float = 0.6) -> str:
-    """Plain-text AITunnel call with the same task routing/fallback policy."""
+    """Plain-text LLM call with the same task routing/fallback policy."""
     errors: list[str] = []
     models = _models_for(task)
     for model in models:
@@ -365,8 +370,6 @@ async def ask_next(
             f"ask: LLM returned domain={bad!r} → coerced to 'everyday'",
         )
         data["domain"] = "everyday"
-    # Вопрос Иуды чистим от лишней пунктуации (стиль персоны).
-    data["question"] = strip_extra_punctuation(data.get("question") or "")
     return data
 
 
@@ -416,7 +419,7 @@ async def process_answer(
     data.setdefault("user_delta", {})  # портрет пользователя (about.apply_delta)
     # Реплику Иуды чистим от лишней пунктуации (стиль персоны). observations/quote
     # (слова человека) НЕ трогаем.
-    data["reaction"] = strip_extra_punctuation(data.get("reaction") or "")
+    data["reaction"] = strip_comment_punctuation(data.get("reaction") or "")
     return data
 
 
@@ -577,7 +580,7 @@ async def regenerate_reaction(
         ],
         temperature=0.7,
     )
-    return strip_extra_punctuation(text).strip()
+    return strip_comment_punctuation(text).strip()
 
 
 async def about_present(portrait: str) -> str:
@@ -591,4 +594,4 @@ async def about_present(portrait: str) -> str:
         {"role": "user", "content": f"Портрет (твоя опись этого человека):\n{portrait}\n\nПокажи мне, каким ты меня видишь."},
     ]
     text = await _chat_text("about", messages, temperature=0.5)
-    return strip_extra_punctuation(text)
+    return text

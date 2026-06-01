@@ -80,3 +80,34 @@ def test_set_current_writes_and_preserves_baseline():
     assert mood_file.baseline() == (0.2, 0.1, -0.1)
     assert "вселение_уверенности" in mood_file.render_for_prompt()
     assert "апатии, гаснет к вечеру" in mp.read_text(encoding="utf-8")
+
+
+def test_render_about_context_includes_mood_and_profile():
+    _fresh(50005)
+    pdir = userctx.user_root() / "03_personality"
+    pdir.mkdir(parents=True, exist_ok=True)
+    about.path().write_text(
+        "---\nregister: образный\ntone: прямой\n---\n\n"
+        "# Портрет пользователя\n\n## Манера речи\n\nГоворит коротко и резко.\n",
+        encoding="utf-8",
+    )
+    mood_file.path().write_text(
+        "---\nmood: тревожная собранность\nbot_mood: вера\nvalence: -0.2\n---\n\n"
+        "# Настроение\n\n"
+        "> Frontmatter выше — живой снимок настроения.\n\n"
+        "## Анализ настроения\n\nДержится на злой дисциплине.\n",
+        encoding="utf-8",
+    )
+    (pdir / "profile.md").write_text(
+        "---\nupdated: 2026-05-30\n---\n\n"
+        "# Психометрика\n\nOCEAN: высокая открытость.\n",
+        encoding="utf-8",
+    )
+
+    ctx = about.render_about_context()
+
+    assert "Говорит коротко и резко." in ctx
+    assert "тревожная собранность" in ctx
+    assert "Держится на злой дисциплине." in ctx
+    assert "OCEAN: высокая открытость." in ctx
+    assert "Frontmatter выше" not in ctx

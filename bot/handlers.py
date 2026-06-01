@@ -329,6 +329,77 @@ async def _accept_user_text(message: Message, raw: str) -> str | None:
     return text
 
 
+async def _queue_answer_from_message(message: Message, clean: str, *, source: str = "text") -> None:
+    """Поставить текст в merge-slot очереди и дать короткий busy-сигнал."""
+    session.enqueue_answer(
+        clean,
+        message_id=getattr(message, "message_id", None),
+        at=getattr(message, "date", None),
+        reply_to_message_id=(
+            message.reply_to_message.message_id if message.reply_to_message is not None else None
+        ),
+        source=source,
+    )
+    await message.answer(ratelimit.BUSY_MESSAGE)
+
+
+async def _send_reaction_payload(message: Message, payload: conversation_service.ReactionPayload) -> None:
+    if payload.mood_message:
+        await message.answer(payload.mood_message)
+    await _send_question(
+        message.bot, message.chat.id,
+        q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+        bot_mood=payload.bot_mood,
+        admin_controls=bool(payload.bot_mood),
+        action_context={
+            "session_id": payload.session_id,
+            "answered_q_num": payload.answered_q_num,
+            "kind": "reaction",
+            "user_text": payload.user_text,
+            "question": payload.answered_question,
+            "session_context": payload.session_context,
+            "reply_to_user_message_id": payload.reply_to_user_message_id,
+        },
+    )
+
+
+async def _drain_queued_answers(message: Message, *, is_owner: bool) -> None:
+    """Обработать всё, что человек успел дослать, пока предыдущий ответ был в LLM."""
+    while session.has_queued():
+        item = session.pop_queued_answer()
+        if not isinstance(item, dict):
+            return
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        fragments = item.get("fragments")
+        last = fragments[-1] if isinstance(fragments, list) and fragments else {}
+        try:
+            payload = await conversation_service.process_probe_answer(
+                text,
+                message_id=last.get("message_id"),
+                at=last.get("at"),
+                reply_to_message_id=last.get("reply_to_message_id"),
+                is_owner=is_owner,
+                question=str(item.get("question") or ""),
+                domain_hint=item.get("domain"),
+                q_num=vault.next_q_num(),
+                asked_at=item.get("asked_at"),
+                session_context_snapshot=str(item.get("session_context") or ""),
+                mode=str(item.get("mode") or "probe"),
+            )
+        except LLMError:
+            _log_llm_silence("queued process_answer")
+            await message.answer(
+                safe_chat_html(moods.llm_error_fallback_reply()),
+                parse_mode="HTML",
+            )
+            return
+        if payload is not None:
+            await _send_reaction_payload(message, payload)
+            vault.commit_all("queued answer")
+
+
 # ---------- thinking / spinner ----------
 
 # Один и тот же стикер всегда — 🎰 (slot-machine dice). Не выбираем случайно.
@@ -455,6 +526,7 @@ _HELP_BODY = (
     "\n"
     "<b>Сервис</b>\n"
     "<b>/start</b> — смыв: закрыть сессию (данные целы)\n"
+    "<b>/cancel</b> — убрать отложенный ответ, если он ещё не в LLM\n"
     "<b>/help</b> — этот список\n"
     "<b>/history</b> — последние вопросы"
 )
@@ -818,6 +890,17 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
     if not _is_allowed(message):
         return
     raw = (command.args or "").strip()
+    uid = userctx.current_uid()
+    if session.has_unfinished_answer() or ratelimit.is_inflight(uid):
+        if raw:
+            text, truncated = safe_user_text(raw, limit=2000)
+            if text:
+                if truncated:
+                    await message.answer("⚠ Вопрос был слишком длинным — обрезал.")
+                await _queue_answer_from_message(message, text, source="echo")
+                return
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
     if not raw:
         await message.answer("Использование: /echo <текст твоего вопроса>")
         return
@@ -845,6 +928,21 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
     )
 
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: Message) -> None:
+    """Удалить отложенный ответ, если он ещё не ушёл в LLM."""
+    if not _is_allowed(message):
+        return
+    if session.clear_queued_answer():
+        await message.answer("Я удалил тебя из памяти")
+        return
+    uid = userctx.current_uid()
+    if session.has_pending() or ratelimit.is_inflight(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+    await message.answer("Нечего удалять.")
+
+
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
     """Бросить камень: статичная короткая реплика. Прозрачен для сессии — НЕ открывает и
@@ -864,7 +962,7 @@ async def cmd_about(message: Message) -> None:
     # /about открывает сессию-обсуждение: можно ответить (reply) на портрет.
     session.start(mode="probe", domain=None)
     _anchor_user_cmd(message)
-    portrait = about.render_for_prompt(max_chars=4000)
+    portrait = about.render_about_context(max_chars=6500)
     if not portrait:
         await _session_reply(
             message,
@@ -1170,6 +1268,12 @@ async def on_text(message: Message) -> None:
     s = session.get()
     text = (message.text or "").strip()
 
+    if session.has_unfinished_answer(s) and not text.startswith("/"):
+        clean = await _accept_user_text(message, text)
+        if clean is not None:
+            await _queue_answer_from_message(message, clean, source="text")
+        return
+
     # reply на сообщение сессии → продолжить именно ту сессию (даже закрытую, в
     # пределах последних 25). Если reply на сообщение текущей активной сессии —
     # просто продолжаем её. Иначе ищем в кольце и резюмируем.
@@ -1286,23 +1390,8 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
         return
     if payload is None:
         return
-    if payload.mood_message:
-        await message.answer(payload.mood_message)
-    await _send_question(
-        message.bot, message.chat.id,
-        q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
-        bot_mood=payload.bot_mood,
-        admin_controls=bool(payload.bot_mood),
-        action_context={
-            "session_id": payload.session_id,
-            "answered_q_num": payload.answered_q_num,
-            "kind": "reaction",
-            "user_text": payload.user_text,
-            "question": payload.answered_question,
-            "session_context": payload.session_context,
-            "reply_to_user_message_id": payload.reply_to_user_message_id,
-        },
-    )
+    await _send_reaction_payload(message, payload)
+    await _drain_queued_answers(message, is_owner=_is_owner(message))
 
 
 # ---------- scheduler / ask helpers ----------

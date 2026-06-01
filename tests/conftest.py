@@ -21,6 +21,7 @@ os.environ["AITUNNEL_BASE_URL"] = "https://api.aitunnel.ru/v1"
 os.environ["AITUNNEL_API_KEY"] = "test-aitunnel-key"
 os.environ["LLM_MODEL_DEFAULT"] = "qwen3-235b-a22b-2507"
 os.environ["LLM_MODEL_FALLBACKS"] = "deepseek-v4-flash"
+os.environ.pop("OPENROUTER_API_KEY", None)
 # Общий на сессию временный вольт; изоляция между тестами — через уникальный uid.
 os.environ["VAULT_PATH"] = tempfile.mkdtemp(prefix="psycho-test-vault-")
 

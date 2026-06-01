@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import face_actions, handlers, moods, qmap, questions, session, session_log, sessions, userctx
+from bot import face_actions, handlers, middleware, moods, qmap, questions, session, session_log, sessions, userctx, vault
 from bot.errors import LLMError, VaultError
 from bot.services import conversation_service, note_service
 
@@ -65,6 +65,35 @@ def test_session_json_keeps_pending_ref_without_history(as_user):
     assert session.pending_answer_text(s) == "Полный ответ остаётся в 00_raw/sessions."
 
 
+def test_session_json_keeps_queued_answer_and_restore(as_user):
+    session.start(mode="probe", domain="everyday")
+    q_num = vault.next_q_num()
+    session.set_question("Что держит?", "everyday", q_num=q_num)
+
+    session.enqueue_answer(
+        "первый кусок",
+        message_id=31,
+        at="2026-05-25T11:01:00",
+        source="text",
+    )
+    session.enqueue_answer(
+        "второй кусок",
+        message_id=32,
+        at="2026-05-25T11:02:00",
+        source="echo",
+    )
+
+    data = json.loads((userctx.user_root() / "_session.json").read_text(encoding="utf-8"))
+    assert data["queued_answer"]["text"] == "первый кусок\n\nвторой кусок"
+    assert data["queued_answer"]["question"] == "Что держит?"
+    assert [f["source"] for f in data["queued_answer"]["fragments"]] == ["text", "echo"]
+
+    session._active.pop(as_user, None)
+    restored = dict(session.restore_all())
+    assert session.has_queued(restored[as_user])
+    assert restored[as_user].queued_answer["origin_q_num"] == q_num
+
+
 class _FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
@@ -94,6 +123,107 @@ class _FakeMessage:
         msg = SimpleNamespace(message_id=800 + len(self.answers), date=self.date)
         self.answers.append({"text": text, "kwargs": kwargs, "message": msg})
         return msg
+
+
+@pytest.mark.asyncio
+async def test_busy_text_and_echo_merge_into_cancelable_queue(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    session.get().pending_answer_event_id = "already-in-llm"
+    session.persist()
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+
+    text_msg = _FakeMessage("первый кусок")
+    text_msg.from_user = SimpleNamespace(id=as_user)
+    await handlers.on_text(text_msg)
+
+    echo_msg = _FakeMessage("/echo второй кусок")
+    echo_msg.from_user = SimpleNamespace(id=as_user)
+    await handlers.cmd_echo(echo_msg, SimpleNamespace(args="второй кусок"))
+
+    queued = session.get().queued_answer
+    assert queued["text"] == "первый кусок\n\nвторой кусок"
+    assert [f["source"] for f in queued["fragments"]] == ["text", "echo"]
+    assert text_msg.answers[-1]["text"] == "Ещё думаю."
+    assert echo_msg.answers[-1]["text"] == "Ещё думаю."
+
+    cancel_msg = _FakeMessage("/cancel")
+    cancel_msg.from_user = SimpleNamespace(id=as_user)
+    await handlers.cmd_cancel(cancel_msg)
+
+    assert session.get().queued_answer is None
+    assert session.get().pending_answer_event_id == "already-in-llm"
+    assert cancel_msg.answers[-1]["text"] == "Я удалил тебя из памяти"
+
+
+@pytest.mark.asyncio
+async def test_busy_command_middleware_replies_and_keeps_session(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    session.get().pending_answer_event_id = "already-in-llm"
+    session.persist()
+    message = _FakeMessage("/ask")
+    message.from_user = SimpleNamespace(id=as_user)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
+    monkeypatch.setattr(middleware, "Message", _FakeMessage)
+
+    await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
+
+    assert called is False
+    assert message.answers[-1]["text"] == "Ещё думаю."
+    assert session.get() is not None
+    assert session.get().last_question == "Что держит?"
+
+
+@pytest.mark.asyncio
+async def test_drain_queued_answer_uses_old_question_snapshot(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    origin_q = vault.next_q_num()
+    session.set_question("Старый вопрос?", "everyday", q_num=origin_q)
+    session.enqueue_answer("досланный текст", message_id=41, at="2026-05-25T11:05:00")
+    reaction_q = vault.next_q_num()
+    session.set_question("Текущий комментарий.", "everyday", q_num=reaction_q)
+    message = _FakeMessage("carrier")
+    message.from_user = SimpleNamespace(id=as_user)
+    captured = {}
+
+    async def fake_process_probe_answer(text, **kwargs):
+        captured["text"] = text
+        captured.update(kwargs)
+        return conversation_service.ReactionPayload(
+            q_num=999,
+            mode="probe",
+            domain="everyday",
+            text="ответ",
+            bot_mood=None,
+            answered_q_num=kwargs["q_num"],
+            answered_question=kwargs["question"],
+            session_id=session.get().id,
+            user_text=text,
+            session_context=kwargs["session_context_snapshot"],
+            reply_to_user_message_id=kwargs["message_id"],
+        )
+
+    async def fake_send_payload(message, payload):
+        captured["payload"] = payload
+
+    monkeypatch.setattr(handlers.conversation_service, "process_probe_answer", fake_process_probe_answer)
+    monkeypatch.setattr(handlers, "_send_reaction_payload", fake_send_payload)
+    monkeypatch.setattr(handlers.vault, "commit_all", lambda *args, **kwargs: "sha")
+
+    await handlers._drain_queued_answers(message, is_owner=False)
+
+    assert captured["text"] == "досланный текст"
+    assert captured["question"] == "Старый вопрос?"
+    assert captured["q_num"] > reaction_q
+    assert session.get().queued_answer is None
 
 
 @pytest.mark.asyncio

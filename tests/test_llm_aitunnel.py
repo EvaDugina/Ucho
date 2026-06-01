@@ -1,5 +1,7 @@
-"""AITunnel routing tests — no network."""
+"""LLM provider routing tests — no network."""
 from __future__ import annotations
+
+import importlib
 
 import pytest
 
@@ -31,7 +33,9 @@ class _FakeClient:
 
 
 def test_aitunnel_defaults_do_not_use_local_qwen():
+    assert config.LLM_PROVIDER_NAME == "AITunnel"
     assert config.AITUNNEL_BASE_URL == "https://api.aitunnel.ru/v1"
+    assert config.LLM_BASE_URL == "https://api.aitunnel.ru/v1"
     assert config.LLM_MODEL_DEFAULT == "qwen3-235b-a22b-2507"
     assert config.LLM_MODEL_FALLBACKS == ("deepseek-v4-flash",)
     assert config.LLM_MODEL_FAST == "deepseek-v4-flash"
@@ -39,6 +43,37 @@ def test_aitunnel_defaults_do_not_use_local_qwen():
         "deepseek-v4-flash",
         "qwen3-235b-a22b-2507",
     )
+
+
+def test_openrouter_priority_allows_provider_model_ids(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("OPENROUTER_HTTP_REFERER", "https://example.test")
+    monkeypatch.setenv("OPENROUTER_APP_TITLE", "Psycho Test")
+    monkeypatch.delenv("AITUNNEL_API_KEY", raising=False)
+    try:
+        importlib.reload(config)
+        importlib.reload(llm)
+        assert config.LLM_PROVIDER_NAME == "OpenRouter"
+        assert config.LLM_API_KEY == "test-openrouter-key"
+        assert config.LLM_BASE_URL == "https://openrouter.ai/api/v1"
+        assert config.AITUNNEL_API_KEY == ""
+        assert config.LLM_DEFAULT_HEADERS == {
+            "HTTP-Referer": "https://example.test",
+            "X-OpenRouter-Title": "Psycho Test",
+        }
+        assert config.LLM_MODEL_DEFAULT == "qwen/qwen3-235b-a22b-2507"
+        assert config.LLM_MODEL_FALLBACKS == ("deepseek/deepseek-v4-flash",)
+        assert config._model_from_env(
+            "qwen/qwen3-235b-a22b-2507",
+            provider="openrouter",
+        ) == "qwen/qwen3-235b-a22b-2507"
+    finally:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_HTTP_REFERER", raising=False)
+        monkeypatch.delenv("OPENROUTER_APP_TITLE", raising=False)
+        monkeypatch.setenv("AITUNNEL_API_KEY", "test-aitunnel-key")
+        importlib.reload(config)
+        importlib.reload(llm)
 
 
 def test_aitunnel_config_rejects_non_aitunnel_values(monkeypatch):
@@ -119,3 +154,32 @@ async def test_regenerate_reaction_ignores_previous_generation_context(monkeypat
     assert "насмешка" in prompt
     assert "ПРЕДЫДУЩАЯ ГЕНЕРАЦИЯ" not in prompt
 
+
+@pytest.mark.asyncio
+async def test_only_generated_comments_drop_commas(as_user, monkeypatch):
+    async def fake_chat_json(task, messages, **kwargs):
+        if task == "ask":
+            return {"domain": "everyday", "question": "Жив, да? Или нет!"}
+        return {"observations": [], "reaction": "Ну, вот! Да?", "user_delta": {}}
+
+    monkeypatch.setattr(llm, "_chat_json", fake_chat_json)
+
+    question = await llm.ask_next(domain="everyday")
+    reaction = await llm.process_answer(
+        question="Что важно?",
+        answer="Ответ.",
+        domain_hint="everyday",
+    )
+
+    assert question["question"] == "Жив, да? Или нет!"
+    assert reaction["reaction"] == "Ну вот Да?"
+
+
+@pytest.mark.asyncio
+async def test_about_present_preserves_punctuation(monkeypatch):
+    async def fake_chat_text(task, messages, **kwargs):
+        return "Ты, значит: живой!"
+
+    monkeypatch.setattr(llm, "_chat_text", fake_chat_text)
+
+    assert await llm.about_present("портрет") == "Ты, значит: живой!"

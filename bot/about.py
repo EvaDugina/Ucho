@@ -1,7 +1,7 @@
 """Портрет пользователя (per-user): `03_personality/about.md` + журнал дельт.
 
 Гибрид (capture-first):
-- **Live (AITunnel, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
+- **Live (OpenAI-compatible provider, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
   и дописывает сырую дельту в `03_personality/deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
@@ -123,6 +123,91 @@ def _parse() -> tuple[dict, str]:
         log.exception("about frontmatter parse failed")
         fm = {}
     return (fm if isinstance(fm, dict) else {}), m.group(2)
+
+
+def _parse_markdown(text: str) -> tuple[dict, str]:
+    """Разобрать markdown с optional YAML frontmatter."""
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    try:
+        fm = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError:
+        log.exception("personality markdown frontmatter parse failed")
+        fm = {}
+    return (fm if isinstance(fm, dict) else {}), m.group(2)
+
+
+def _read_personality_markdown(name: str) -> tuple[dict, str]:
+    p = _dir() / name
+    if not p.exists():
+        return {}, ""
+    try:
+        return _parse_markdown(p.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("failed to read personality markdown: %s", name)
+        return {}, ""
+
+
+def _clip(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
+def _mood_context(max_chars: int = 1800) -> str:
+    fm, body = _read_personality_markdown("mood.md")
+    summary_keys = ("mood", "quality", "valence", "arousal", "dominance", "stability", "bot_mood")
+    summary = [f"{k}: {fm[k]}" for k in summary_keys if str(fm.get(k) or "").strip()]
+
+    lines: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line == "# Настроение":
+            continue
+        if line.startswith("> Frontmatter выше"):
+            continue
+        lines.append(line)
+    narrative = "\n".join(lines).strip()
+    if narrative == "## Анализ настроения":
+        narrative = ""
+
+    parts = []
+    if summary:
+        parts.append("; ".join(summary))
+    if narrative:
+        parts.append(narrative)
+    return _clip("\n".join(parts), max_chars)
+
+
+def _profile_context(max_chars: int = 2200) -> str:
+    _, body = _read_personality_markdown("profile.md")
+    lines = [ln.rstrip() for ln in body.splitlines()]
+    text = "\n".join(lines).strip()
+    return _clip(text, max_chars)
+
+
+def render_about_context(max_chars: int = 6500) -> str:
+    """Контекст для `/about`: портрет + настроение + psych-profile, если есть.
+
+    `about.md` остаётся главным источником, но публичный портрет получает ещё
+    выверенный нарратив настроения и профиль личности, которые пишет
+    depersonalization. Пустые скелеты не считаем содержательным контекстом.
+    """
+    parts: list[str] = []
+    portrait = render_for_prompt(max_chars=2500)
+    if portrait:
+        parts.append("# Портрет\n" + portrait)
+    mood = _mood_context()
+    if mood:
+        parts.append("# Настроение\n" + mood)
+    profile = _profile_context()
+    if profile:
+        parts.append("# Психометрический профиль\n" + profile)
+    return _clip("\n\n".join(parts), max_chars)
 
 
 def apply_delta(delta: dict) -> None:

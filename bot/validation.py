@@ -180,17 +180,14 @@ def safe_question_text(raw: str) -> str:
 
 
 _KEEP_PUNCT = {".", ",", "?"}
+_COMMENT_KEEP_PUNCT = {".", "?"}
 
 
 def strip_extra_punctuation(text: str) -> str:
-    """Из текста, который СОЧИНИЛ Иуда (реакция/вопрос/портрет), убрать все знаки
-    препинания, кроме точки, запятой и вопросительного знака.
+    """Legacy-очистка текста Иуды, где запятая ещё сохраняется.
 
-    Стиль персоны (по требованию): оставляем буквы/цифры/пробелы/переводы строк и
-    только ``. , ?``. Многоточие ``…`` → ``.``. Прочее (``! : ; — – - « » " ' ( )``
-    и т.п.) заменяем пробелом, чтобы не склеить слова, затем схлопываем горизонтальные
-    пробелы (переводы строк сохраняем). НЕ применять к словам пользователя
-    (дословные цитаты, текст ``/echo``) — только к сочинённому моделью.
+    Новые комментарии/реакции должны использовать `strip_comment_punctuation`;
+    вопросы и `/about` больше не проходят через этот sanitizer.
     """
     if not text:
         return ""
@@ -198,6 +195,23 @@ def strip_extra_punctuation(text: str) -> str:
     s = "".join(ch if (ch.isalnum() or ch.isspace() or ch in _KEEP_PUNCT) else " " for ch in s)
     s = re.sub(r"[^\S\n]+", " ", s)          # схлопнуть пробелы/табы, не трогая \n
     s = re.sub(r"\s+([.,?])", r"\1", s)       # убрать пробел перед . , ?
+    s = "\n".join(line.strip() for line in s.split("\n"))
+    return s.strip()
+
+
+def strip_comment_punctuation(text: str) -> str:
+    """Очистить только комментарии/реакции Иуды на ответы пользователя.
+
+    Для комментариев дополнительно убираем запятые: остаются буквы/цифры,
+    пробелы/переводы строк и только ``. ?``. Не применять к вопросам, `/about`
+    и любым словам пользователя.
+    """
+    if not text:
+        return ""
+    s = str(text).replace("…", ".")
+    s = "".join(ch if (ch.isalnum() or ch.isspace() or ch in _COMMENT_KEEP_PUNCT) else " " for ch in s)
+    s = re.sub(r"[^\S\n]+", " ", s)
+    s = re.sub(r"\s+([.?])", r"\1", s)
     s = "\n".join(line.strip() for line in s.split("\n"))
     return s.strip()
 

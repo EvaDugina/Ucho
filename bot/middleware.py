@@ -16,7 +16,7 @@ import random
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from . import session, userctx, users
+from . import ratelimit, session, userctx, users
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,15 @@ class AccessMiddleware(BaseMiddleware):
         # действия над reply-сообщением, они не должны закрывать текущую сессию.
         if isinstance(event, Message) and (event.text or "").startswith("/"):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
-            if cmd not in {"pebble", "like", "regen", "remask"} and session.close():
+            busy = session.has_unfinished_answer() or ratelimit.is_inflight(uid)
+            if busy:
+                if cmd not in {"cancel", "echo"}:
+                    try:
+                        await event.answer(ratelimit.BUSY_MESSAGE)
+                    except Exception:
+                        log.exception("failed to send busy reply to %s", uid)
+                    return
+                return await handler(event, data)
+            if cmd not in {"pebble", "like", "regen", "remask", "cancel"} and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)

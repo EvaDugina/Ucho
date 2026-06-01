@@ -105,6 +105,8 @@ class Session:
     # Двухфазный коммит ответа: ставится ДО process_answer, чистится ПОСЛЕ.
     pending_answer: Optional[str] = None
     pending_answer_event_id: Optional[str] = None
+    # Один durable merge-slot для текста, пришедшего пока текущий ответ уже в LLM.
+    queued_answer: Optional[dict] = None
     # Идентичность сессии и id всех её сообщений бота — для reply-resume (кольцо).
     id: str = ""
     message_ids: list[int] = field(default_factory=list)
@@ -199,10 +201,9 @@ class Session:
 _active: dict[int, "Session"] = {}
 
 # uid → asyncio.Lock. Сериализует await-растянутые мутации одной сессии.
-# Ответы в probe (_handle_probe) НЕ проходят single-flight ratelimit (он только
-# у /ask, /about, /ucho), поэтому два быстрых сообщения одного пользователя могут
-# переплестись на await-границах (classify_mood/process_answer) и испортить
-# порядок history/mood_trajectory. Лок по uid сериализует критическую секцию.
+# Ответы в probe идут под single-flight с durable `queued_answer` для досланного
+# текста. Лок всё равно нужен: он защищает порядок history/mood_trajectory и
+# восстановительные сценарии от переплетения на await-границах.
 _locks: dict[int, asyncio.Lock] = {}
 
 
@@ -369,6 +370,17 @@ def has_pending(s: Optional["Session"] = None) -> bool:
     return bool(s and (s.pending_answer or s.pending_answer_event_id))
 
 
+def has_queued(s: Optional["Session"] = None) -> bool:
+    s = s or get()
+    q = s.queued_answer if s is not None else None
+    return isinstance(q, dict) and bool(str(q.get("text") or "").strip())
+
+
+def has_unfinished_answer(s: Optional["Session"] = None) -> bool:
+    s = s or get()
+    return has_pending(s) or has_queued(s)
+
+
 def pending_answer_text(s: Optional["Session"] = None) -> str:
     s = s or get()
     if s is None:
@@ -379,6 +391,78 @@ def pending_answer_text(s: Optional["Session"] = None) -> str:
         if isinstance(text, str) and text.strip():
             return text.strip()
     return (s.pending_answer or "").strip()
+
+
+def enqueue_answer(
+    text: str,
+    *,
+    message_id: int | None = None,
+    at: object | None = None,
+    reply_to_message_id: int | None = None,
+    source: str = "text",
+) -> Optional[dict]:
+    """Склеить текст в один отложенный ответ на текущий вопрос.
+
+    Очередь хранит snapshot вопроса до того, как текущая генерация превратит
+    `last_question` в новый комментарий Иуды. Сам текст до старта обработки не
+    пишется в `00_raw/sessions`, поэтому `/cancel` может удалить его без следа.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return None
+    s = get()
+    if s is None or not s.last_question:
+        return None
+    fragment = {
+        "text": clean,
+        "source": source,
+        "message_id": message_id,
+        "reply_to_message_id": reply_to_message_id,
+        "at": _ts_iso(at),
+    }
+    q = s.queued_answer if isinstance(s.queued_answer, dict) else None
+    if q is None or not str(q.get("text") or "").strip():
+        q = {
+            "text": clean,
+            "fragments": [fragment],
+            "question": s.last_question,
+            "domain": s.last_domain or s.domain,
+            "origin_q_num": s.current_q_num,
+            "asked_at": s.asked_at.isoformat(),
+            "session_id": s.id,
+            "mode": s.mode,
+            "session_context": s.render_transcript(),
+        }
+    else:
+        existing = str(q.get("text") or "").strip()
+        q["text"] = "\n\n".join(x for x in (existing, clean) if x)
+        fragments = q.get("fragments")
+        if not isinstance(fragments, list):
+            fragments = []
+        fragments.append(fragment)
+        q["fragments"] = fragments
+    s.queued_answer = q
+    _persist()
+    return q
+
+
+def clear_queued_answer(s: Optional["Session"] = None) -> bool:
+    s = s or get()
+    if s is None or not has_queued(s):
+        return False
+    s.queued_answer = None
+    _persist()
+    return True
+
+
+def pop_queued_answer(s: Optional["Session"] = None) -> Optional[dict]:
+    s = s or get()
+    if s is None or not has_queued(s):
+        return None
+    q = s.queued_answer
+    s.queued_answer = None
+    _persist()
+    return q if isinstance(q, dict) else None
 
 
 def set_question(question: str, domain: str, q_num: Optional[int] = None) -> None:
