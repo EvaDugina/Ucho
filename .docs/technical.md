@@ -221,7 +221,7 @@ docker compose logs -f bot
 
 Серверный POC B deploy живёт в `deploy/`: `deploy.sh` для первого запуска на Ubuntu 24.04, `update.sh` для `git pull` кода + `git pull` vault + пересборки контейнера и `stop.sh` для остановки контейнера bot. Runbook — `deploy/README.md`.
 
-По умолчанию серверные пути: app `/srv/psycho/app`, vault `/srv/psycho/vault`. Vault синхронизируется только через git; `.env` переносится вручную и не коммитится. Docker build берёт Python base image через `PYTHON_BASE_IMAGE`; дефолт `mirror.gcr.io/library/python:3.12-slim` обходит anonymous pull limit Docker Hub на свежем VPS, а после `docker login` можно переопределить `PYTHON_BASE_IMAGE=python:3.12-slim`.
+По умолчанию серверные пути: app `/srv/psycho/app`, vault `/srv/psycho/vault`. Vault синхронизируется только через git; `.env` переносится вручную и не коммитится. Docker build берёт Python base image через `PYTHON_BASE_IMAGE`; дефолт `mirror.gcr.io/library/python:3.12-slim` обходит anonymous pull limit Docker Hub на свежем VPS, а после `docker login` можно переопределить `PYTHON_BASE_IMAGE=python:3.12-slim`. Для автоматического push vault-коммитов по SSH контейнер получает только один read-only deploy key через `docker-compose.ssh.yml`; repo-local author identity выставляется как `VAULT_GIT_USER_NAME` / `VAULT_GIT_USER_EMAIL` с дефолтом `Psycho Bot <psycho-bot@local>`.
 
 ### Тестирование
 
@@ -255,10 +255,11 @@ docker compose logs -f bot
 
 - **Куда пишем:**
   - Stderr контейнера (через стандартный `logging`) — `docker compose logs -f bot`.
+  - Файловый app-log контейнера — `.logs/bot.log` рядом с `docker-compose.yml` (`/srv/psycho/app/.logs/bot.log` на сервере), тот же python logging-поток с ротацией `10 MB x 5`.
   - `<vault>/.psycho/log.md` (append-only) — операционный журнал (drift skip, dedup, sanitize, llm-фолбэки).
   - Git внутри vault — каждый `_apply_processed` оставляет два коммита (`psycho(<uid>): before <op>` / `psycho(<uid>): <op>`). Коммит затрагивает только поддерево пользователя `users/<uid>/` — данные разных пользователей не смешиваются; `.psycho/` выведена из-под git (в `.gitignore`).
-- **Формат:** в `log.md` — `[YYYY-MM-DD HH:MM] LEVEL op — details`. В stderr — стандартный python logging.
-- **Ротация:** `.psycho/log.md` усекается по объёму (`_LOG_MAX_BYTES`, сейчас 1 MB), оставляя свежий хвост; stdout/stderr ротацию отдаём Docker/journal окружению.
+- **Формат:** в `log.md` — `[YYYY-MM-DD HH:MM] LEVEL op — details`. В stderr и `.logs/bot.log` — стандартный python logging.
+- **Ротация:** `.psycho/log.md` усекается по объёму (`_LOG_MAX_BYTES`, сейчас 1 MB), оставляя свежий хвост; `.logs/bot.log` ротируется через `CONTAINER_LOG_MAX_BYTES` / `CONTAINER_LOG_BACKUP_COUNT`; Docker stdout/stderr остаётся доступен через `docker compose logs`.
 - **Healthcheck/stone:** `/pebble` команда в Telegram — статичное «Больно.» без обращения к LLM; команда не закрывает сессию. Внешнего healthcheck-endpoint нет.
 
 ### Безопасность

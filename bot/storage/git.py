@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import shlex
 import subprocess
 from typing import Optional
 
@@ -10,6 +12,9 @@ from ..atomic import atomic_write_text
 from ..config import VAULT_PATH
 
 log = logging.getLogger(__name__)
+
+_DEFAULT_GIT_USER_NAME = "Psycho Bot"
+_DEFAULT_GIT_USER_EMAIL = "psycho-bot@local"
 
 _DEFAULT_GITIGNORE = """\
 # Obsidian local state
@@ -31,6 +36,26 @@ desktop.ini
 """
 
 
+def _git_ssh_command() -> str | None:
+    key_path = (os.getenv("VAULT_GIT_SSH_KEY") or "").strip()
+    if not key_path:
+        return None
+    return (
+        f"ssh -i {shlex.quote(key_path)} "
+        "-o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=accept-new"
+    )
+
+
+def _git_env() -> dict[str, str] | None:
+    ssh_command = _git_ssh_command()
+    if not ssh_command:
+        return None
+    env = os.environ.copy()
+    env["GIT_SSH_COMMAND"] = ssh_command
+    return env
+
+
 def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args],
@@ -38,6 +63,7 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=_git_env(),
         check=check,
     )
 
@@ -60,6 +86,23 @@ def _is_git_repo() -> bool:
         return False
 
 
+def _git_config_value(key: str) -> str:
+    result = _git("config", "--get", key, check=False)
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _ensure_git_identity() -> None:
+    env_name = (os.getenv("VAULT_GIT_USER_NAME") or "").strip()
+    env_email = (os.getenv("VAULT_GIT_USER_EMAIL") or "").strip()
+
+    if env_name or not _git_config_value("user.name"):
+        _git("config", "user.name", env_name or _DEFAULT_GIT_USER_NAME, check=False)
+    if env_email or not _git_config_value("user.email"):
+        _git("config", "user.email", env_email or _DEFAULT_GIT_USER_EMAIL, check=False)
+
+
 def ensure_git_repo() -> None:
     """Гарантировать, что vault — git репозиторий."""
     if not _git_available():
@@ -69,8 +112,7 @@ def ensure_git_repo() -> None:
     if fresh:
         log.info("initializing git repo in vault: %s", VAULT_PATH)
         _git("init", "-b", "main", check=False)
-        _git("config", "user.email", "psycho-bot@local", check=False)
-        _git("config", "user.name", "Psycho Bot", check=False)
+    _ensure_git_identity()
 
     gitignore = VAULT_PATH / ".gitignore"
     if not gitignore.exists():

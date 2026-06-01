@@ -117,7 +117,18 @@ set_env_default() {
 
 env_value() {
   local key="$1"
-  grep -E "^${key}=" "$APP_DIR/.env" | tail -n 1 | cut -d= -f2-
+  grep -E "^${key}=" "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+compose_cmd() {
+  local key_path
+  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
+  if [ -n "$key_path" ]; then
+    [ -f "$APP_DIR/docker-compose.ssh.yml" ] || die "docker-compose.ssh.yml not found at $APP_DIR"
+    docker compose -f docker-compose.yml -f docker-compose.ssh.yml "$@"
+  else
+    docker compose "$@"
+  fi
 }
 
 require_env_value() {
@@ -156,10 +167,18 @@ prepare_env() {
   set_env_default "VAULT_HOST_PATH" "$VAULT_DIR"
   set_env_default "VAULT_PATH" "/vault"
   set_env_default "AITUNNEL_BASE_URL" "https://api.aitunnel.ru/v1"
+  set_env_default "VAULT_GIT_USER_NAME" "Psycho Bot"
+  set_env_default "VAULT_GIT_USER_EMAIL" "psycho-bot@local"
 
   require_env_value "TELEGRAM_BOT_TOKEN"
   require_env_value "OWNER_TELEGRAM_ID"
   require_llm_key
+
+  local vault_git_ssh_key
+  vault_git_ssh_key="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
+  if [ -n "$vault_git_ssh_key" ] && [ ! -f "$vault_git_ssh_key" ]; then
+    die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $vault_git_ssh_key"
+  fi
 }
 
 run_checks() {
@@ -170,15 +189,15 @@ run_checks() {
 
   log "Running smoke tests in Docker (base image: $PYTHON_BASE_IMAGE)"
   cd "$APP_DIR"
-  docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke
+  compose_cmd run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke
 }
 
 start_bot() {
   log "Building and starting bot (base image: $PYTHON_BASE_IMAGE)"
   cd "$APP_DIR"
-  docker compose up -d --build bot
-  docker compose ps bot
-  docker compose logs --tail=80 bot
+  compose_cmd up -d --build bot
+  compose_cmd ps bot
+  compose_cmd logs --tail=80 bot
 }
 
 install_system_packages

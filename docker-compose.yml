@@ -18,7 +18,11 @@ services:
       LLM_MODEL_DEFAULT: qwen3-235b-a22b-2507
       LLM_MODEL_FALLBACKS: deepseek-v4-flash
       LLM_MODEL_FAST: deepseek-v4-flash
+      CONTAINER_LOG_DIR: ${CONTAINER_LOG_DIR:-/app/.logs}
+      CONTAINER_LOG_MAX_BYTES: ${CONTAINER_LOG_MAX_BYTES:-10485760}
+      CONTAINER_LOG_BACKUP_COUNT: ${CONTAINER_LOG_BACKUP_COUNT:-5}
     volumes:
+      - ./.logs:/app/.logs
       # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
       # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,
       # чтобы путь не дублировался в двух местах.

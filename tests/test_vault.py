@@ -11,6 +11,7 @@ from bot.atomic import atomic_write_text
 from bot.config import LOG_PATH, VAULT_PATH
 from bot.errors import ValidationError, VaultError
 from bot.graph import Concept
+from bot.storage import git as git_storage
 
 
 def test_next_q_num_monotonic(as_user):
@@ -53,6 +54,54 @@ def test_git_wrap_commits_on_success(as_user):
     assert graph._path_for("proba", "ethics").exists()
     log_out = vault._git("log", "--oneline", "-5").stdout
     assert "unit_commit" in log_out
+
+
+def test_ensure_git_repo_sets_missing_author_identity(as_user, monkeypatch):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    monkeypatch.delenv("VAULT_GIT_USER_NAME", raising=False)
+    monkeypatch.delenv("VAULT_GIT_USER_EMAIL", raising=False)
+    vault._git("config", "--unset-all", "user.name", check=False)
+    vault._git("config", "--unset-all", "user.email", check=False)
+
+    vault.ensure_git_repo()
+
+    assert vault._git("config", "--get", "user.name").stdout.strip() == "Psycho Bot"
+    assert vault._git("config", "--get", "user.email").stdout.strip() == "psycho-bot@local"
+
+
+def test_ensure_git_repo_applies_author_env_override(as_user, monkeypatch):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    monkeypatch.setenv("VAULT_GIT_USER_NAME", "Vault Writer")
+    monkeypatch.setenv("VAULT_GIT_USER_EMAIL", "vault-writer@example.test")
+
+    try:
+        vault.ensure_git_repo()
+
+        assert vault._git("config", "--get", "user.name").stdout.strip() == "Vault Writer"
+        assert (
+            vault._git("config", "--get", "user.email").stdout.strip()
+            == "vault-writer@example.test"
+        )
+    finally:
+        vault._git("config", "user.name", "Psycho Bot", check=False)
+        vault._git("config", "user.email", "psycho-bot@local", check=False)
+
+
+def test_git_env_uses_configured_ssh_key_without_reading_it(monkeypatch):
+    monkeypatch.setenv("VAULT_GIT_SSH_KEY", "/run/secrets/vault git key")
+
+    env = git_storage._git_env()
+
+    assert env is not None
+    assert (
+        env["GIT_SSH_COMMAND"]
+        == "ssh -i '/run/secrets/vault git key' -o IdentitiesOnly=yes "
+        "-o StrictHostKeyChecking=accept-new"
+    )
 
 
 def test_commit_all_commits_only_current_user_scope(as_user):

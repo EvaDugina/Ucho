@@ -1,11 +1,12 @@
 .env
+.logs/
+.ssh/
+.git/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
 .venv/
 .idea/
 .vscode/
-.ssh/
-.pytest_cache/
-.ruff_cache/
 diagramma-output/
-.logs/

@@ -1,0 +1,6 @@
+services:
+  bot:
+    environment:
+      VAULT_GIT_SSH_KEY: /run/secrets/vault_git_ssh_key
+    volumes:
+      - "${VAULT_GIT_SSH_KEY_HOST_PATH:-./.ssh/vault_git_ssh_key}:/run/secrets/vault_git_ssh_key:ro"

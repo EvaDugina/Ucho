@@ -31,6 +31,18 @@ if [ -z "$VAULT_DIR" ]; then
 fi
 VAULT_DIR="${VAULT_DIR:-$BASE_DIR/vault}"
 
+compose_cmd() {
+  local key_path
+  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
+  if [ -n "$key_path" ]; then
+    [ -f "$APP_DIR/docker-compose.ssh.yml" ] || die "docker-compose.ssh.yml not found at $APP_DIR"
+    [ -f "$key_path" ] || die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $key_path"
+    docker compose -f docker-compose.yml -f docker-compose.ssh.yml "$@"
+  else
+    docker compose "$@"
+  fi
+}
+
 log "Pulling bot code"
 git -C "$APP_DIR" pull --ff-only
 
@@ -48,12 +60,12 @@ if [ "$SKIP_TESTS" = "1" ]; then
   log "Skipping smoke tests because SKIP_TESTS=1"
 else
   log "Running smoke tests in Docker (base image: $PYTHON_BASE_IMAGE)"
-  docker compose run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke
+  compose_cmd run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke
 fi
 
 log "Rebuilding and restarting bot (base image: $PYTHON_BASE_IMAGE)"
-docker compose up -d --build bot
-docker compose ps bot
-docker compose logs --tail=80 bot
+compose_cmd up -d --build bot
+compose_cmd ps bot
+compose_cmd logs --tail=80 bot
 
 log "Update done"

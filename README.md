@@ -81,6 +81,8 @@ docker compose logs -f bot
 ```
 
 Compose поднимает только `bot`; локального LLM-сервиса в проекте больше нет.
+Тот же app-log дополнительно пишется в `.logs/bot.log` рядом с `docker-compose.yml`
+и ротируется локально (`10 MB x 5` по умолчанию).
 
 ### 5. Серверный deploy
 
@@ -95,6 +97,9 @@ deploy/stop.sh     # остановить контейнер bot
 Docker build берёт базовый образ Python через `PYTHON_BASE_IMAGE`; дефолт в
 deploy-скриптах и compose — `mirror.gcr.io/library/python:3.12-slim`, чтобы не
 упираться в anonymous pull limit Docker Hub на свежем VPS.
+Vault-коммиты бот делает внутри контейнера. Для push по SSH на сервере укажи в
+`.env` путь к deploy key на хосте: `VAULT_GIT_SSH_KEY_HOST_PATH=/root/.ssh/<key>`;
+compose смонтирует только этот файл read-only.
 
 Подробная инструкция: `deploy/README.md`.
 
@@ -190,9 +195,18 @@ docker compose up -d --build bot             # пересобрать тольк
 docker compose logs --tail=200 bot
 ```
 
+Файловый app-log контейнера:
+
+```powershell
+Get-Content .logs\bot.log -Tail 100
+```
+
+На сервере путь такой же относительно app-директории: `/srv/psycho/app/.logs/bot.log`.
+
 ## Замечания
 
 - `.env` в `.gitignore`. Не коммить токены.
+- `.logs/` тоже не коммитится: это runtime-логи контейнера, не часть графа.
 - Все правки концептов в Obsidian сохраняются — бот при перезаписи читает текущее состояние из frontmatter и тела. **Не меняй `slug` в frontmatter** — иначе ссылки сломаются. Переименовывай только содержание / заголовок.
 - Бот никогда не удаляет файлы. Чистить руками в Obsidian, если что-то лишнее.
 - Категория домена в сообщении бота выводится **курсивом**, текст вопроса — **моноширинным** (long-press для копирования).
