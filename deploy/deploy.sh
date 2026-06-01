@@ -12,6 +12,7 @@ PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 export PYTHON_BASE_IMAGE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/lib.sh"
 
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
@@ -19,19 +20,10 @@ else
   SUDO="sudo"
 fi
 
-log() {
-  printf '\n==> %s\n' "$*"
-}
-
-die() {
-  printf '\nERROR: %s\n' "$*" >&2
-  exit 1
-}
-
 install_system_packages() {
   log "Installing base packages"
   $SUDO apt-get update
-  $SUDO apt-get install -y ca-certificates curl git
+  $SUDO apt-get install -y ca-certificates curl git openssh-client
 }
 
 install_docker() {
@@ -85,17 +77,17 @@ sync_vault_repo() {
   if [ -n "$VAULT_REPO_URL" ]; then
     log "Syncing knowledge vault: $VAULT_REPO_URL"
     if [ -d "$VAULT_DIR/.git" ]; then
-      git -C "$VAULT_DIR" pull --ff-only
+      vault_git pull --ff-only
     else
       rm -rf "$VAULT_DIR"
-      git clone "$VAULT_REPO_URL" "$VAULT_DIR"
+      host_git clone "$VAULT_REPO_URL" "$VAULT_DIR"
     fi
     return
   fi
 
   if [ -d "$VAULT_DIR/.git" ]; then
     log "Pulling existing knowledge vault"
-    git -C "$VAULT_DIR" pull --ff-only || true
+    vault_git pull --ff-only || true
   else
     log "Knowledge vault repo URL not set; leaving $VAULT_DIR as a local directory"
   fi
@@ -112,41 +104,6 @@ set_env_default() {
     fi
   else
     printf '\n%s=%s\n' "$key" "$value" >> "$env_file"
-  fi
-}
-
-env_value() {
-  local key="$1"
-  grep -E "^${key}=" "$APP_DIR/.env" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
-}
-
-compose_cmd() {
-  local key_path
-  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
-  if [ -n "$key_path" ]; then
-    [ -f "$APP_DIR/docker-compose.ssh.yml" ] || die "docker-compose.ssh.yml not found at $APP_DIR"
-    docker compose -f docker-compose.yml -f docker-compose.ssh.yml "$@"
-  else
-    docker compose "$@"
-  fi
-}
-
-require_env_value() {
-  local key="$1"
-  local value
-  value="$(env_value "$key" || true)"
-  if [ -z "$value" ]; then
-    die "Fill $key in $APP_DIR/.env and run this script again"
-  fi
-}
-
-require_llm_key() {
-  local openrouter_key
-  local aitunnel_key
-  openrouter_key="$(env_value "OPENROUTER_API_KEY" || true)"
-  aitunnel_key="$(env_value "AITUNNEL_API_KEY" || true)"
-  if [ -z "$openrouter_key" ] && [ -z "$aitunnel_key" ]; then
-    die "Fill OPENROUTER_API_KEY (preferred) or AITUNNEL_API_KEY in $APP_DIR/.env and run this script again"
   fi
 }
 
@@ -170,15 +127,8 @@ prepare_env() {
   set_env_default "VAULT_GIT_USER_NAME" "Psycho Bot"
   set_env_default "VAULT_GIT_USER_EMAIL" "psycho-bot@local"
 
-  require_env_value "TELEGRAM_BOT_TOKEN"
-  require_env_value "OWNER_TELEGRAM_ID"
-  require_llm_key
-
-  local vault_git_ssh_key
-  vault_git_ssh_key="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
-  if [ -n "$vault_git_ssh_key" ] && [ ! -f "$vault_git_ssh_key" ]; then
-    die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $vault_git_ssh_key"
-  fi
+  preflight_env
+  VAULT_DIR="$(env_value "VAULT_HOST_PATH")"
 }
 
 run_checks() {
@@ -204,8 +154,8 @@ install_system_packages
 install_docker
 prepare_dirs
 sync_app_repo
-sync_vault_repo
 prepare_env
+sync_vault_repo
 run_checks
 start_bot
 

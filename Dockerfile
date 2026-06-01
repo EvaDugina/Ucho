@@ -37,6 +37,7 @@ RUN pip install --no-cache-dir --no-deps dostoevsky==0.6.0 \
 COPY bot/ ./bot/
 COPY prompts/ ./prompts/
 COPY scripts/ ./scripts/
+COPY deploy/ ./deploy/
 COPY tests/ ./tests/
 
 ENV PYTHONUNBUFFERED=1

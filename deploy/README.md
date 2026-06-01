@@ -45,8 +45,11 @@ chmod +x deploy.sh update.sh stop.sh
 Если vault уже лежит в отдельном git-репозитории, передай его URL:
 
 ```bash
-VAULT_REPO_URL=git@github.com:YOUR_USER/YOUR_VAULT_REPO.git ./deploy.sh
+VAULT_REPO_URL=git@github.com:EvaDugina/UchoVault.git ./deploy.sh
 ```
+
+Если на сервере используется SSH-alias из `~/.ssh/config`, можно передать его
+вместо прямого GitHub URL, например `git@github-ucho-vault:EvaDugina/UchoVault.git`.
 
 Если vault пока не готов, можно запустить без `VAULT_REPO_URL`; скрипт создаст
 локальную папку `/srv/psycho/vault`, но для нормальной серверной синхронизации
@@ -58,7 +61,7 @@ remote всё равно нужно добавить позже.
 
 Что делает `deploy.sh`:
 
-- ставит `git`, Docker Engine и Docker Compose plugin;
+- ставит `git`, `openssh-client`, Docker Engine и Docker Compose plugin;
 - создаёт `/srv/psycho/app` и `/srv/psycho/vault`;
 - клонирует код бота из `https://github.com/EvaDugina/Ucho.git`;
 - при наличии `VAULT_REPO_URL` клонирует/обновляет vault;
@@ -66,7 +69,8 @@ remote всё равно нужно добавить позже.
 - проверяет, что заполнены `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID` и один
   LLM-ключ: `OPENROUTER_API_KEY` или `AITUNNEL_API_KEY`;
 - если задан `VAULT_GIT_SSH_KEY_HOST_PATH`, монтирует только этот deploy key
-  read-only в контейнер и использует SSH для push vault-коммитов;
+  read-only в контейнер, использует его для host-side pull/clone vault и для
+  push vault-коммитов из контейнера;
 - запускает smoke-тесты;
 - пересобирает и поднимает контейнер `psycho-bot`.
 
@@ -76,7 +80,7 @@ remote всё равно нужно добавить позже.
 и нужен именно Docker Hub, можно переопределить образ:
 
 ```bash
-PYTHON_BASE_IMAGE=python:3.12-slim VAULT_REPO_URL=git@github.com:YOUR_USER/YOUR_VAULT_REPO.git ./deploy.sh
+PYTHON_BASE_IMAGE=python:3.12-slim VAULT_REPO_URL=git@github.com:EvaDugina/UchoVault.git ./deploy.sh
 ```
 
 Если `.env` ещё не заполнен, скрипт создаст `/srv/psycho/app/.env` из примера и
@@ -126,6 +130,11 @@ tail -n 100 .logs/bot.log
 - `git pull --ff-only` кода бота;
 - `git fetch --all --prune` + `git pull --ff-only` vault, если путь из
   `VAULT_HOST_PATH` в `.env` является git checkout;
+- перед любым build проверяет, что `.env` содержит `TELEGRAM_BOT_TOKEN`,
+  `OWNER_TELEGRAM_ID`, `VAULT_HOST_PATH`, один LLM-ключ и существующий
+  `VAULT_GIT_SSH_KEY_HOST_PATH`, если он задан;
+- при непустом `VAULT_GIT_SSH_KEY_HOST_PATH` host-side pull vault тоже идёт
+  через `GIT_SSH_COMMAND` с этим deploy key;
 - при непустом `VAULT_GIT_SSH_KEY_HOST_PATH` запускает compose вместе с
   `docker-compose.ssh.yml`, чтобы контейнер видел deploy key как
   `/run/secrets/vault_git_ssh_key`;
@@ -140,7 +149,7 @@ tail -n 100 .logs/bot.log
 cd /srv/psycho/app
 VAULT_DIR="$(grep -E '^VAULT_HOST_PATH=' .env | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
 git -C "$VAULT_DIR" remote -v
-git -C "$VAULT_DIR" remote set-url origin git@github.com:OWNER/VAULT_REPO.git
+git -C "$VAULT_DIR" remote set-url origin git@github.com:EvaDugina/UchoVault.git
 ```
 
 В `.env` укажи путь к deploy key на хосте, не содержимое ключа:
@@ -152,7 +161,15 @@ VAULT_GIT_SSH_KEY_HOST_PATH=/root/.ssh/YOUR_VAULT_DEPLOY_KEY
 ```
 
 Ключ должен быть добавлен в git-хостинг с write-доступом к vault-репозиторию.
-Быстрая проверка после обновления:
+Проверка host-side pull до Docker:
+
+```bash
+cd /srv/psycho/app
+VAULT_DIR="$(grep -E '^VAULT_HOST_PATH=' .env | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")"
+GIT_SSH_COMMAND="ssh -i /root/.ssh/YOUR_VAULT_DEPLOY_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git -C "$VAULT_DIR" fetch --dry-run origin
+```
+
+Быстрая проверка container-side identity/push после обновления:
 
 ```bash
 cd /srv/psycho/app
@@ -203,8 +220,8 @@ Vault:
 
 ```bash
 git -C /srv/psycho/vault status
-git -C /srv/psycho/vault pull --ff-only
-git -C /srv/psycho/vault push
+GIT_SSH_COMMAND="ssh -i /root/.ssh/YOUR_VAULT_DEPLOY_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git -C /srv/psycho/vault pull --ff-only
+GIT_SSH_COMMAND="ssh -i /root/.ssh/YOUR_VAULT_DEPLOY_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" git -C /srv/psycho/vault push
 ```
 
 Перед переносом live-режима на сервер останови локальный контейнер с тем же
