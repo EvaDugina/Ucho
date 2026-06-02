@@ -13,11 +13,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -d "$APP_DIR/.git" ] || die "Bot repo not found at $APP_DIR"
 [ -f "$APP_DIR/docker-compose.yml" ] || die "docker-compose.yml not found at $APP_DIR"
 [ -f "$APP_DIR/.env" ] || die ".env not found at $APP_DIR"
-preflight_env
-VAULT_DIR="$(env_value "VAULT_HOST_PATH")"
 
 log "Pulling bot code"
+before_head="$(git -C "$APP_DIR" rev-parse HEAD)"
 git -C "$APP_DIR" pull --ff-only
+after_head="$(git -C "$APP_DIR" rev-parse HEAD)"
+if [ "${PSYCHO_UPDATE_REEXECED:-0}" != "1" ] && [ "$before_head" != "$after_head" ]; then
+  log "Bot code changed; restarting update script from the new checkout"
+  export BASE_DIR APP_DIR VAULT_DIR SKIP_TESTS PYTHON_BASE_IMAGE
+  export PSYCHO_UPDATE_REEXECED=1
+  exec "$APP_DIR/deploy/update.sh" "$@"
+fi
+
+preflight_env
+VAULT_DIR="$(env_value "VAULT_HOST_PATH")"
 
 if [ -d "$VAULT_DIR/.git" ]; then
   log "Pulling knowledge vault"
