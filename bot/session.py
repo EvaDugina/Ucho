@@ -335,7 +335,7 @@ def resume(session_id: str) -> Optional["Session"]:
                 pass
         if e.get("role") in ("assistant", "user") and e.get("text"):
             history.append(_history_entry(str(e.get("role")), str(e.get("text")), at=e.get("ts")))
-        if e.get("role") == "assistant":
+        if e.get("role") == "assistant" and e.get("kind") != "reminder":
             last_assistant = str(e.get("text") or last_assistant)
             last_domain = str(e.get("domain") or last_domain)
             if e.get("q_num") is not None:

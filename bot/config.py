@@ -188,6 +188,10 @@ ANALYSIS_ENABLED = os.getenv("ANALYSIS_ENABLED", "true").strip().lower() in ("1"
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
 DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
+# Окно вечернего напоминания по сегодняшнему daily-вопросу. Если конец меньше
+# старта, окно считается переходящим через полночь (`23:00` → `01:00`).
+DAILY_REMINDER_START = os.getenv("DAILY_REMINDER_START", "23:00")
+DAILY_REMINDER_END = os.getenv("DAILY_REMINDER_END", "01:00")
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
 
 DOMAINS = (

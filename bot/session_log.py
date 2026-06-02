@@ -170,7 +170,7 @@ def find_assistant_event_by_message_id(message_id: int | None) -> dict | None:
             continue
         if e.get("telegram_message_id", e.get("message_id")) != mid:
             continue
-        if e.get("kind") in {"question", "reaction", "regen", "service"}:
+        if e.get("kind") in {"question", "reaction", "regen", "service", "reminder"}:
             return e
     return None
 
@@ -209,13 +209,20 @@ def set_event_bot_mood(event_id: str | None, bot_mood: str | None) -> dict | Non
     return row
 
 
-def find_question_event_by_q_num(q_num: int | None, *, session_id: str | None = None) -> dict | None:
+def find_question_event_by_q_num(
+    q_num: int | None,
+    *,
+    session_id: str | None = None,
+    kind: str | None = None,
+) -> dict | None:
     if q_num is None:
         return None
     target = int(q_num)
     events = session_events(session_id) if session_id else iter_events()
     for e in reversed(events):
         if e.get("role") == "assistant" and e.get("q_num") == target:
+            if kind is not None and e.get("kind") != kind:
+                continue
             return e
     return None
 
@@ -278,12 +285,18 @@ def find_question_by_message_id(message_id: int) -> dict | None:
             continue
         if e.get("telegram_message_id", e.get("message_id")) != mid:
             continue
-        if e.get("kind") not in {"question", "reaction", "service"}:
+        if e.get("kind") not in {"question", "reaction", "service", "reminder"}:
             continue
+        text = question_field_text(e)
+        if e.get("kind") == "reminder":
+            source = find_question_event_by_q_num(
+                e.get("q_num"), session_id=e.get("session_id"), kind="question"
+            )
+            text = question_field_text(source) or text
         return {
             "message_id": mid,
             "q_num": e.get("q_num"),
-            "text": question_field_text(e),
+            "text": text,
             "domain": e.get("domain") or "",
             "answered": _is_answered(e.get("q_num")),
             "ts": e.get("ts"),
@@ -295,8 +308,16 @@ def find_question_by_message_id(message_id: int) -> dict | None:
 
 def find_question_by_q_num(q_num: int) -> dict | None:
     target = int(q_num)
+    fallback: dict | None = None
     for e in reversed(iter_events()):
         if e.get("role") != "assistant" or e.get("q_num") != target:
+            continue
+        if e.get("kind") == "reminder":
+            continue
+        if e.get("kind") != "question" and fallback is None:
+            fallback = e
+            continue
+        if e.get("kind") != "question":
             continue
         return {
             "message_id": e.get("telegram_message_id", e.get("message_id")),
@@ -307,6 +328,17 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "ts": e.get("ts"),
             "session_id": e.get("session_id"),
             "bot_mood": e.get("bot_mood"),
+        }
+    if fallback is not None:
+        return {
+            "message_id": fallback.get("telegram_message_id", fallback.get("message_id")),
+            "q_num": target,
+            "text": question_field_text(fallback),
+            "domain": fallback.get("domain") or "",
+            "answered": _is_answered(target),
+            "ts": fallback.get("ts"),
+            "session_id": fallback.get("session_id"),
+            "bot_mood": fallback.get("bot_mood"),
         }
     return None
 

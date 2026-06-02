@@ -134,6 +134,12 @@ async def main() -> None:
     except Exception:
         log.exception("catch_up_daily failed")
 
+    try:
+        from .scheduler import catch_up_daily_reminders
+        await catch_up_daily_reminders(bot, scheduler)
+    except Exception:
+        log.exception("catch_up_daily_reminders failed")
+
     log.info("bot starting polling…")
     try:
         await dp.start_polling(bot)

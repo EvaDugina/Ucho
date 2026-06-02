@@ -124,6 +124,7 @@ async def send_question(
     bot_mood: str | None = None,
     admin_controls: bool = False,
     action_context: dict | None = None,
+    event_kind: str | None = None,
 ) -> Message | None:
     """Отправить вопрос/реакцию и обязательно записать assistant event."""
     token: str | None = None
@@ -166,7 +167,7 @@ async def send_question(
         session_log.append_required(
             session_id=s.id,
             role="assistant",
-            kind="reaction" if plain else "question",
+            kind=event_kind or ("reaction" if plain else "question"),
             text=text,
             at=getattr(sent, "date", None),
             message_id=getattr(sent, "message_id", None),

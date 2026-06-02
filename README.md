@@ -72,6 +72,9 @@ cp .env.example .env
 ```
 
 `DAILY_HOUR` — час ежедневного вопроса в зоне `DAILY_TZ`, не UTC.
+`DAILY_REMINDER_START` / `DAILY_REMINDER_END` — окно вечернего напоминания:
+в `23:00` бот собирает тех, кто не ответил на сегодняшний daily-вопрос, и
+выбирает одно случайное время отправки до `01:00`.
 
 ### 4. Запуск
 
@@ -161,7 +164,8 @@ compose смонтирует только этот файл read-only.
 
 `<vault>/users/<uid>/_session.json` сохраняет только активное runtime-состояние: `session_id`, текущий Q/domain, timestamps и pending event refs. Полная переписка живёт в `00_raw/sessions`, а не в `_session.json`.
 
-`<vault>/users/<uid>/_state.json` — сквозной счётчик `last_q_num` и daily marker. Тоже переживает рестарт.
+`<vault>/users/<uid>/_state.json` — сквозной счётчик `last_q_num`, daily marker
+и план вечернего reminder по неотвеченному daily-вопросу. Тоже переживает рестарт.
 
 ## Live-LLM provider
 

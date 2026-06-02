@@ -83,6 +83,11 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
     q_num = await _send_next_question(bot, uid, domain=None)
     if q_num is None:
         return False
-    vault.mark_daily_sent(DAILY_TZ)
+    s = session.get()
+    vault.mark_daily_sent_details(
+        DAILY_TZ,
+        q_num=q_num,
+        session_id=s.id if s is not None else None,
+    )
     vault.commit_all("daily question")
     return True
