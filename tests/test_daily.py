@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from bot import session, session_log, userctx, vault
+from bot.errors import LLMError
 from bot.services import daily_service, reminder_service
 
 TZ = "Europe/Moscow"
@@ -214,3 +215,29 @@ async def test_reminder_does_not_replace_active_daily_question(as_user, monkeypa
     assert events[-1]["kind"] == "reminder"
     assert events[-1]["q_num"] == 1
     assert session_log.find_question_by_q_num(1)["text"] == "Что ты не сказал сегодня?"
+
+
+@pytest.mark.asyncio
+async def test_reminder_uses_short_fallback_when_llm_unavailable(as_user, monkeypatch):
+    day = _today()
+    uid = as_user
+    s, _ = _seed_daily_question(uid, day=day, q_num=1, question="Что ты не сказал сегодня?")
+    vault.mark_daily_reminder_planned(TZ, _dt(day, 23), day=day)
+
+    async def fail_remind_presence(question: str, *, bot_mood: str):
+        _ = question, bot_mood
+        raise LLMError("down")
+
+    monkeypatch.setattr(reminder_service, "daily_targets", lambda: [uid])
+    monkeypatch.setattr(reminder_service, "remind_presence", fail_remind_presence)
+    monkeypatch.setattr(reminder_service.moods, "random_bot_mood", lambda: "вера")
+    monkeypatch.setattr(reminder_service.vault, "commit_all", lambda *args, **kwargs: "sha")
+    bot = _FakeBot()
+
+    result = await reminder_service.send_due_daily_reminders(bot, now=_dt(day, 23, 10))
+
+    assert result == {"sent": 1, "skipped": 0, "errors": 0}
+    assert bot.sent[0]["text"].startswith("Я всё ещё здесь")
+    events = session_log.session_events(s.id)
+    assert events[-1]["kind"] == "reminder"
+    assert events[-1]["text"] == "Я всё ещё здесь"

@@ -5,7 +5,7 @@ import importlib
 
 import pytest
 
-from bot import config, llm
+from bot import config, llm, userctx
 from bot.errors import LLMError
 
 
@@ -127,6 +127,62 @@ async def test_chat_json_raises_after_all_models_fail(monkeypatch):
         await llm._chat_json("unit", [{"role": "user", "content": "x"}])
     assert "qwen3-235b-a22b-2507" in exc.value.user_message
     assert "deepseek-v4-flash" in exc.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_remind_presence_uses_primary_and_user_prompt(as_user, monkeypatch):
+    prompt_file = userctx.user_root() / "03_personality" / "user_prompt.md"
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text("говори тише и ближе", encoding="utf-8")
+    completions = _FakeCompletions(["Я рядом"])
+    monkeypatch.setattr(llm, "_client", _FakeClient(completions))
+    monkeypatch.setitem(llm._TASK_ROUTES, "reaction", ("primary-model", ("unused-fallback",)))
+    monkeypatch.setitem(llm._TASK_ROUTES, "fast", ("deepseek-v4-flash", ()))
+
+    out = await llm.remind_presence("Что ты не сказал сегодня?", bot_mood="вера")
+
+    assert out == "Я рядом"
+    assert [c["model"] for c in completions.calls] == ["primary-model"]
+    system_prompt = completions.calls[0]["messages"][0]["content"]
+    assert "говори тише и ближе" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_remind_presence_retries_fast_after_primary_error(as_user, monkeypatch):
+    completions = _FakeCompletions([RuntimeError("primary down"), "Я рядом"])
+    monkeypatch.setattr(llm, "_client", _FakeClient(completions))
+    monkeypatch.setitem(llm._TASK_ROUTES, "reaction", ("primary-model", ("unused-fallback",)))
+    monkeypatch.setitem(llm._TASK_ROUTES, "fast", ("deepseek-v4-flash", ()))
+
+    out = await llm.remind_presence("Что ты не сказал сегодня?", bot_mood="вера")
+
+    assert out == "Я рядом"
+    assert [c["model"] for c in completions.calls] == ["primary-model", "deepseek-v4-flash"]
+
+
+@pytest.mark.asyncio
+async def test_remind_presence_retries_fast_after_empty_primary(as_user, monkeypatch):
+    completions = _FakeCompletions(["", "Я рядом"])
+    monkeypatch.setattr(llm, "_client", _FakeClient(completions))
+    monkeypatch.setitem(llm._TASK_ROUTES, "reaction", ("primary-model", ("unused-fallback",)))
+    monkeypatch.setitem(llm._TASK_ROUTES, "fast", ("deepseek-v4-flash", ()))
+
+    out = await llm.remind_presence("Что ты не сказал сегодня?", bot_mood="вера")
+
+    assert out == "Я рядом"
+    assert [c["model"] for c in completions.calls] == ["primary-model", "deepseek-v4-flash"]
+
+
+@pytest.mark.asyncio
+async def test_remind_presence_raises_when_primary_and_fast_empty(as_user, monkeypatch):
+    completions = _FakeCompletions(["", ""])
+    monkeypatch.setattr(llm, "_client", _FakeClient(completions))
+    monkeypatch.setitem(llm._TASK_ROUTES, "reaction", ("primary-model", ("unused-fallback",)))
+    monkeypatch.setitem(llm._TASK_ROUTES, "fast", ("deepseek-v4-flash", ()))
+
+    with pytest.raises(LLMError):
+        await llm.remind_presence("Что ты не сказал сегодня?", bot_mood="вера")
+    assert [c["model"] for c in completions.calls] == ["primary-model", "deepseek-v4-flash"]
 
 
 @pytest.mark.asyncio

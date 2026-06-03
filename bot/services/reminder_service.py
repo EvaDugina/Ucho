@@ -23,7 +23,7 @@ from .session_messages import send_question
 
 log = logging.getLogger(__name__)
 
-_FALLBACK_REMINDER = "Я всё ещё здесь. Жду твой ответ."
+_FALLBACK_REMINDER = "Я всё ещё здесь"
 
 
 @dataclass(frozen=True)
