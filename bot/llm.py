@@ -7,6 +7,7 @@
 - analyze_psych   → OCEAN/PANAS classifier (JSON)
 - analyze_sensation_json → classifier for 01_Мироощущение candidates (JSON)
 - analyze_understanding_json → classifier for 02_Миропонимание candidates (JSON)
+- analyze_values_norms_json → classifier for 03_Ценностно-нормативная подсистема candidates (JSON)
 - about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 - remind_presence → короткое вечернее напоминание по daily-вопросу
 """
@@ -184,6 +185,7 @@ _TASK_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
     "fast": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
     "sensation": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
     "understanding": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
+    "values_norms": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
 }
 
 
@@ -663,6 +665,66 @@ async def analyze_understanding_json(
     ] if x)
     return await _chat_json(
         "understanding",
+        [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
+        temperature=0.2,
+    )
+
+
+async def analyze_values_norms_json(
+    *,
+    answer: str,
+    question: str = "",
+    session_context: str = "",
+    taxonomy_context: str,
+    signal_context: str = "",
+    target: Optional[dict] = None,
+) -> dict:
+    """API-only анализ кандидатов для `03_Ценностно-нормативная подсистема`.
+
+    Метод не нормализует payload и не пишет в граф: это делает пакет
+    `bot.values_norms_analysis`. Локальные модели здесь не используются — только
+    текущий OpenAI-compatible provider и его fallback-роутинг.
+    """
+    target = target or {}
+    sys = (
+        "Ты классификатор ценностно-нормативного слоя мировоззрения. По "
+        "русскому ответу человека найди только уверенные кандидаты для области "
+        "`03_Ценностно-нормативная подсистема`: ценности, идеалы, нормы, табу, "
+        "иерархия ценностей и моральная оценка себя или других. Верни СТРОГО "
+        "JSON без текста снаружи:\n"
+        '{"candidates":[{"category":"<канонический ключ>","theme":"<каноническая тема>",'
+        '"type":"value|ideal|norm|taboo|claim","name":"<короткое имя атома>",'
+        '"summary":"<1 предложение>","quote":"<дословная подстрока ответа>",'
+        '"confidence":0.0,"evidence_reason":"<почему это именно эта тема>"}]}\n'
+        "- Используй только категории и темы из переданного values_norms_taxonomy.\n"
+        "- `quote` обязан быть дословной подстрокой USER_ANSWER; не перефразируй.\n"
+        "- Не возвращай slug, raw_entry, связи, contradictions или stable-решения.\n"
+        "- Для category=values обычно ставь type=value; ideals — ideal; norms — "
+        "norm; taboos — taboo; hierarchy — value; judgement — claim.\n"
+        "- Для hierarchy возвращай кандидата только при явном сравнении, конфликте "
+        "или приоритете ценностей.\n"
+        "- Для judgement отличай моральную оценку от простой эмоции: одной злости "
+        "или радости недостаточно.\n"
+        "- Если явной ценности, нормы, запрета, идеала, иерархии или моральной "
+        "оценки нет, верни пустой список.\n"
+        "- Максимум 5 кандидатов, лучше меньше, но увереннее.\n"
+        "- Простые локальные signals — подсказка, не приговор; контекст и иронию "
+        "разрешено перебивать."
+    )
+    user_msg = "\n\n".join(x for x in [
+        "mode: analyze_values_norms",
+        "selected_worldview_target:",
+        f"area: {target.get('area')}",
+        f"category: {target.get('category')}",
+        f"theme: {target.get('theme')}",
+        "values_norms_taxonomy:\n" + taxonomy_context,
+        "local_signals_json:\n" + signal_context if signal_context else "",
+        _session_context_block(session_context),
+        "question:\n" + _fence_user(question, "QUESTION") if question else "",
+        "last_user_message:\n" + _fence_user(answer, "USER_ANSWER"),
+    ] if x)
+    return await _chat_json(
+        "values_norms",
         [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
         temperature=0.2,
     )
