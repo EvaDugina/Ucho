@@ -7,6 +7,11 @@ services:
         # anonymous pull limit on fresh VPS deploys; override after docker login
         # with PYTHON_BASE_IMAGE=python:3.12-slim if needed.
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-mirror.gcr.io/library/python:3.12-slim}
+        # Standard Docker proxy build args for apt/pip inside image builds.
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
     container_name: psycho-bot
     restart: unless-stopped
     env_file:

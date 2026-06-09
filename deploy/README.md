@@ -201,8 +201,10 @@ PYTHON_BASE_IMAGE=python:3.12-slim /srv/psycho/app/deploy/update.sh
 ```
 
 Если `curl` с хоста ходит наружу через proxy, а Docker build падает на timeout
-к registry/mirror, настрой proxy для Docker daemon отдельно. Значения proxy не
-публикуй в чат и не коммить:
+к registry/mirror/PyPI, настрой proxy для Docker daemon отдельно. Значения proxy
+не публикуй в чат и не коммить. `docker-compose.yml` передаёт `HTTP_PROXY`,
+`HTTPS_PROXY`, `NO_PROXY` и `ALL_PROXY` как build args, поэтому `apt`/`pip`
+внутри build-контейнера используют те же значения из `.env`:
 
 ```bash
 PROXY_URL="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
@@ -213,6 +215,7 @@ cat >/etc/systemd/system/docker.service.d/proxy.conf <<EOF
 Environment="HTTP_PROXY=$PROXY_URL"
 Environment="HTTPS_PROXY=$PROXY_URL"
 Environment="NO_PROXY=localhost,127.0.0.1,::1"
+Environment="ALL_PROXY=$PROXY_URL"
 EOF
 systemctl daemon-reload
 systemctl restart docker
