@@ -2,10 +2,11 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from . import recovery, selfcheck, session, userctx, users, vault
-from .config import LOG_LEVEL, OWNER_TELEGRAM_ID, TELEGRAM_BOT_TOKEN
+from .config import LOG_LEVEL, OWNER_TELEGRAM_ID, TELEGRAM_PROXY_URL, TELEGRAM_BOT_TOKEN
 from .handlers import admin_router, router
 from .logging_setup import configure_logging
 from .middleware import AccessMiddleware
@@ -82,7 +83,11 @@ async def main() -> None:
     for uid in queued_uids:
         log.info("queued_answer detected for uid=%s — recovery will run after pending", uid)
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    if TELEGRAM_PROXY_URL:
+        log.info("telegram proxy enabled via TELEGRAM_PROXY_URL")
+        bot = Bot(token=TELEGRAM_BOT_TOKEN, session=AiohttpSession(proxy=TELEGRAM_PROXY_URL))
+    else:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())

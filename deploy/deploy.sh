@@ -8,6 +8,7 @@ APP_DIR="${APP_DIR:-$BASE_DIR/app}"
 VAULT_DIR="${VAULT_DIR:-$BASE_DIR/vault}"
 VAULT_REPO_URL="${VAULT_REPO_URL:-}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
+SKIP_VAULT_PULL="${SKIP_VAULT_PULL:-0}"
 PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 export PYTHON_BASE_IMAGE
 
@@ -74,6 +75,11 @@ sync_app_repo() {
 }
 
 sync_vault_repo() {
+  if [ "$SKIP_VAULT_PULL" = "1" ]; then
+    log "Skipping knowledge vault sync because SKIP_VAULT_PULL=1"
+    return
+  fi
+
   if [ -n "$VAULT_REPO_URL" ]; then
     log "Syncing knowledge vault: $VAULT_REPO_URL"
     if [ -d "$VAULT_DIR/.git" ]; then

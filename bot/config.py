@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_PROXY_URL = (os.getenv("TELEGRAM_PROXY_URL") or "").strip()
 
 _AITUNNEL_BASE_URL = "https://api.aitunnel.ru/v1"
 _AITUNNEL_PRIMARY_MODEL = "qwen3-235b-a22b-2507"

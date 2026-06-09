@@ -22,6 +22,7 @@ nginx или входящий HTTP: Telegram работает через polling
 
 ```env
 TELEGRAM_BOT_TOKEN=...
+# TELEGRAM_PROXY_URL=http://proxy-host:3128  # optional, если Telegram доступен только через proxy
 OWNER_TELEGRAM_ID=...
 OPENROUTER_API_KEY=...   # preferred
 # AITUNNEL_API_KEY=...   # fallback, если OpenRouter не используешь
@@ -122,7 +123,7 @@ tail -n 100 .logs/bot.log
 После первого деплоя основной update-скрипт живёт в репозитории:
 
 ```bash
-/srv/psycho/app/deploy/update.sh
+bash /srv/psycho/app/deploy/update.sh
 ```
 
 Он делает:
@@ -130,6 +131,8 @@ tail -n 100 .logs/bot.log
 - `git pull --ff-only` кода бота;
 - `git fetch --all --prune` + `git pull --ff-only` vault, если путь из
   `VAULT_HOST_PATH` в `.env` является git checkout;
+- если задано `SKIP_VAULT_PULL=1`, пропускает pull vault и обновляет только код
+  бота/контейнер;
 - перед любым build проверяет, что `.env` содержит `TELEGRAM_BOT_TOKEN`,
   `OWNER_TELEGRAM_ID`, `VAULT_HOST_PATH`, один LLM-ключ и существующий
   `VAULT_GIT_SSH_KEY_HOST_PATH`, если он задан;
@@ -180,7 +183,14 @@ docker compose -f docker-compose.yml -f docker-compose.ssh.yml run --rm --no-dep
 Если нужно срочно обновиться без smoke-тестов:
 
 ```bash
-SKIP_TESTS=1 /srv/psycho/app/deploy/update.sh
+SKIP_TESTS=1 bash /srv/psycho/app/deploy/update.sh
+```
+
+Если pull vault зависает из-за SSH/host-key/passphrase, можно срочно обновить
+только код бота и контейнер:
+
+```bash
+SKIP_VAULT_PULL=1 bash /srv/psycho/app/deploy/update.sh
 ```
 
 Если зеркало Docker Official Images недоступно, можно временно вернуться к
@@ -189,6 +199,28 @@ Docker Hub после авторизации:
 ```bash
 PYTHON_BASE_IMAGE=python:3.12-slim /srv/psycho/app/deploy/update.sh
 ```
+
+Если `curl` с хоста ходит наружу через proxy, а Docker build падает на timeout
+к registry/mirror, настрой proxy для Docker daemon отдельно. Значения proxy не
+публикуй в чат и не коммить:
+
+```bash
+PROXY_URL="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+[ -n "$PROXY_URL" ] || { echo "No proxy env found in current shell"; exit 1; }
+mkdir -p /etc/systemd/system/docker.service.d
+cat >/etc/systemd/system/docker.service.d/proxy.conf <<EOF
+[Service]
+Environment="HTTP_PROXY=$PROXY_URL"
+Environment="HTTPS_PROXY=$PROXY_URL"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+EOF
+systemctl daemon-reload
+systemctl restart docker
+```
+
+Если Telegram polling из контейнера падает на timeout, но хостовый `curl
+https://api.telegram.org` проходит через proxy, добавь тот же proxy в
+`/srv/psycho/app/.env` как `TELEGRAM_PROXY_URL=...` и пересобери контейнер.
 
 ## Остановка
 
