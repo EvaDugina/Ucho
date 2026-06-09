@@ -46,11 +46,15 @@ from .storage.layout import (
     _GRAPH_TEMPLATE,
     _ensure_user_graph_settings,
     ensure_layout,
+    general_dir,
     index_file,
+    mood_dir,
     notes_dir,
     profile_dir,
     raw_dir,
     state_file,
+    worldview_area_dir,
+    worldview_atoms_dir,
 )
 from .storage import log as _log
 from .storage.transaction import git_wrap
@@ -94,6 +98,7 @@ __all__ = [
     "daily_reminder_plan",
     "ensure_git_repo",
     "ensure_layout",
+    "general_dir",
     "find_question",
     "git_wrap",
     "index_file",
@@ -102,9 +107,12 @@ __all__ = [
     "mark_daily_reminder_planned",
     "mark_daily_sent",
     "mark_daily_sent_details",
+    "mood_dir",
     "next_q_num",
     "notes_dir",
     "profile_dir",
     "raw_dir",
     "state_file",
+    "worldview_area_dir",
+    "worldview_atoms_dir",
 ]

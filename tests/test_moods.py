@@ -79,7 +79,7 @@ def test_pick_bot_mood_high_dominance_cuts_down():
 
 def test_curated_mask_frequencies_are_read_only_and_default_zero(as_user):
     freqs = moods.load_curated_mask_frequencies()
-    path = userctx.user_root() / "03_personality" / "mask_frequencies.json"
+    path = userctx.user_root() / "05_Общее" / "mask_frequencies.json"
 
     assert set(freqs) == set(moods.BOT_MOODS)
     assert all(v == 0.0 for v in freqs.values())
@@ -87,7 +87,7 @@ def test_curated_mask_frequencies_are_read_only_and_default_zero(as_user):
 
     userctx.set_user(as_user + 100_000)
     vault.ensure_layout()
-    other_path = userctx.user_root() / "03_personality" / "mask_frequencies.json"
+    other_path = userctx.user_root() / "05_Общее" / "mask_frequencies.json"
     other_freqs = moods.load_curated_mask_frequencies()
 
     assert other_path != path
@@ -97,8 +97,8 @@ def test_curated_mask_frequencies_are_read_only_and_default_zero(as_user):
 
 
 def test_mask_frequency_draft_is_per_user_and_complete(as_user):
-    curated_path = userctx.user_root() / "03_personality" / "mask_frequencies.json"
-    draft_path = userctx.user_root() / "03_personality" / "mask_frequencies_draft.json"
+    curated_path = userctx.user_root() / "05_Общее" / "mask_frequencies.json"
+    draft_path = userctx.user_root() / "05_Общее" / "mask_frequencies_draft.json"
 
     draft = moods.record_mask_frequency_draft(
         {"постирония": 0.42, "сомнение": "bad", "не_маска": 1},
@@ -117,13 +117,13 @@ def test_mask_frequency_draft_is_per_user_and_complete(as_user):
     vault.ensure_layout()
     other_draft = moods.load_mask_frequency_draft()
 
-    assert not (userctx.user_root() / "03_personality" / "mask_frequencies_draft.json").exists()
+    assert not (userctx.user_root() / "05_Общее" / "mask_frequencies_draft.json").exists()
     assert set(other_draft["coefficients"]) == set(moods.BOT_MOODS)
     assert all(v == 0.0 for v in other_draft["coefficients"].values())
 
 
 def test_weighted_bot_mood_respects_curated_and_draft(as_user):
-    path = userctx.user_root() / "03_personality" / "mask_frequencies.json"
+    path = userctx.user_root() / "05_Общее" / "mask_frequencies.json"
     freqs = {m: 0.0 for m in moods.BOT_MOODS}
     freqs["сомнение"] = 1.0
     atomic_write_json(path, freqs)

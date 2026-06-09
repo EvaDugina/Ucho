@@ -85,8 +85,8 @@ def test_face_action_feedback_and_liked_state(as_user):
 
     assert face_actions.set_liked(token, liked=True, at="2026-05-25T10:03:00") is True
     assert face_actions.record_user_score(token, 1.0, "favorite", at="2026-05-25T10:03:00")
-    feedback = userctx.user_root() / "01_mood" / "feedback.jsonl"
-    state = json.loads((userctx.user_root() / "03_personality" / "liked_replies.json").read_text(encoding="utf-8"))
+    feedback = userctx.user_root() / "01_Мироощущение" / "mood" / "feedback.jsonl"
+    state = json.loads((userctx.user_root() / "05_Общее" / "liked_replies.json").read_text(encoding="utf-8"))
     liked = state[token]
     assert liked["liked"] is True
     assert liked["score"] == 1.0
@@ -97,7 +97,7 @@ def test_face_action_feedback_and_liked_state(as_user):
     assert liked["reply_to_user_message_id"] == 111
 
     log_lines = (
-        userctx.user_root() / "03_personality" / "liked_replies_log.jsonl"
+        userctx.user_root() / "05_Общее" / "liked_replies_log.jsonl"
     ).read_text(encoding="utf-8").splitlines()
     assert len(log_lines) == 1
     assert json.loads(log_lines[-1])["liked"] is True

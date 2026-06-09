@@ -101,6 +101,7 @@ def _ensure_git_identity() -> None:
         _git("config", "user.name", env_name or _DEFAULT_GIT_USER_NAME, check=False)
     if env_email or not _git_config_value("user.email"):
         _git("config", "user.email", env_email or _DEFAULT_GIT_USER_EMAIL, check=False)
+    _git("config", "core.quotePath", "false", check=False)
 
 
 def ensure_git_repo() -> None:

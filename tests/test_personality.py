@@ -1,4 +1,4 @@
-"""Тесты разделения портрета и настроения по папке 03_personality/."""
+"""Тесты разделения 05_Общее и 01_Мироощущение/mood."""
 from __future__ import annotations
 
 from bot import about, mood_file, moods, userctx
@@ -34,8 +34,8 @@ def _fresh(uid: int) -> None:
 
 def test_paths_under_personality():
     userctx.set_user(50001)
-    assert about.path().as_posix().endswith("03_personality/about.md")
-    assert mood_file.path().as_posix().endswith("03_personality/mood.md")
+    assert about.path().as_posix().endswith("05_Общее/about.md")
+    assert mood_file.path().as_posix().endswith("01_Мироощущение/mood/mood.md")
 
 
 def test_fresh_ensure_creates_both_without_mood_in_about():
@@ -44,7 +44,7 @@ def test_fresh_ensure_creates_both_without_mood_in_about():
     mood_file.ensure()
     assert about.path().exists() and mood_file.path().exists()
     assert not (userctx.user_root() / "about_user.md").exists()
-    assert not (userctx.user_root() / "03_personality" / "softskills.md").exists()
+    assert not (userctx.user_root() / "05_Общее" / "softskills.md").exists()
     # настроенческих полей в about больше нет
     assert "mood_baseline" not in about.path().read_text(encoding="utf-8")
 
@@ -84,13 +84,14 @@ def test_set_current_writes_and_preserves_baseline():
 
 def test_render_about_context_includes_mood_and_profile():
     _fresh(50005)
-    pdir = userctx.user_root() / "03_personality"
+    pdir = userctx.user_root() / "05_Общее"
     pdir.mkdir(parents=True, exist_ok=True)
     about.path().write_text(
         "---\nregister: образный\ntone: прямой\n---\n\n"
         "# Портрет пользователя\n\n## Манера речи\n\nГоворит коротко и резко.\n",
         encoding="utf-8",
     )
+    mood_file.path().parent.mkdir(parents=True, exist_ok=True)
     mood_file.path().write_text(
         "---\nmood: тревожная собранность\nbot_mood: вера\nvalence: -0.2\n---\n\n"
         "# Настроение\n\n"

@@ -181,8 +181,8 @@ ALLOWED_TELEGRAM_IDS = tuple(
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Мульти-методный анализ ответа (сравнение методов оценки настроения/состояния):
-# гоняется ТОЛЬКО для владельца, пишет разбор в 01_mood/analysis/ и durable-ряд
-# 01_mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
+# гоняется ТОЛЬКО для владельца, пишет разбор в 01_Мироощущение/mood/analysis/ и durable-ряд
+# 01_Мироощущение/mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
 # выключить без пересборки. false → остаётся только базовый разбор настроения в чат.
 ANALYSIS_ENABLED = os.getenv("ANALYSIS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
 
@@ -195,6 +195,8 @@ DAILY_REMINDER_START = os.getenv("DAILY_REMINDER_START", "23:00")
 DAILY_REMINDER_END = os.getenv("DAILY_REMINDER_END", "01:00")
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
 
+# Legacy domain list for old graph/tests/migrations. New question/runtime target is
+# WORLDVIEW_AREAS/CATEGORIES/THEMES in bot.worldview_taxonomy.
 DOMAINS = (
     "ethics",
     "aesthetics",

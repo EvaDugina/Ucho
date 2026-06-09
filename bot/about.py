@@ -1,14 +1,14 @@
-"""Портрет пользователя (per-user): `03_personality/about.md` + журнал дельт.
+"""Портрет пользователя (per-user): `05_Общее/about.md` + журнал дельт.
 
 Гибрид (capture-first):
 - **Live (OpenAI-compatible provider, каждый ответ).** В `mode: process` LLM отдаёт дешёвую `user_delta`
   (см. `prompts/process.md`). Код обновляет машинные поля frontmatter
   (`register/tone/openness/provocation_tolerance`), бампит `messages_seen`/`updated`
-  и дописывает сырую дельту в `03_personality/deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
+  и дописывает сырую дельту в `05_Общее/deltas.jsonl`. **Прозу 20 секций live НЕ трогаем.**
 - **Manual strong pass.** Скилл `depersonalization` переписывает прозу секций
   из накопленных дельт + `00_raw/`; live-модель связную прозу 20 секций не ведёт.
 
-Настроение вынесено в `03_personality/mood.md` (см. `bot/mood_file.py`) — здесь только
+Настроение вынесено в `01_Мироощущение/mood/mood.md` (см. `bot/mood_file.py`) — здесь только
 портрет носителя, без mood-полей.
 
 Файл инъецируется в системный промпт (`llm._system`). Пути — per-user через `userctx`.
@@ -22,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from . import userctx
+from . import vault
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ _PROSE_KEYS = (
     "epistemics", "attachment", "routine",
     "limits", "power", "selfhood", "finitude", "roots", "vocation",
 )
-# Примечание: mood-поля живут в 03_personality/mood.md (bot/mood_file.py), не здесь.
+# Примечание: mood-поля живут в 01_Мироощущение/mood/mood.md (bot/mood_file.py), не здесь.
 
 # 20 секций портрета (порядок фиксирован; прозу заполняет depersonalization).
 _SECTIONS = (
@@ -74,7 +74,7 @@ _SECTIONS = (
 
 
 def _dir() -> Path:
-    return userctx.user_root() / "03_personality"
+    return vault.general_dir()
 
 
 def path() -> Path:
@@ -100,7 +100,7 @@ def _skeleton() -> str:
 
 
 def ensure() -> None:
-    """Создать пустой скелет `03_personality/about.md`, если его ещё нет (идемпотентно)."""
+    """Создать пустой скелет `05_Общее/about.md`, если его ещё нет (идемпотентно)."""
     p = path()
     if p.exists():
         return
@@ -157,7 +157,16 @@ def _clip(text: str, max_chars: int) -> str:
 
 
 def _mood_context(max_chars: int = 1800) -> str:
-    fm, body = _read_personality_markdown("mood.md")
+    from . import mood_file
+
+    p = mood_file.path()
+    if not p.exists():
+        return ""
+    try:
+        fm, body = _parse_markdown(p.read_text(encoding="utf-8"))
+    except Exception:
+        log.exception("failed to read mood markdown: %s", p)
+        return ""
     summary_keys = ("mood", "quality", "valence", "arousal", "dominance", "stability", "bot_mood")
     summary = [f"{k}: {fm[k]}" for k in summary_keys if str(fm.get(k) or "").strip()]
 
@@ -234,7 +243,7 @@ def apply_delta(delta: dict) -> None:
 
 
 def _append_delta_log(delta: dict) -> None:
-    """Сохранить непустые поля дельты строкой в `03_personality/deltas.jsonl` (кольцо)."""
+    """Сохранить непустые поля дельты строкой в `05_Общее/deltas.jsonl` (кольцо)."""
     kept = {
         k: delta[k].strip()
         for k in (*_FIELD_KEYS, *_PROSE_KEYS)

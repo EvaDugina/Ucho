@@ -6,7 +6,7 @@
 - **Код (этот модуль)** считает математику: вектор настроения по сессии с
   приоритетом на последнее сообщение (recency) + затухающий prior из портрета,
   устойчивость (дисперсия), выбор контрастного лица, журнал и mood-map.
-- **depersonalization (сильная модель)** строит граф `01_mood/` и пишет `_mood_map.json`
+- **depersonalization (сильная модель)** строит граф `01_Мироощущение/mood/` и пишет `_mood_map.json`
   + `mood_baseline` в портрет.
 
 Часть 1 (Фаза B) — измерения + `session_mood`. Часть 2 (Фаза C) — `BOT_MOODS`,
@@ -19,7 +19,7 @@ import logging
 import random
 from datetime import datetime
 
-from . import userctx
+from . import userctx, vault
 from .atomic import atomic_write_json, atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -266,11 +266,11 @@ LIKE_CURVE_Y2 = 0.08
 
 
 def _frequency_path() -> "object":
-    return userctx.user_root() / "03_personality" / MASK_FREQUENCIES_FILE
+    return vault.general_dir() / MASK_FREQUENCIES_FILE
 
 
 def _draft_frequency_path() -> "object":
-    return userctx.user_root() / "03_personality" / MASK_FREQUENCIES_DRAFT_FILE
+    return vault.general_dir() / MASK_FREQUENCIES_DRAFT_FILE
 
 
 def _now_iso(at: object | None = None) -> str:
@@ -515,7 +515,7 @@ def opposite_bot_mood(s, *, exclude: set[str] | None = None) -> str | None:
 
 
 def _mood_dir() -> "object":
-    return userctx.user_root() / "01_mood"
+    return vault.mood_dir()
 
 
 def _mood_log_path():
@@ -553,7 +553,7 @@ def _default_faces(mv: dict) -> list[str]:
 
 
 def load_mood_map() -> dict:
-    """Per-user карта `01_mood/_mood_map.json` (пишет depersonalization). Нет → {}."""
+    """Per-user карта `01_Мироощущение/mood/_mood_map.json` (пишет depersonalization). Нет → {}."""
     try:
         p = _mood_dir() / "_mood_map.json"
         if not p.exists():
@@ -580,9 +580,9 @@ def pick_bot_mood(mood_vec: dict) -> str:
 
 
 def log_turn(mood_vec: dict, bot_mood: str, vad: dict | None = None) -> None:
-    """Записать пару (настроение → лицо) в `01_mood/events/YYYY-MM.jsonl`.
+    """Записать пару (настроение → лицо) в `01_Мироощущение/mood/events/YYYY-MM.jsonl`.
 
-    Для графа Фазы D (depersonalization агрегирует в `01_mood/` + `_mood_map.json`). `vad` —
+    Для графа Фазы D (depersonalization агрегирует в `01_Мироощущение/mood/` + `_mood_map.json`). `vad` —
     нативная русская VAD-оценка лексикона (`lexicon.score`): сверка арбитр↔лексикон
     (где LLM перебивает детерминированный сигнал)."""
     try:

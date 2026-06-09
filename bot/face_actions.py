@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from . import moods, session_log, userctx
+from . import moods, session_log, vault
 from .atomic import atomic_write_json, atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -21,23 +21,23 @@ MAX_ACTIONS = 200
 
 
 def _root() -> Path:
-    return userctx.user_root()
+    return vault.general_dir()
 
 
 def _actions_file() -> Path:
-    return _root() / "03_personality" / "face_actions.json"
+    return _root() / "face_actions.json"
 
 
 def _feedback_file() -> Path:
-    return _root() / "01_mood" / "feedback.jsonl"
+    return vault.mood_dir() / "feedback.jsonl"
 
 
 def _liked_file() -> Path:
-    return _root() / "03_personality" / "liked_replies.json"
+    return _root() / "liked_replies.json"
 
 
 def _liked_log_file() -> Path:
-    return _root() / "03_personality" / "liked_replies_log.jsonl"
+    return _root() / "liked_replies_log.jsonl"
 
 
 def _now(value: object | None = None) -> str:
@@ -142,6 +142,10 @@ def create_action(
         "q_num": q_num,
         "answered_q_num": answered_q_num,
         "domain": question_event.get("domain") if question_event else None,
+        "area": question_event.get("area") if question_event else None,
+        "category": question_event.get("category") if question_event else None,
+        "theme": question_event.get("theme") if question_event else None,
+        "theme_key": question_event.get("theme_key") if question_event else None,
         "kind": kind,
         "bot_mood": moods.coerce_bot_mood(bot_mood),
         "assistant_event_id": None,
@@ -169,6 +173,10 @@ def create_remask_action(event: dict, *, parent_token: str | None = None, at: ob
         "q_num": event.get("q_num"),
         "answered_q_num": None,
         "domain": event.get("domain"),
+        "area": event.get("area"),
+        "category": event.get("category"),
+        "theme": event.get("theme"),
+        "theme_key": event.get("theme_key"),
         "kind": "remask",
         "bot_mood": event.get("bot_mood"),
         "assistant_event_id": event.get("event_id"),
@@ -287,6 +295,10 @@ def record_user_score(token: str, score: float, reason: str, at: object | None =
         "message_id": rec.get("message_id"),
         "action_token": token,
         "bot_mood": rec.get("bot_mood"),
+        "area": rec.get("area"),
+        "category": rec.get("category"),
+        "theme": rec.get("theme"),
+        "theme_key": rec.get("theme_key"),
         "kind": rec.get("kind"),
         "score": float(score),
         "reason": reason,
@@ -321,6 +333,10 @@ def set_liked(token: str, liked: bool = True, at: object | None = None) -> Optio
         "assistant_message_id": rec.get("message_id"),
         "reply_to_user_message_id": rec.get("reply_to_user_message_id"),
         "bot_mood": rec.get("bot_mood"),
+        "area": rec.get("area"),
+        "category": rec.get("category"),
+        "theme": rec.get("theme"),
+        "theme_key": rec.get("theme_key"),
         "kind": rec.get("kind"),
         "assistant_event_id": rec.get("assistant_event_id"),
         "user_event_id": rec.get("user_event_id"),

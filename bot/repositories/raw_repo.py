@@ -11,21 +11,53 @@ from ..errors import ValidationError, VaultError
 from ..storage import layout
 from ..storage.log import append_log
 from ..validation import escape_raw_block, safe_question_text, safe_user_text
+from ..worldview_taxonomy import coerce_target, legacy_domain_target
 
 log = logging.getLogger(__name__)
 
 _ENTRY_RE = re.compile(
-    r"##\s+Q(\d+)\s*[·\-—]\s*(\d{2}:\d{2})\s*[·\-—]\s*(\w+)\s*\n"
+    r"##\s+Q(\d+)\s*[·\-—]\s*(\d{2}:\d{2})\s*[·\-—]\s*([^\n]+?)\s*\n"
     r"\*\*Q:\*\*\s*(.*?)\n"
     r"\*\*A:\*\*\s*(.*?)(?=\n##\s+Q\d+\s*[·\-—]|\Z)",
     re.DOTALL,
 )
 
 
-def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: str) -> Path:
+def _topic_from_parts(
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    domain: str | None = None,
+) -> dict:
+    if area or category or theme:
+        return coerce_target(area, category, theme)
+    legacy = legacy_domain_target(domain)
+    if legacy:
+        return legacy
+    return coerce_target(None, None, None)
+
+
+def append_raw(
+    q_num: int,
+    when: datetime,
+    question: str = "",
+    answer: str = "",
+    *legacy_args: str,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    theme_key: str | None = None,
+    domain: str | None = None,
+) -> Path:
     layout.ensure_layout()
-    if domain not in DOMAINS and domain != "user":
-        append_log("warn", "append_raw_unknown_domain", f"q={q_num} domain={domain!r}")
+    if legacy_args:
+        legacy_domain = question
+        question = answer
+        answer = legacy_args[0]
+        domain = domain or legacy_domain
+    target = _topic_from_parts(area=area, category=category, theme=theme, domain=domain)
+    topic = theme_key or target["theme_key"]
     date_str = when.strftime("%Y-%m-%d")
     time_str = when.strftime("%H:%M")
     path = layout.raw_dir() / f"{date_str}.md"
@@ -36,7 +68,7 @@ def append_raw(q_num: int, when: datetime, domain: str, question: str, answer: s
         append_log("warn", "raw_answer_truncated", f"Q{q_num} length>limit")
     a_clean = escape_raw_block(a_clean)
     block = (
-        f"## Q{q_num} · {time_str} · {domain}\n"
+        f"## Q{q_num} · {time_str} · {topic}\n"
         f"**Q:** {q_clean}\n"
         f"**A:** {a_clean}\n"
         f"^Q{q_num}\n\n"
@@ -104,11 +136,30 @@ def iter_history() -> list[dict]:
             log.exception("failed to read %s", path)
             continue
         for m in _ENTRY_RE.finditer(text):
+            topic = m.group(3).strip()
+            area = category = theme = theme_key = ""
+            domain = ""
+            parts = topic.split("/", 2)
+            if len(parts) == 3:
+                area, category, theme = parts
+                theme_key = topic
+            else:
+                domain = topic
+                legacy = legacy_domain_target(domain)
+                if legacy:
+                    area = legacy["area"]
+                    category = legacy["category"]
+                    theme = legacy["theme"]
+                    theme_key = legacy["theme_key"]
             entries.append({
                 "n": int(m.group(1)),
                 "date": date_str,
                 "time": m.group(2),
-                "domain": m.group(3),
+                "area": area,
+                "category": category,
+                "theme": theme,
+                "theme_key": theme_key,
+                "domain": domain,
                 "question": m.group(4).strip(),
                 "answer": m.group(5).strip(),
             })
@@ -121,4 +172,3 @@ def find_question(n: int) -> dict | None:
         if e["n"] == n:
             return e
     return None
-

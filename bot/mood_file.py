@@ -1,11 +1,11 @@
-"""Живой черновик настроения пользователя: `03_personality/mood.md`.
+"""Живой черновик настроения пользователя: `01_Мироощущение/mood/mood.md`.
 
 Capture-first (как и весь проект), разделение как в `about.py`:
 - **Код (live, каждый ход)** пишет ТОЛЬКО frontmatter — живой снимок из классификации
   LLM (`moods`): эмоция/V/A/D/устойчивость/последнее лицо. Тело файла НЕ трогает.
 - **Скилл `depersonalization` (вручную)** пишет в ТЕЛЕ связный анализ настроения за
   период (доминанты, динамика, триггеры) + ставит `mood_baseline` (prior) и строит
-  выверенный граф настроений в `01_mood/`. Код тело сохраняет — нарратив скилла не затирается.
+  выверенный граф настроений в `01_Мироощущение/mood/`. Код тело сохраняет — нарратив скилла не затирается.
 
 `mood_baseline` (prior для `moods.session_mood`) хранится здесь.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from . import moods, userctx
+from . import moods, vault
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -28,13 +28,13 @@ _BODY = (
     "# Настроение\n\n"
     "> Frontmatter выше — живой снимок настроения (пишет код на каждый ответ из "
     "категориальной классификации LLM). Связный анализ ниже выверяет и пишет "
-    "скилл `depersonalization`; выверенный граф настроений — в папке `01_mood/`.\n\n"
+    "скилл `depersonalization`; выверенный граф настроений — в папке `01_Мироощущение/mood/`.\n\n"
     "## Анализ настроения\n\n"
 )
 
 
 def _dir() -> Path:
-    return userctx.user_root() / "03_personality"
+    return vault.mood_dir()
 
 
 def path() -> Path:
@@ -50,7 +50,7 @@ def _write(fm: dict, body: str) -> None:
 
 
 def ensure() -> None:
-    """Создать пустой скелет `03_personality/mood.md`, если его нет (идемпотентно)."""
+    """Создать пустой скелет `01_Мироощущение/mood/mood.md`, если его нет (идемпотентно)."""
     p = path()
     if p.exists():
         return

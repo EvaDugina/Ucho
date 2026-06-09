@@ -1,23 +1,20 @@
 """Механический self-check базы при старте контейнера (без LLM), multi-user.
 
-Запускается из main.py после layout. Для КАЖДОГО пользователя (`users/<uid>/`)
-дёшево и детерминированно:
-- пересобирает все per-domain MOC,
-- валидирует frontmatter-связи концептов (битые [[slug]]),
-- ищет дубли (Jaccard) и сирот (ноль связей).
-Сводный отчёт по всем пользователям — в глобальный `.psycho/startup-check.md`.
-
-Глубокий смысловой реиндекс (слияние, profile, кластеризация MOC) — НЕ здесь.
-Это ручная сборка из сильного агента (Claude): скиллы reconcista / depersonalization.
+Проверяет новый граф мировоззрения 01-04:
+- пересобирает area-MOC;
+- валидирует межпапочные связи атомов;
+- ловит self-link и несимметричные `contradicts`;
+- считает сироты и грубые дубли summary.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
-from . import graph, moc, userctx, vault
+from . import userctx, vault, worldview
 from .atomic import atomic_write_text
-from .config import DOMAINS, PSYCHO_META_DIR, VAULT_PATH
+from .config import PSYCHO_META_DIR, VAULT_PATH
+from .worldview_taxonomy import WORLDVIEW_AREAS
 
 log = logging.getLogger(__name__)
 
@@ -51,67 +48,52 @@ def run() -> dict:
 
 
 def _run_one(uid: int) -> tuple[dict, str]:
-    """Проверка одного пользователя (контекст уже выставлен). (summary, md-секция)."""
-    all_concepts: list[graph.Concept] = []
-    for d in DOMAINS:
-        all_concepts.extend(graph.find_concepts(domain=d, limit=10_000))
-    known = graph.all_slugs_set()
-
+    atoms = worldview.find_atoms(limit=100_000)
     moc_rebuilt = 0
-    for d in DOMAINS:
+    for area in WORLDVIEW_AREAS:
         try:
-            moc.rebuild_domain_moc(d)
+            worldview.rebuild_area_moc(area.key)
             moc_rebuilt += 1
         except Exception:
-            log.exception("selfcheck: MOC rebuild failed for uid=%s domain=%s", uid, d)
+            log.exception("selfcheck: worldview MOC rebuild failed for uid=%s area=%s", uid, area.key)
 
-    broken: list[tuple[str, str, str]] = []
-    for c in all_concepts:
-        for kind in graph.RELATION_KINDS:
-            for target in c.relations(kind):
-                if target in known:
-                    continue
-                if graph.resolve_slug(target) is None:
-                    broken.append((c.slug, kind, target))
-
-    orphans = [
-        c.slug for c in all_concepts
-        if not any(c.relations(k) for k in graph.RELATION_KINDS)
-    ]
-
+    check = worldview.check_links()
     dupes: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for c in all_concepts:
-        if not c.summary:
+    for atom in atoms:
+        if not atom.summary:
             continue
-        similar = graph.find_similar_concept(c.summary, c.domain)
-        if similar is not None and similar.slug != c.slug:
-            pair = tuple(sorted((c.slug, similar.slug)))
+        similar = worldview.find_similar_atom(atom.summary)
+        if similar is not None and similar.slug != atom.slug:
+            pair = tuple(sorted((atom.slug, similar.slug)))
             if pair not in seen:
                 seen.add(pair)
                 dupes.append(pair)
 
     summary = {
-        "concepts": len(all_concepts),
+        "atoms": len(atoms),
         "moc_rebuilt": moc_rebuilt,
-        "broken_links": len(broken),
-        "orphans": len(orphans),
+        "broken_links": len(check["broken"]),
+        "self_links": len(check["self_links"]),
+        "asymmetric": len(check["asymmetric"]),
+        "orphans": len(check["orphans"]),
         "dupes": len(dupes),
     }
 
     lines = [
         f"## Пользователь {uid}",
         "",
-        f"- Концептов: **{len(all_concepts)}** · MOC: **{moc_rebuilt}/{len(DOMAINS)}** · "
-        f"битых: **{len(broken)}** · сирот: **{len(orphans)}** · дублей: **{len(dupes)}**",
+        f"- Атомов: **{len(atoms)}** · MOC: **{moc_rebuilt}/{len(WORLDVIEW_AREAS)}** · "
+        f"битых: **{len(check['broken'])}** · self-link: **{len(check['self_links'])}** · "
+        f"asym: **{len(check['asymmetric'])}** · сирот: **{len(check['orphans'])}** · "
+        f"дублей: **{len(dupes)}**",
         "",
     ]
-    if broken:
-        lines += [f"  - битая связь `{s}` → `{kind}` → `{t}`" for s, kind, t in broken]
-    if orphans:
-        lines += [f"  - сирота `{s}`" for s in orphans]
-    if dupes:
-        lines += [f"  - дубль `{a}` ≈ `{b}`" for a, b in dupes]
+    lines += [f"  - битая связь `{s}` → `{kind}` → `{t}`" for s, kind, t in check["broken"]]
+    lines += [f"  - self-link `{s}` → `{kind}`" for s, kind in check["self_links"]]
+    lines += [f"  - asym `{s}` → `{kind}` → `{t}`" for s, kind, t in check["asymmetric"]]
+    lines += [f"  - сирота `{s}`" for s in check["orphans"]]
+    lines += [f"  - дубль `{a}` ≈ `{b}`" for a, b in dupes]
     lines.append("")
     return summary, "\n".join(lines)
 
@@ -126,7 +108,7 @@ def _write_report(per_user: dict[int, dict], sections: list[str]) -> None:
         "",
         f"# Self-check · {ts}",
         "",
-        "_Механическая проверка при старте (без LLM), по всем пользователям._",
+        "_Механическая проверка мировоззренческого графа 01-04 при старте (без LLM)._",
         "",
         f"Пользователей: **{len(per_user)}**.",
         "",

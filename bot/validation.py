@@ -27,7 +27,7 @@ import unicodedata
 # Жёсткие лимиты. Числа подобраны под человеческий чат + чтобы влезть в окно
 # контекста LLM и не пухнуть в vault.
 MAX_USER_TEXT = 10_000          # ответ пользователя в /answer / реплика в сессии
-MAX_QUESTION_TEXT = 2_000       # /requestion + вопросы от LLM
+MAX_QUESTION_TEXT = 2_000       # пользовательские и LLM-вопросы
 MAX_SLUG_LEN = 80
 MAX_NAME_LEN = 200
 MAX_SUMMARY_LEN = 1_500
@@ -168,7 +168,7 @@ def safe_user_text(raw: str, limit: int = MAX_USER_TEXT) -> tuple[str, bool]:
 
 
 def safe_question_text(raw: str) -> str:
-    """Вопрос (от пользователя через /requestion или от LLM) — одна-две строки."""
+    """Вопрос (от пользователя или от LLM) — одна-две строки."""
     if not raw:
         return ""
     s, _ = safe_user_text(raw, limit=MAX_QUESTION_TEXT)

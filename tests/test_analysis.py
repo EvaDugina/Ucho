@@ -36,7 +36,7 @@ def test_append_report_writes_knowledge_note(as_user):
     report = "🧪 Анализ ответа — методы (число → пояснение)\n\n▸ PAD\nнет данных"
     analysis.append_report(q_num=42, text_len=123, report=report)
 
-    files = sorted((analysis.userctx.user_root() / "01_mood" / "analysis").glob("*.md"))
+    files = sorted((analysis.vault.mood_dir() / "analysis").glob("*.md"))
     assert len(files) == 1
     text = files[0].read_text(encoding="utf-8")
     assert "# Анализ методов" in text

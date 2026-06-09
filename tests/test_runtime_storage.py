@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import face_actions, handlers, middleware, moods, qmap, questions, session, session_log, sessions, userctx, vault
+from bot import face_actions, handlers, middleware, moods, qmap, session, session_log, sessions, userctx, vault
 from bot.errors import LLMError, VaultError
 from bot.services import conversation_service, note_service
 
@@ -37,7 +37,7 @@ def test_runtime_indexes_derive_from_session_log(as_user):
     entry = qmap.find_by_message_id(10)
     assert entry["q_num"] == 3
     assert entry["text"] == "Что тебя держит?"
-    assert questions.recent(1)[0]["n"] == 3
+    assert session_log.recent_questions(1)[0]["n"] == 3
     assert sessions.find_by_message_id(11) == "s-derive"
 
 
@@ -195,7 +195,7 @@ async def test_start_only_clears_session_and_keeps_data(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_busy_text_and_echo_merge_into_cancelable_queue(as_user, monkeypatch):
+async def test_busy_text_and_echo_merge_into_start_clearable_queue(as_user, monkeypatch):
     session.start(mode="probe", domain="everyday")
     session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
     session.get().pending_answer_event_id = "already-in-llm"
@@ -216,13 +216,13 @@ async def test_busy_text_and_echo_merge_into_cancelable_queue(as_user, monkeypat
     assert text_msg.answers[-1]["text"] == "Ещё думаю."
     assert echo_msg.answers[-1]["text"] == "Ещё думаю."
 
-    cancel_msg = _FakeMessage("/cancel")
-    cancel_msg.from_user = SimpleNamespace(id=as_user)
-    await handlers.cmd_cancel(cancel_msg)
+    start_msg = _FakeMessage("/start")
+    start_msg.from_user = SimpleNamespace(id=as_user)
+    await handlers.cmd_start(start_msg)
 
     assert session.get().queued_answer is None
     assert session.get().pending_answer_event_id == "already-in-llm"
-    assert cancel_msg.answers[-1]["text"] == "Я удалил тебя из памяти"
+    assert "Смыл отложенный ответ" in start_msg.answers[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -249,6 +249,35 @@ async def test_busy_command_middleware_replies_and_keeps_session(as_user, monkey
     assert message.answers[-1]["text"] == "Ещё думаю."
     assert session.get() is not None
     assert session.get().last_question == "Что держит?"
+
+
+@pytest.mark.asyncio
+async def test_busy_start_middleware_clears_queue_and_keeps_pending(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    session.get().pending_answer_event_id = "already-in-llm"
+    session.enqueue_answer("досланный текст", source="text")
+    session.persist()
+    message = _FakeMessage("/start")
+    message.from_user = SimpleNamespace(id=as_user)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+        await handlers.cmd_start(event)
+
+    monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
+    monkeypatch.setattr(middleware, "Message", _FakeMessage)
+
+    await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
+
+    assert called is True
+    assert session.get() is not None
+    assert session.get().queued_answer is None
+    assert session.get().pending_answer_event_id == "already-in-llm"
+    assert "Смыл отложенный ответ" in message.answers[-1]["text"]
 
 
 @pytest.mark.asyncio
@@ -318,6 +347,10 @@ async def test_drain_queued_answer_uses_old_question_snapshot(as_user, monkeypat
         return conversation_service.ReactionPayload(
             q_num=999,
             mode="probe",
+            area="practice",
+            category="lifestyle",
+            theme="быт",
+            theme_key="practice/lifestyle/быт",
             domain="everyday",
             text="ответ",
             bot_mood=None,
@@ -353,7 +386,7 @@ async def test_probe_does_not_call_llm_when_session_log_required_fails(as_user, 
     async def fake_process_answer(**kwargs):
         nonlocal called
         called = True
-        return {"observations": [], "reaction": "вижу"}
+        return {"worldview_observations": [], "reaction": "вижу"}
 
     def fail_append_required(**kwargs):
         raise VaultError("session log is unavailable")
@@ -477,7 +510,9 @@ async def test_ask_next_llm_error_is_silent_to_user(as_user, monkeypatch):
 
     monkeypatch.setattr(handlers, "ask_next", fail_ask_next)
 
-    await handlers._send_next_question(bot, 123, domain="everyday")
+    await handlers._send_next_question(
+        bot, 123, target={"area": "practice", "category": "lifestyle", "theme": "быт"}
+    )
 
     assert bot.sent == []
 
@@ -490,7 +525,13 @@ async def test_ask_next_commits_after_successful_question(as_user, monkeypatch):
 
     async def fake_ask_next(**kwargs):
         _ = kwargs
-        return {"question": "Что держит форму?", "domain": "everyday"}
+        return {
+            "question": "Что держит форму?",
+            "area": "practice",
+            "category": "lifestyle",
+            "theme": "быт",
+            "theme_key": "practice/lifestyle/быт",
+        }
 
     monkeypatch.setattr(handlers, "ask_next", fake_ask_next)
     monkeypatch.setattr(
@@ -499,7 +540,9 @@ async def test_ask_next_commits_after_successful_question(as_user, monkeypatch):
         lambda message, allow_empty=False: commits.append(message) or "sha",
     )
 
-    await handlers._send_next_question(bot, 123, domain="everyday")
+    await handlers._send_next_question(
+        bot, 123, target={"area": "practice", "category": "lifestyle", "theme": "быт"}
+    )
 
     assert bot.sent
     assert commits == ["ask question"]
@@ -513,7 +556,7 @@ async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
 
     async def fake_process_answer(**kwargs):
         captured.update(kwargs)
-        return {"observations": [], "reaction": "Вот теперь слышу трещину.", "user_delta": {}}
+        return {"worldview_observations": [], "reaction": "Вот теперь слышу трещину.", "user_delta": {}}
 
     monkeypatch.setattr(note_service, "process_answer", fake_process_answer)
 
@@ -566,7 +609,7 @@ async def test_ingest_note_does_not_call_llm_when_note_write_fails(as_user, monk
     async def fake_process_answer(**kwargs):
         nonlocal called
         called = True
-        return {"observations": [], "reaction": "не должен"}
+        return {"worldview_observations": [], "reaction": "не должен"}
 
     monkeypatch.setattr(note_service.vault, "append_note", fail_append_note)
     monkeypatch.setattr(note_service, "process_answer", fake_process_answer)
