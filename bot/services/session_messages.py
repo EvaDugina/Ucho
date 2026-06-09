@@ -13,8 +13,8 @@ from aiogram import Bot
 from aiogram.types import Message
 
 from .. import face_actions, qmap, questions, session, session_log
-from ..config import DOMAINS
 from ..validation import safe_chat_html
+from ..worldview_taxonomy import coerce_target, get_area, get_category, legacy_domain_target
 
 DOMAIN_LABELS = {
     "ethics": "Этика",
@@ -79,13 +79,50 @@ def question_field_with_face(text: str, bot_mood: str | None) -> str:
     return text
 
 
-def format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
+def _target_from_values(
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    domain: str | None = None,
+) -> dict | None:
+    if area and get_area(area):
+        return coerce_target(area, category, theme)
+    legacy = legacy_domain_target(domain)
+    if legacy:
+        return legacy
+    return None
+
+
+def topic_label(
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    domain: str | None = None,
+) -> str:
     if domain == USER_DOMAIN:
-        label = USER_DOMAIN_LABEL
-    elif domain in DOMAINS:
-        label = domain
-    else:
-        label = "unknown"
+        return USER_DOMAIN_LABEL
+    target = _target_from_values(area, category, theme, domain)
+    if target:
+        cat = get_category(target["area"], target["category"])
+        category_title = cat.title if cat else target["category"]
+        return f"{target['area_title']} / {category_title} / {target['theme']}"
+    if domain:
+        return DOMAIN_LABELS.get(domain, domain)
+    return "unknown"
+
+
+def format_q(
+    q_num: int,
+    mode: str,
+    domain: str = "",
+    question_text: str = "",
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+) -> str:
+    label = topic_label(area=area, category=category, theme=theme, domain=domain)
     mode_part = "" if mode == "probe" else f" · {mode}"
     head = f"Q{q_num}{mode_part} · <i>{html.escape(label)}</i>"
     safe_q = question_text or ""
@@ -117,8 +154,12 @@ async def send_question(
     *,
     q_num: int,
     mode: str,
-    domain: str,
-    text: str,
+    domain: str = "",
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    theme_key: str | None = None,
+    text: str = "",
     suffix: str = "",
     plain: bool = False,
     bot_mood: str | None = None,
@@ -146,17 +187,27 @@ async def send_question(
     if plain:
         body = with_face_signature(text, bot_mood)
     else:
-        body = format_q(q_num, mode, domain, text)
+        body = format_q(q_num, mode, domain, text, area=area, category=category, theme=theme)
     if suffix:
         body += suffix
     sent = await bot.send_message(chat_id, body, parse_mode="HTML")
     try:
-        qmap.append(sent.message_id, q_num, text, domain, at=getattr(sent, "date", None))
+        qmap.append(
+            sent.message_id,
+            q_num,
+            text,
+            domain,
+            at=getattr(sent, "date", None),
+            area=area,
+            category=category,
+            theme=theme,
+            theme_key=theme_key,
+        )
     except Exception:
         import logging
         logging.getLogger(__name__).exception("failed to record question in qmap (q_num=%s)", q_num)
     if not plain:
-        questions.record(q_num, domain, text)
+        questions.record(q_num, domain or theme_key or "", text)
     s = session.get()
     if s is not None:
         log_reply_to = None
@@ -173,6 +224,10 @@ async def send_question(
             message_id=getattr(sent, "message_id", None),
             reply_to_message_id=log_reply_to,
             q_num=q_num,
+            area=area,
+            category=category,
+            theme=theme,
+            theme_key=theme_key,
             domain=domain,
             bot_mood=bot_mood,
         )
@@ -186,8 +241,11 @@ def event_with_face(event: dict, bot_mood: str) -> str:
     kind = event.get("kind")
     q_num = event.get("q_num")
     domain = event.get("domain") or "everyday"
+    area = event.get("area") or ""
+    category = event.get("category") or ""
+    theme = event.get("theme") or ""
     if kind == "question" and q_num:
-        return format_q(int(q_num), "probe", domain, text)
+        return format_q(int(q_num), "probe", domain, text, area=area, category=category, theme=theme)
     return with_face_signature(text, bot_mood)
 
 

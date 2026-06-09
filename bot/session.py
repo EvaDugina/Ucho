@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from . import session_log, userctx
 from .atomic import atomic_write_json
 from .config import DAILY_TZ, VAULT_PATH
+from .worldview_taxonomy import coerce_target, get_area, legacy_domain_target
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +93,16 @@ def _session_file() -> Path:
 @dataclass
 class Session:
     mode: Mode
+    area: Optional[str] = None
+    category: str = ""
+    theme: str = ""
+    theme_key: str = ""
     domain: Optional[str] = None
     last_question: str = ""
+    last_area: str = ""
+    last_category: str = ""
+    last_theme: str = ""
+    last_theme_key: str = ""
     last_domain: str = ""
     current_q_num: Optional[int] = None
     asked_at: datetime = field(default_factory=datetime.now)
@@ -279,10 +288,57 @@ def _snapshot_to_ring(s: Optional["Session"]) -> None:
     return
 
 
-def start(mode: Mode, domain: Optional[str] = None) -> "Session":
+def _target_from_values(
+    *,
+    target: Optional[dict] = None,
+    area: Optional[str] = None,
+    category: Optional[str] = None,
+    theme: Optional[str] = None,
+    domain: Optional[str] = None,
+) -> dict:
+    if target:
+        return coerce_target(target.get("area"), target.get("category"), target.get("theme"))
+    if area and get_area(area):
+        return coerce_target(area, category, theme)
+    legacy = legacy_domain_target(domain or area)
+    if legacy:
+        return legacy
+    return coerce_target(area, category, theme)
+
+
+def target_snapshot(s: Optional["Session"] = None) -> dict:
+    s = s or get()
+    if s is None:
+        return coerce_target(None, None, None)
+    return _target_from_values(
+        area=s.last_area or s.area,
+        category=s.last_category or s.category,
+        theme=s.last_theme or s.theme,
+        domain=s.last_domain or s.domain,
+    )
+
+
+def start(
+    mode: Mode,
+    *,
+    target: Optional[dict] = None,
+    area: Optional[str] = None,
+    category: Optional[str] = None,
+    theme: Optional[str] = None,
+    domain: Optional[str] = None,
+) -> "Session":
     uid = userctx.current_uid()
     _snapshot_to_ring(_active.get(uid) if uid is not None else None)
-    s = Session(mode=mode, domain=domain, id=uuid.uuid4().hex)
+    t = _target_from_values(target=target, area=area, category=category, theme=theme, domain=domain)
+    s = Session(
+        mode=mode,
+        area=t["area"],
+        category=t["category"],
+        theme=t["theme"],
+        theme_key=t["theme_key"],
+        domain=domain,
+        id=uuid.uuid4().hex,
+    )
     if uid is not None:
         _active[uid] = s
     _persist()
@@ -322,6 +378,10 @@ def resume(session_id: str) -> Optional["Session"]:
     last_q = None
     main_q = None
     last_assistant = ""
+    last_area = ""
+    last_category = ""
+    last_theme = ""
+    last_theme_key = ""
     last_domain = ""
     asked_at = datetime.now()
     message_ids: list[int] = []
@@ -337,6 +397,10 @@ def resume(session_id: str) -> Optional["Session"]:
             history.append(_history_entry(str(e.get("role")), str(e.get("text")), at=e.get("ts")))
         if e.get("role") == "assistant" and e.get("kind") != "reminder":
             last_assistant = str(e.get("text") or last_assistant)
+            last_area = str(e.get("area") or last_area)
+            last_category = str(e.get("category") or last_category)
+            last_theme = str(e.get("theme") or last_theme)
+            last_theme_key = str(e.get("theme_key") or last_theme_key)
             last_domain = str(e.get("domain") or last_domain)
             if e.get("q_num") is not None:
                 last_q = int(e["q_num"])
@@ -346,10 +410,19 @@ def resume(session_id: str) -> Optional["Session"]:
                 asked_at = _coerce_dt(e.get("ts"))
             except Exception:
                 pass
+    target = _target_from_values(area=last_area, category=last_category, theme=last_theme, domain=last_domain)
     s = Session(
         mode="probe",
+        area=target["area"],
+        category=target["category"],
+        theme=target["theme"],
+        theme_key=target["theme_key"],
         domain=last_domain or None,
         last_question=last_assistant,
+        last_area=target["area"],
+        last_category=target["category"],
+        last_theme=target["theme"],
+        last_theme_key=target["theme_key"],
         last_domain=last_domain,
         current_q_num=last_q,
         asked_at=asked_at,
@@ -405,7 +478,7 @@ def enqueue_answer(
 
     Очередь хранит snapshot вопроса до того, как текущая генерация превратит
     `last_question` в новый комментарий Иуды. Сам текст до старта обработки не
-    пишется в `00_raw/sessions`, поэтому `/cancel` может удалить его без следа.
+    пишется в `00_raw/sessions`, поэтому `/start` может удалить его без следа.
     """
     clean = (text or "").strip()
     if not clean:
@@ -426,6 +499,10 @@ def enqueue_answer(
             "text": clean,
             "fragments": [fragment],
             "question": s.last_question,
+            "area": s.last_area or s.area,
+            "category": s.last_category or s.category,
+            "theme": s.last_theme or s.theme,
+            "theme_key": s.last_theme_key or s.theme_key,
             "domain": s.last_domain or s.domain,
             "origin_q_num": s.current_q_num,
             "asked_at": s.asked_at.isoformat(),
@@ -465,12 +542,26 @@ def pop_queued_answer(s: Optional["Session"] = None) -> Optional[dict]:
     return q if isinstance(q, dict) else None
 
 
-def set_question(question: str, domain: str, q_num: Optional[int] = None) -> None:
+def set_question(
+    question: str,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    q_num: Optional[int] = None,
+    *,
+    target: Optional[dict] = None,
+    domain: Optional[str] = None,
+) -> None:
     s = get()
     if s is None:
         return
+    t = _target_from_values(target=target, area=area, category=category, theme=theme, domain=domain)
     s.last_question = question
-    s.last_domain = domain
+    s.last_area = t["area"]
+    s.last_category = t["category"]
+    s.last_theme = t["theme"]
+    s.last_theme_key = t["theme_key"]
+    s.last_domain = domain or (area if area and not get_area(area) else s.last_domain)
     s.asked_at = datetime.now()
     if q_num is not None:
         s.current_q_num = q_num

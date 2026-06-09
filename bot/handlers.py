@@ -1,6 +1,5 @@
 import html
 import logging
-import random
 import re
 
 from aiogram import Bot, F, Router
@@ -18,7 +17,6 @@ from . import (
     mood_file,
     moods,
     qmap,
-    questions,
     ratelimit,
     session,
     session_log,
@@ -27,7 +25,6 @@ from . import (
     users,
     vault,
 )
-from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
 from .errors import LLMError, VaultError
 from .llm import about_present, ask_next, regenerate_reaction
 from .services import (
@@ -42,6 +39,7 @@ from .validation import (
     safe_chat_html,
     safe_user_text,
 )
+from .worldview_taxonomy import WORLDVIEW_AREAS, choose_random_target, coerce_target, get_area, legacy_domain_target
 
 log = logging.getLogger(__name__)
 # Основной роутер — пользовательские команды + текстовый поток (on_text).
@@ -52,28 +50,16 @@ router = Router()
 # фильтр уронил бы команду гостя в on_text как текст-заметку — см. cmd_adduser).
 admin_router = Router()
 
-_DOMAIN_LABELS = {
-    "ethics": "Этика",
-    "aesthetics": "Эстетика",
-    "politics": "Политика",
-    "everyday": "Быт",
-    "relationships": "Отношения",
-    "identity": "Идентичность",
-    "mortality": "Смерть",
-    "nationality": "Национальность",
-    "knowledge": "Знание",
-    "work": "Труд",
-}
+_AREA_LABELS = {area.key: area.title for area in WORLDVIEW_AREAS}
 
 TG_MSG_LIMIT = session_messages.TG_MSG_LIMIT  # запас от 4096
 
-# Сентинел для домена, помеченного пользователем (/requestion). В DOMAINS его нет —
-# он влияет только на отображение «пользовательский» в сообщении бота. LLM на этот
-# домен не получает хинт, чтобы он сам выбрал реальный домен для концептов.
+# Сентинел для вопроса, помеченного пользователем (/echo). В каноне 01-04 его нет —
+# он влияет только на отображение «пользовательский» в сообщении бота.
 USER_DOMAIN = session_messages.USER_DOMAIN
 USER_DOMAIN_LABEL = session_messages.USER_DOMAIN_LABEL
 
-# Заголовок вопроса в сообщении бота: "Q<N> · [mode ·] <domain>" (см. _format_q).
+# Заголовок вопроса в сообщении бота: "Q<N> · [mode ·] <topic>" (см. _format_q).
 _Q_HEAD_RE = re.compile(r"^Q(\d+)\s*·\s")
 
 
@@ -82,8 +68,8 @@ def _parse_question_message(text: str | None) -> dict | None:
 
     Фолбэк, когда qmap не знает message_id (вопрос задан до появления qmap,
     либо карта потерялась): сам текст сообщения несёт всё нужное — номер, домен
-    и формулировку. Формат — из ``_format_q``: "Q<N> · <domain>\\n\\n<тело>".
-    Возвращает ``{q_num, domain, text}`` или None, если это не вопрос-сообщение.
+    и формулировку. Новые topic-поля лучше берутся из session-log/qmap; этот
+    парсер — только legacy fallback по тексту сообщения.
     """
     if not text:
         return None
@@ -101,29 +87,30 @@ def _parse_question_message(text: str | None) -> dict | None:
     label = tokens[-1]
     if label == USER_DOMAIN_LABEL:
         domain = USER_DOMAIN
-    elif label in DOMAINS:
+    elif legacy_domain_target(label):
         domain = label
     else:
-        return None  # домен не распознан — не реконструируем
-    # Хвост "(повтор QN)" от /requestion в тело не тащим.
+        domain = ""
+    # Legacy-хвост "(повтор QN)" в тело не тащим.
     body = re.sub(r"\n*\(повтор\s+Q\d+\)\s*$", "", body).strip()
     if not body:
         return None
-    return {"q_num": q_num, "domain": domain, "text": body}
+    target = legacy_domain_target(domain) or coerce_target(None, None, None)
+    return {"q_num": q_num, "domain": domain, "text": body, **target}
 
 
 def _ask_keyboard() -> InlineKeyboardMarkup:
-    """2 кнопки в ряд для всех доменов, плюс отдельный ряд «на выбор бота»."""
+    """Кнопки выбора области; категория и тема внутри выбираются программно."""
     rows: list[list[InlineKeyboardButton]] = []
     pair: list[InlineKeyboardButton] = []
-    for d in DOMAINS:
-        pair.append(InlineKeyboardButton(text=_DOMAIN_LABELS.get(d, d), callback_data=f"ask:{d}"))
+    for area in WORLDVIEW_AREAS:
+        pair.append(InlineKeyboardButton(text=area.title, callback_data=f"ask:area:{area.key}"))
         if len(pair) == 2:
             rows.append(pair)
             pair = []
     if pair:
         rows.append(pair)
-    rows.append([InlineKeyboardButton(text="Пусть бот выберет сам", callback_data="ask:any")])
+    rows.append([InlineKeyboardButton(text="Случайно 01-04", callback_data="ask:any")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -180,10 +167,19 @@ def _log_llm_silence(where: str) -> None:
     log.warning("%s LLM error; user reply suppressed", where)
 
 
-def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
+def _format_q(
+    q_num: int,
+    mode: str,
+    domain: str,
+    question_text: str,
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+) -> str:
     """Сформировать HTML-сообщение с вопросом.
 
-    Заголовок: Q42 · [mode ·] <i>domain</i>
+    Заголовок: Q42 · [mode ·] <i>area / category / theme</i>
     Тело: <code>…</code> — inline-моноширинный шрифт. Telegram также даёт
     long-press «копировать» на <code>.
     Отправлять с parse_mode='HTML'.
@@ -195,11 +191,11 @@ def _format_q(q_num: int, mode: str, domain: str, question_text: str) -> str:
     ``question_text`` обрезается до ~3500 символов — Telegram режет по 4096
     байт, нужен запас на head + теги ``<code>``.
     """
-    return session_messages.format_q(q_num, mode, domain, question_text)
+    return session_messages.format_q(q_num, mode, domain, question_text, area=area, category=category, theme=theme)
 
 
 def _real_domain(d: str | None) -> str | None:
-    """Возвращает d только если это валидный концептный домен. Иначе None."""
+    """Legacy wrapper: возвращает старый домен только если он мапится в 01-04."""
     return conversation_service.real_domain(d)
 
 
@@ -209,8 +205,12 @@ async def _send_question(
     *,
     q_num: int,
     mode: str,
-    domain: str,
-    text: str,
+    domain: str = "",
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    theme_key: str | None = None,
+    text: str = "",
     suffix: str = "",
     plain: bool = False,
     bot_mood: str | None = None,
@@ -222,6 +222,10 @@ async def _send_question(
         q_num=q_num,
         mode=mode,
         domain=domain,
+        area=area,
+        category=category,
+        theme=theme,
+        theme_key=theme_key,
         text=text,
         suffix=suffix,
         plain=plain,
@@ -242,14 +246,14 @@ def _open_anchored_session(entry: dict) -> None:
     это Q-повтор, отдельный raw-блок, старый ответ цел.
     """
     text = entry["text"]
-    domain = entry["domain"]
+    domain = entry.get("domain") or ""
+    target = coerce_target(entry.get("area"), entry.get("category"), entry.get("theme"))
     q_num = vault.next_q_num() if entry.get("answered") else int(entry["q_num"])
-    start_domain = domain if domain in DOMAINS else None
-    session.start(mode="probe", domain=start_domain)
+    session.start(mode="probe", target=target, domain=domain or None)
     s = session.get()
     if s is None:
         return
-    session.set_question(text, domain, q_num=q_num)
+    session.set_question(text, target=target, q_num=q_num, domain=domain or None)
     s.main_question = text
     s.main_q_num = q_num
     s.clarifier_count = 0
@@ -298,9 +302,9 @@ async def _session_reply(
     if sent is not None and getattr(sent, "message_id", None):
         s.add_message_id(int(sent.message_id))
     if set_anchor:
-        dom = domain if domain in DOMAINS else (s.last_domain if s.last_domain in DOMAINS else "everyday")
+        target = session.target_snapshot(s)
         a = anchor if anchor is not None else text
-        session.set_question(a, dom, q_num=vault.next_q_num())
+        session.set_question(a, target=target, q_num=vault.next_q_num(), domain=domain)
         s.record_assistant(html.unescape(text or ""), at=getattr(sent, "date", None))
     session_log.append_required(
         session_id=s.id,
@@ -310,7 +314,11 @@ async def _session_reply(
         at=getattr(sent, "date", None),
         message_id=getattr(sent, "message_id", None),
         q_num=s.current_q_num,
-        domain=s.last_domain,
+        area=s.last_area,
+        category=s.last_category,
+        theme=s.last_theme,
+        theme_key=s.last_theme_key,
+        domain=domain,
     )
     return sent
 
@@ -354,7 +362,9 @@ async def _send_reaction_payload(message: Message, payload: conversation_service
         await message.answer(payload.mood_message)
     await _send_question(
         message.bot, message.chat.id,
-        q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+        q_num=payload.q_num, mode=payload.mode, domain=payload.domain,
+        area=payload.area, category=payload.category, theme=payload.theme,
+        theme_key=payload.theme_key, text=payload.text, plain=True,
         bot_mood=payload.bot_mood,
         admin_controls=bool(payload.bot_mood),
         action_context={
@@ -389,6 +399,9 @@ async def _drain_queued_answers(message: Message, *, is_owner: bool) -> None:
                 is_owner=is_owner,
                 question=str(item.get("question") or ""),
                 domain_hint=item.get("domain"),
+                area=item.get("area"),
+                category=item.get("category"),
+                theme=item.get("theme"),
                 q_num=vault.next_q_num(),
                 asked_at=item.get("asked_at"),
                 session_context_snapshot=str(item.get("session_context") or ""),
@@ -474,7 +487,11 @@ def _record_command_event(message: Message) -> None:
             message.reply_to_message.message_id if message.reply_to_message is not None else None
         ),
         q_num=s.current_q_num,
-        domain=s.last_domain,
+        area=s.last_area,
+        category=s.last_category,
+        theme=s.last_theme,
+        theme_key=s.last_theme_key,
+        domain=s.last_domain or None,
     )
 
 
@@ -527,15 +544,12 @@ _HELP_BODY = (
     "<b>/ucho</b> <i>&lt;текст&gt;</i> — свободная заметка → в граф\n"
     "<b>/echo</b> <i>&lt;вопрос&gt;</i> — твой собственный вопрос\n"
     "<b>/ask</b> <i>[тема]</i> — вопрос; без темы покажу кнопки\n"
-    "<b>/requestion</b> <i>N</i> — повторить выбранный вопрос №N\n"
     "<b>/about</b> — каким я тебя вижу\n"
     "\n"
     "<b>Сервис</b>\n"
-    "<b>/start</b> — Бесполезная как мизинец на отрубленной руке.\n"
-    "<b>/cancel</b> — убрать отложенный ответ, если он ещё не в LLM\n"
-    "<b>/leta</b> — Смыть водами реки забвения черты своего лица\n"
-    "<b>/help</b> — этот список\n"
-    "<b>/history</b> — последние вопросы"
+    "<b>/start</b> — смыв сессии и ещё не обработанной очереди\n"
+    "<b>/leta</b> — Омыть водами реки забвения черты своего лица\n"
+    "<b>/help</b> — этот список"
 )
 
 _HELP_FACE = (
@@ -549,14 +563,13 @@ _HELP_ADMIN = (
     "<b>Админ</b>\n"
     "<b>/adduser</b> <i>id</i> — добавить пользователя\n"
     "<b>/removeuser</b> <i>id</i> — убрать (данные не удаляются)\n"
-    "<b>/users</b> — список доверенных\n"
-    "<b>/dailyall</b> — разослать дневной вопрос всем прямо сейчас"
+    "<b>/users</b> — список доверенных"
 )
 
 _HELP_PEBBLE = "<b>/pebble</b> — бросить камень → короткая реплика"
 
 _HELP_FOOTER = (
-    f"<b>Домены:</b> <code>{', '.join(DOMAINS)}</code>\n\n"
+    f"<b>Области:</b> <code>{', '.join(a.folder for a in WORLDVIEW_AREAS)}</code>\n\n"
     "На любое моё сообщение можно ответить через <b>reply</b> (смахни сообщение) — "
     "продолжим с того места.\n\n"
     "<i>Я сам настигну тебя своим вопросом.</i>"
@@ -565,17 +578,31 @@ _HELP_FOOTER = (
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    """Кнопка смыва: закрывает текущую сессию. Данные (граф/raw) не трогает."""
+    """Кнопка смыва: закрывает сессию и чистит queued_answer. Данные не трогает."""
     if not _is_allowed(message):
         log.info("ignored /start from non-owner user_id=%s", message.from_user.id if message.from_user else None)
         return
     vault.ensure_layout()
-    # Активную сессию уже закрыл AccessMiddleware (любая команда закрывает её,
-    # снапшот ушёл в кольцо — можно продолжить reply). Здесь только подтверждаем.
+    had_queue = session.clear_queued_answer()
+    uid = userctx.current_uid()
+    if session.has_pending() or ratelimit.is_inflight(uid):
+        if had_queue:
+            await message.answer(
+                "Смыл отложенный ответ. Текущую мысль не прерываю; данные целы."
+            )
+        else:
+            await message.answer(
+                "Текущая мысль уже в работе. Отложенной очереди не было; данные целы."
+            )
+        return
+
+    # В обычном ходе активную сессию уже закрыл AccessMiddleware. Прямой вызов
+    # handler-а в тестах и recovery-safe сценариях всё равно добивает runtime.
     session.clear()
+    prefix = "Смыто — очередь удалена, сессия закрыта." if had_queue else "Смыто — сессия закрыта (если была)."
     await message.answer(
-        "Смыто — сессия закрыта (если была). Данные целы; продолжить разговор можно "
-        "reply на любое его сообщение.\nСписок команд — /help."
+        f"{prefix} Данные целы; продолжить разговор можно reply на любое его сообщение.\n"
+        "Список команд — /help."
     )
 
 
@@ -709,49 +736,27 @@ async def cmd_users(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
-@admin_router.message(Command("dailyall"))
-async def cmd_dailyall(message: Message, bot: Bot) -> None:
-    if not _is_owner(message):
-        return
-    targets = set(users.allowed_ids()) | set(users.all_data_user_ids())
-    targets.add(OWNER_TELEGRAM_ID)
-    targets.update(ALLOWED_TELEGRAM_IDS)
-    sent = skipped = failed = 0
-    for uid in sorted(targets):
-        try:
-            # send_daily_question сам дедупит по дню (общий маркер с cron/догоном)
-            # и не пропускает из-за активной сессии/прошлых ответов.
-            if await send_daily_question(bot, uid):
-                sent += 1
-            else:
-                skipped += 1
-        except Exception:
-            failed += 1
-            log.exception("dailyall failed for uid=%s", uid)
-    userctx.set_user(message.from_user.id)
-    await message.answer(
-        f"Разослал. Отправлено: {sent}, пропущено (уже было сегодня): {skipped}, ошибок: {failed}."
-    )
-
-
 @router.message(Command("ask"))
 async def cmd_ask(message: Message, command: CommandObject) -> None:
     if not _is_allowed(message):
         return
     arg = (command.args or "").strip()
     if not arg:
-        # Голый /ask — выбор темы кнопками.
-        await message.answer("Выбери тему:", reply_markup=_ask_keyboard())
+        # Голый /ask — выбор области кнопками или полный случайный выбор.
+        await message.answer("Выбери область:", reply_markup=_ask_keyboard())
         return
 
-    domain: str | None = None
+    target: dict | None = None
     hint: str | None = None
-    if arg.lower() in DOMAINS:
-        # /ask <домен> — вопрос внутри названной темы.
-        domain = arg.lower()
+    area_match = next(
+        (a for a in WORLDVIEW_AREAS if arg.lower() in {a.key.lower(), a.title.lower(), a.folder.lower()}),
+        None,
+    )
+    if area_match is not None:
+        target = choose_random_target(area=area_match.key)
     else:
-        # /ask <свободный текст> — затравка/контекст для генерации вопроса; домен
-        # LLM подберёт сам. Текст санитизируем как пользовательский ввод.
+        # /ask <свободный текст> — targeted mode: код сматчит к ближайшей теме
+        # или создаст одноразовый custom_theme внутри канона.
         hint, truncated = safe_user_text(arg, limit=2000)
         if not hint:
             await message.answer("Использование: /ask [тема или о чём спросить]")
@@ -764,10 +769,10 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
         await message.answer(ratelimit.BUSY_MESSAGE)
         return
     try:
-        session.start(mode="probe", domain=domain)
+        session.start(mode="probe", target=target)
         _anchor_user_cmd(message)
         await _send_next_question(
-            message.bot, message.chat.id, domain=domain, hint=hint, show_thinking=True,
+            message.bot, message.chat.id, target=target, hint=hint, show_thinking=True,
         )
     finally:
         ratelimit.release(uid)
@@ -779,16 +784,19 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         await callback.answer()
         return
     userctx.set_user(callback.from_user.id)
-    payload = (callback.data or "").split(":", 1)[1]
-    # Whitelist: только 'any' или конкретный домен из закрытого списка.
-    if payload != "any" and payload not in DOMAINS:
-        await callback.answer("Неизвестная тема", show_alert=True)
+    payload = (callback.data or "").split(":")
+    target = None
+    if len(payload) == 2 and payload[1] == "any":
+        label = "случайно 01-04"
+    elif len(payload) == 3 and payload[1] == "area" and get_area(payload[2]):
+        target = choose_random_target(area=payload[2])
+        label = _AREA_LABELS.get(payload[2], payload[2])
+    else:
+        await callback.answer("Неизвестная область", show_alert=True)
         return
-    domain = None if payload == "any" else payload
     if callback.message:
         try:
-            label = _DOMAIN_LABELS.get(domain or "", "🎲 на выбор бота")
-            await callback.message.edit_text(f"Домен: {label}")
+            await callback.message.edit_text(f"Область: {label}")
         except Exception:
             log.exception("failed to clear ask keyboard")
     await callback.answer()
@@ -798,8 +806,8 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         await callback.bot.send_message(chat_id, ratelimit.BUSY_MESSAGE)
         return
     try:
-        session.start(mode="probe", domain=domain)
-        await _send_next_question(callback.bot, chat_id, domain=domain, show_thinking=True)
+        session.start(mode="probe", target=target)
+        await _send_next_question(callback.bot, chat_id, target=target, show_thinking=True)
     finally:
         ratelimit.release(uid)
 
@@ -887,68 +895,6 @@ async def cb_face_action(callback: CallbackQuery) -> None:
     await callback.answer("Теперь перегенерируй reply-командой /regen.", show_alert=True)
 
 
-@router.message(Command("history"))
-async def cmd_history(message: Message) -> None:
-    """Последние 25 ГЛАВНЫХ вопросов (без ответов, без реакций/якорей).
-    Свою сессию НЕ открывает (закрыта middleware) — сообщение после /history без
-    reply уйдёт как /ucho."""
-    if not _is_allowed(message):
-        return
-    items = questions.recent(25)
-    if not items:
-        await message.answer("История пуста. /ask чтобы начать.")
-        return
-    lines = [f"📜 Последние вопросы: {len(items)}.", ""]
-    for e in items:
-        q = e.get("text", "")
-        if len(q) > 200:
-            q = q[:200].rstrip() + "…"
-        ts = (e.get("ts") or "").replace("T", " ")[:16]
-        lines.append(f"*Q{e.get('n')}* · {ts} · {e.get('domain', '')}")
-        lines.append(f"❓ {q}")
-        lines.append("")
-    lines.append("Повторить вопрос: /requestion N")
-    for chunk in _split_for_telegram("\n".join(lines)):
-        await message.answer(chunk)
-
-
-@router.message(Command("requestion"))
-async def cmd_requestion(message: Message, command: CommandObject) -> None:
-    """Повторить вопрос Q<N> — задаёт его заново как новый главный."""
-    if not _is_allowed(message):
-        return
-    arg = (command.args or "").strip()
-    try:
-        n = int(arg)
-    except ValueError:
-        await message.answer("Использование: /requestion <номер>. Список: /history.")
-        return
-    if n <= 0 or n > 10**9:
-        await message.answer("Номер вне разумного диапазона.")
-        return
-    entry = vault.find_question(n)
-    if entry is None:
-        await message.answer(f"Q{n} не найден. /history покажет доступные.")
-        return
-
-    new_n = vault.next_q_num()
-    session.start(mode="probe", domain=entry["domain"])
-    s = session.get()
-    if s is None:  # на всякий случай
-        return
-    _anchor_user_cmd(message)
-    session.set_question(entry["question"], entry["domain"], q_num=new_n)
-    s.main_question = entry["question"]
-    s.main_q_num = new_n
-    s.clarifier_count = 0
-    session.persist()
-    await _send_question(
-        message.bot, message.chat.id,
-        q_num=new_n, mode="probe", domain=entry["domain"], text=entry["question"],
-        suffix=f"\n<i>(повтор Q{n})</i>",
-    )
-
-
 @router.message(Command("echo"))
 async def cmd_echo(message: Message, command: CommandObject) -> None:
     """Пользователь сам задаёт вопрос. Бот возвращает его как Q под меткой «пользовательский»."""
@@ -977,12 +923,12 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
         await message.answer("⚠ Вопрос был слишком длинным — обрезал.")
 
     new_n = vault.next_q_num()
-    session.start(mode="probe", domain=None)
+    session.start(mode="probe")
     s = session.get()
     if s is None:
         return
     _anchor_user_cmd(message)
-    session.set_question(text, USER_DOMAIN, q_num=new_n)
+    session.set_question(text, q_num=new_n, domain=USER_DOMAIN)
     s.main_question = text
     s.main_q_num = new_n
     s.clarifier_count = 0
@@ -991,21 +937,6 @@ async def cmd_echo(message: Message, command: CommandObject) -> None:
         message.bot, message.chat.id,
         q_num=new_n, mode="probe", domain=USER_DOMAIN, text=text,
     )
-
-
-@router.message(Command("cancel"))
-async def cmd_cancel(message: Message) -> None:
-    """Удалить отложенный ответ, если он ещё не ушёл в LLM."""
-    if not _is_allowed(message):
-        return
-    if session.clear_queued_answer():
-        await message.answer("Я удалил тебя из памяти")
-        return
-    uid = userctx.current_uid()
-    if session.has_pending() or ratelimit.is_inflight(uid):
-        await message.answer(ratelimit.BUSY_MESSAGE)
-        return
-    await message.answer("Нечего удалять.")
 
 
 @router.message(Command("pebble"))
@@ -1020,12 +951,12 @@ async def cmd_pebble(message: Message) -> None:
 
 @router.message(Command("about"))
 async def cmd_about(message: Message) -> None:
-    """Показать пользователю его портрет (03_personality/about.md) — отформатированный
+    """Показать пользователю его портрет (`05_Общее/about.md`) — отформатированный
     отдельным промптом текст от 1-го лица. Пусто → честно скажем, что рано."""
     if not _is_allowed(message):
         return
     # /about открывает сессию-обсуждение: можно ответить (reply) на портрет.
-    session.start(mode="probe", domain=None)
+    session.start(mode="probe")
     _anchor_user_cmd(message)
     portrait = about.render_about_context(max_chars=6500)
     if not portrait:
@@ -1071,7 +1002,11 @@ async def cmd_about(message: Message) -> None:
                 at=getattr(sent, "date", None),
                 message_id=getattr(sent, "message_id", None),
                 q_num=s.current_q_num,
-                domain=s.last_domain,
+                area=s.last_area,
+                category=s.last_category,
+                theme=s.last_theme,
+                theme_key=s.last_theme_key,
+                domain=s.last_domain or None,
             )
     await _session_reply(message, chunks[-1], anchor="(твой портрет)", parse_mode="HTML")
 
@@ -1091,7 +1026,7 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
         await message.answer(ratelimit.BUSY_MESSAGE)
         return
     try:
-        session.start(mode="probe", domain=None)
+        session.start(mode="probe")
         _anchor_user_cmd(message)
         if (message.text or "").lstrip().startswith("/"):
             s = session.get()
@@ -1104,7 +1039,11 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
                     at=getattr(message, "date", None),
                     message_id=getattr(message, "message_id", None),
                     q_num=s.current_q_num,
-                    domain=s.last_domain,
+                    area=s.last_area,
+                    category=s.last_category,
+                    theme=s.last_theme,
+                    theme_key=s.last_theme_key,
+                    domain=s.last_domain or None,
                 )
         try:
             payload = await note_service.ingest_note(clean, at=getattr(message, "date", None))
@@ -1116,7 +1055,9 @@ async def _ingest_note(message: Message, clean: str, *, note_prefix: str | None 
             return
         await _send_question(
             message.bot, message.chat.id,
-            q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+            q_num=payload.q_num, mode=payload.mode, domain=payload.domain,
+            area=payload.area, category=payload.category, theme=payload.theme,
+            theme_key=payload.theme_key, text=payload.text, plain=True,
             bot_mood=payload.bot_mood,
             admin_controls=bool(payload.bot_mood),
             action_context={
@@ -1285,6 +1226,10 @@ async def cmd_regen(message: Message, command: CommandObject) -> None:
         message_id=getattr(sent, "message_id", None),
         reply_to_message_id=message.reply_to_message.message_id,
         q_num=rec.get("q_num"),
+        area=rec.get("area"),
+        category=rec.get("category"),
+        theme=rec.get("theme"),
+        theme_key=rec.get("theme_key"),
         domain=rec.get("domain"),
         bot_mood=face,
     )
@@ -1465,22 +1410,20 @@ async def _handle_probe_locked(message: Message, text: str) -> None:
 async def _send_next_question(
     bot: Bot,
     chat_id: int,
-    domain: str | None = None,
+    target: dict | None = None,
     *,
     hint: str | None = None,
     show_thinking: bool = False,
 ) -> None:
     s = session.get()
     if s is None:
-        s = session.start(mode="probe", domain=domain)
+        s = session.start(mode="probe", target=target)
 
-    # Если домен не указан — выбираем случайно из 10 (равномерно). Это даёт честное
-    # покрытие всех тем вместо того, чтобы LLM сам выбирал любимые домены при
-    # domain=any. Но при наличии hint домен НЕ форсируем: LLM подберёт его под
-    # затравку человека (иначе случайный домен противоречил бы запросу).
-    if domain is None and hint is None:
-        domain = random.choice(DOMAINS)
-        log.info("random domain selected for main question: %s", domain)
+    # Если target не указан, ask_next выберет/сматчит его программно:
+    # random 01-04 или targeted hint -> nearest/custom_theme.
+    if target is None and hint is None:
+        target = choose_random_target()
+        log.info("worldview target selected for main question: %s", target["theme_key"])
 
     # Индикатор «Думаю» (🎰 + текст) — только для /ask (show_thinking=True).
     # Дневной вопрос молчит: лишь нативное «печатает…», ровно одно сообщение-вопрос.
@@ -1508,8 +1451,8 @@ async def _send_next_question(
         # а не вытекающий из уже зафиксированного. Так разговор не зацикливается
         # на накопленном графе.
         result = await ask_next(
-            domain=_real_domain(domain),
-            context_concepts="",
+            target=target,
+            context_atoms="",
             recent_raw="",
             hint=hint,
             bot_mood=bot_mood,
@@ -1525,7 +1468,7 @@ async def _send_next_question(
     await _stop_thinking(thinking)
 
     q_num = vault.next_q_num()
-    session.set_question(_question_field_with_face(result["question"], bot_mood), result["domain"], q_num=q_num)
+    session.set_question(_question_field_with_face(result["question"], bot_mood), target=result, q_num=q_num)
     # Новый главный вопрос — сбрасываем счётчик поясняющих и запоминаем главный.
     s.main_question = result["question"]
     s.main_q_num = q_num
@@ -1533,7 +1476,8 @@ async def _send_next_question(
     session.persist()
     await _send_question(
         bot, chat_id,
-        q_num=q_num, mode=s.mode, domain=result["domain"], text=result["question"],
+        q_num=q_num, mode=s.mode, area=result["area"], category=result["category"],
+        theme=result["theme"], theme_key=result["theme_key"], text=result["question"],
         bot_mood=bot_mood,
     )
     vault.commit_all("ask question")

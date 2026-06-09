@@ -40,6 +40,10 @@ def append(
     message_id: int | None = None,
     reply_to_message_id: int | None = None,
     q_num: int | None = None,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    theme_key: str | None = None,
     domain: str | None = None,
     bot_mood: str | None = None,
     required: bool = False,
@@ -70,11 +74,16 @@ def append(
                 int(reply_to_message_id) if reply_to_message_id is not None else None
             ),
             "q_num": q_num,
-            "domain": domain,
+            "area": area,
+            "category": category,
+            "theme": theme,
+            "theme_key": theme_key,
             "bot_mood": bot_mood,
             "text": text or "",
             "source": "telegram",
         }
+        if domain is not None:
+            entry["domain"] = domain
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         return entry
@@ -297,6 +306,10 @@ def find_question_by_message_id(message_id: int) -> dict | None:
             "message_id": mid,
             "q_num": e.get("q_num"),
             "text": text,
+            "area": e.get("area") or "",
+            "category": e.get("category") or "",
+            "theme": e.get("theme") or "",
+            "theme_key": e.get("theme_key") or "",
             "domain": e.get("domain") or "",
             "answered": _is_answered(e.get("q_num")),
             "ts": e.get("ts"),
@@ -323,6 +336,10 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "message_id": e.get("telegram_message_id", e.get("message_id")),
             "q_num": target,
             "text": question_field_text(e),
+            "area": e.get("area") or "",
+            "category": e.get("category") or "",
+            "theme": e.get("theme") or "",
+            "theme_key": e.get("theme_key") or "",
             "domain": e.get("domain") or "",
             "answered": _is_answered(target),
             "ts": e.get("ts"),
@@ -334,6 +351,10 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "message_id": fallback.get("telegram_message_id", fallback.get("message_id")),
             "q_num": target,
             "text": question_field_text(fallback),
+            "area": fallback.get("area") or "",
+            "category": fallback.get("category") or "",
+            "theme": fallback.get("theme") or "",
+            "theme_key": fallback.get("theme_key") or "",
             "domain": fallback.get("domain") or "",
             "answered": _is_answered(target),
             "ts": fallback.get("ts"),
@@ -355,6 +376,10 @@ def recent_questions(limit: int = 25) -> list[dict]:
         seen.add(int(qn))
         out.append({
             "n": int(qn),
+            "area": e.get("area") or "",
+            "category": e.get("category") or "",
+            "theme": e.get("theme") or "",
+            "theme_key": e.get("theme_key") or "",
             "domain": e.get("domain") or "",
             "text": e.get("text") or "",
             "ts": e.get("ts"),

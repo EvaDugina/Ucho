@@ -131,7 +131,7 @@ async def test_chat_json_raises_after_all_models_fail(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_remind_presence_uses_primary_and_user_prompt(as_user, monkeypatch):
-    prompt_file = userctx.user_root() / "03_personality" / "user_prompt.md"
+    prompt_file = userctx.user_root() / "05_Общее" / "user_prompt.md"
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text("говори тише и ближе", encoding="utf-8")
     completions = _FakeCompletions(["Я рядом"])
@@ -215,16 +215,18 @@ async def test_regenerate_reaction_ignores_previous_generation_context(monkeypat
 async def test_only_generated_comments_drop_commas(as_user, monkeypatch):
     async def fake_chat_json(task, messages, **kwargs):
         if task == "ask":
-            return {"domain": "everyday", "question": "Жив, да? Или нет!"}
-        return {"observations": [], "reaction": "Ну, вот! Да?", "user_delta": {}}
+            return {"question": "Жив, да? Или нет!"}
+        return {"worldview_observations": [], "reaction": "Ну, вот! Да?", "user_delta": {}}
 
     monkeypatch.setattr(llm, "_chat_json", fake_chat_json)
 
-    question = await llm.ask_next(domain="everyday")
+    question = await llm.ask_next(area="practice", category="lifestyle", theme="быт")
     reaction = await llm.process_answer(
         question="Что важно?",
         answer="Ответ.",
-        domain_hint="everyday",
+        area="practice",
+        category="lifestyle",
+        theme="быт",
     )
 
     assert question["question"] == "Жив, да? Или нет!"

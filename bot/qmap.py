@@ -10,8 +10,20 @@ from typing import Optional
 from . import session_log
 
 
-def append(message_id: int, q_num: int, text: str, domain: str, at=None) -> None:
+def append(
+    message_id: int,
+    q_num: int,
+    text: str,
+    domain: str = "",
+    at=None,
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    theme_key: str | None = None,
+) -> None:
     """Back-compat no-op: событие вопроса уже записано в session_log."""
+    _ = (message_id, q_num, text, domain, at, area, category, theme, theme_key)
     return None
 
 

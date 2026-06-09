@@ -5,9 +5,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .. import about, analysis, graph, lexicon, mood_file, moods, session, session_log, vault
-from ..config import ANALYSIS_ENABLED, DOMAINS
+from .. import about, analysis, lexicon, mood_file, moods, session, session_log, vault, worldview
+from ..config import ANALYSIS_ENABLED
 from ..llm import classify_mood, process_answer
+from ..worldview_taxonomy import coerce_target, get_area, legacy_domain_target
 from .answer_service import apply_processed
 from .session_messages import question_field_with_face
 
@@ -20,7 +21,10 @@ _DIRECTION_RU = {"auto": "на себя", "hetero": "на других/мир", 
 class ReactionPayload:
     q_num: int
     mode: str
-    domain: str
+    area: str
+    category: str
+    theme: str
+    theme_key: str
     text: str
     bot_mood: str | None
     answered_q_num: int | None
@@ -29,11 +33,30 @@ class ReactionPayload:
     user_text: str
     session_context: str
     reply_to_user_message_id: int | None
+    domain: str = ""
     mood_message: str | None = None
 
 
 def real_domain(d: str | None) -> str | None:
-    return d if d in DOMAINS else None
+    return d if legacy_domain_target(d) is not None else None
+
+
+def _target_from_values(
+    *,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
+    domain: str | None = None,
+    fallback: dict | None = None,
+) -> dict:
+    if area and get_area(area):
+        return coerce_target(area, category, theme)
+    legacy = legacy_domain_target(domain or area)
+    if legacy:
+        return legacy
+    if fallback:
+        return coerce_target(fallback.get("area"), fallback.get("category"), fallback.get("theme"))
+    return coerce_target(None, None, None)
 
 
 def format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str:
@@ -68,7 +91,7 @@ def recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
     parts: list[str] = []
     for e in rows[-50:]:
         parts.append(
-            f"Q{e['n']} · {e['date']} {e['time']} · {e['domain']}\n"
+            f"Q{e['n']} · {e['date']} {e['time']} · {e.get('theme_key') or e.get('domain')}\n"
             f"Q: {e['question']}\nA: {e['answer']}"
         )
     text = "\n\n".join(parts)
@@ -77,9 +100,20 @@ def recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
     return text
 
 
+def context_for_target(area: str | None = None, category: str | None = None, theme: str | None = None) -> str:
+    target = _target_from_values(area=area, category=category, theme=theme)
+    atoms = worldview.find_atoms(area=target["area"], category=target["category"], limit=40)
+    if not atoms:
+        atoms = worldview.find_atoms(area=target["area"], limit=40)
+    if not atoms:
+        atoms = worldview.find_atoms(limit=40)
+    return worldview.context_snapshot(atoms)
+
+
 def context_for_domain(domain: str | None) -> str:
-    concepts = graph.find_concepts(domain=domain, limit=40) if domain in DOMAINS else graph.find_concepts(limit=40)
-    return graph.context_snapshot(concepts)
+    """Legacy wrapper for old callers/tests."""
+    target = _target_from_values(domain=domain)
+    return context_for_target(target["area"], target["category"], target["theme"])
 
 
 def _coerce_datetime(value: object | None, fallback: datetime) -> datetime:
@@ -102,6 +136,9 @@ async def process_probe_answer(
     is_owner: bool = False,
     question: str | None = None,
     domain_hint: str | None = None,
+    area: str | None = None,
+    category: str | None = None,
+    theme: str | None = None,
     q_num: int | None = None,
     asked_at: object | None = None,
     session_context_snapshot: str | None = None,
@@ -117,18 +154,23 @@ async def process_probe_answer(
         session.persist()
     active_q_num = q_num if q_num is not None else s.current_q_num
     active_question = question if question is not None else s.last_question
-    if domain_hint is not None:
-        active_domain = real_domain(domain_hint)
-    else:
-        active_domain = real_domain(s.last_domain) or real_domain(s.domain)
+    active_target = _target_from_values(
+        area=area or s.last_area or s.area,
+        category=category or s.last_category or s.category,
+        theme=theme or s.last_theme or s.theme,
+        domain=domain_hint or s.last_domain or s.domain,
+    )
     active_asked_at = _coerce_datetime(asked_at, s.asked_at)
     active_mode = mode or s.mode
     if active_q_num is None:
         active_q_num = vault.next_q_num()
-    display_domain = domain_hint if domain_hint is not None else active_domain
     s.current_q_num = active_q_num
     s.last_question = active_question
-    s.last_domain = str(display_domain or s.last_domain or "")
+    s.last_area = active_target["area"]
+    s.last_category = active_target["category"]
+    s.last_theme = active_target["theme"]
+    s.last_theme_key = active_target["theme_key"]
+    s.last_domain = str(domain_hint or s.last_domain or "")
     s.asked_at = active_asked_at
     event = session_log.append_required(
         session_id=s.id,
@@ -139,14 +181,18 @@ async def process_probe_answer(
         message_id=message_id,
         reply_to_message_id=reply_to_message_id,
         q_num=active_q_num,
-        domain=active_domain,
+        area=active_target["area"],
+        category=active_target["category"],
+        theme=active_target["theme"],
+        theme_key=active_target["theme_key"],
+        domain=domain_hint,
     )
     s.pending_answer_event_id = event.get("event_id")
     s.pending_answer = None
     session.persist()
     s.record_user(text, at=at)
     session_context = session_context_snapshot or s.render_transcript()
-    context_concepts = context_for_domain(active_domain)
+    context_atoms = context_for_target(active_target["area"], active_target["category"], active_target["theme"])
 
     mood_vec = None
     bot_mood = None
@@ -183,8 +229,10 @@ async def process_probe_answer(
     result = await process_answer(
         question=active_question,
         answer=text,
-        domain_hint=active_domain,
-        context_concepts=context_concepts,
+        area=active_target["area"],
+        category=active_target["category"],
+        theme=active_target["theme"],
+        context_atoms=context_atoms,
         bot_mood=bot_mood,
         session_context=session_context,
         mode=active_mode,
@@ -196,7 +244,7 @@ async def process_probe_answer(
     )
 
     try:
-        apply_processed(result, active_q_num, active_asked_at, active_question, text, session_domain=active_domain)
+        apply_processed(result, active_q_num, active_asked_at, active_question, text, target=active_target, session_domain=domain_hint)
     except Exception:
         log.exception("apply_processed failed")
 
@@ -211,13 +259,16 @@ async def process_probe_answer(
     answered_question = active_question
     answered_q_num = active_q_num
     new_n = vault.next_q_num()
-    next_domain = active_domain if active_domain in DOMAINS else "everyday"
-    session.set_question(question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
+    session.set_question(question_field_with_face(reaction, bot_mood), target=active_target, q_num=new_n, domain=domain_hint)
     session.persist()
     return ReactionPayload(
         q_num=new_n,
         mode=active_mode,
-        domain=next_domain,
+        area=active_target["area"],
+        category=active_target["category"],
+        theme=active_target["theme"],
+        theme_key=active_target["theme_key"],
+        domain=domain_hint or "",
         text=reaction,
         bot_mood=bot_mood,
         answered_q_num=answered_q_num,

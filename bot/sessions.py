@@ -27,6 +27,10 @@ def load(session_id: str) -> Optional[dict]:
     ]
     last_question = ""
     current_q_num = None
+    last_area = ""
+    last_category = ""
+    last_theme = ""
+    last_theme_key = ""
     last_domain = None
     asked_at = None
     history: list[dict] = []
@@ -38,13 +42,25 @@ def load(session_id: str) -> Optional[dict]:
         if role == "assistant" and e.get("kind") in {"question", "reaction", "service"}:
             last_question = text
             current_q_num = e.get("q_num")
+            last_area = e.get("area") or last_area
+            last_category = e.get("category") or last_category
+            last_theme = e.get("theme") or last_theme
+            last_theme_key = e.get("theme_key") or last_theme_key
             last_domain = e.get("domain") or last_domain
             asked_at = e.get("ts") or asked_at
     return {
         "id": session_id,
         "mode": "probe",
         "domain": last_domain,
+        "area": last_area,
+        "category": last_category,
+        "theme": last_theme,
+        "theme_key": last_theme_key,
         "last_domain": last_domain,
+        "last_area": last_area,
+        "last_category": last_category,
+        "last_theme": last_theme,
+        "last_theme_key": last_theme_key,
         "last_question": last_question,
         "current_q_num": current_q_num,
         "asked_at": asked_at,

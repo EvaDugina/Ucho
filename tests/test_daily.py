@@ -1,6 +1,6 @@
 """Юнит-тесты дневного маркера (гейт «один дневной вопрос в день на пользователя»).
 
-Маркер `last_daily_date` в `_state.json` — общий для cron, /dailyall и догона
+Маркер `last_daily_date` в `_state.json` — общий для cron и догона
 после простоя. Сам send_daily_question дёргает LLM, поэтому тестируем здесь
 именно гейт дедупа (vault), без сети.
 """
@@ -112,10 +112,15 @@ async def test_send_daily_question_commits_after_marker(as_user, monkeypatch):
 
     async def fake_ask_next(**kwargs):
         _ = kwargs
-        return {"question": "Что сегодня не врёт?", "domain": "everyday"}
+        return {
+            "question": "Что сегодня не врёт?",
+            "area": "practice",
+            "category": "lifestyle",
+            "theme": "быт",
+            "theme_key": "practice/lifestyle/быт",
+        }
 
     monkeypatch.setattr(daily_service, "ask_next", fake_ask_next)
-    monkeypatch.setattr(daily_service.random, "choice", lambda seq: "everyday")
     monkeypatch.setattr(
         daily_service.vault,
         "commit_all",

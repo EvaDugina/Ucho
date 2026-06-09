@@ -11,7 +11,6 @@ from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
 from . import moods, ratelimit, session, session_log, userctx, users, vault
-from .config import DOMAINS
 from .errors import LLMError
 from .llm import process_answer
 from .services import conversation_service, note_service, session_messages
@@ -61,8 +60,11 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     except Exception:
         log.exception("recovery: failed to send chat action")
 
+    active_target = session.target_snapshot(s)
     real_hint = conversation_service.real_domain(s.last_domain) or conversation_service.real_domain(s.domain)
-    context_concepts = conversation_service.context_for_domain(real_hint)
+    context_atoms = conversation_service.context_for_target(
+        active_target["area"], active_target["category"], active_target["theme"]
+    )
     if not s.history or s.history[-1].get("role") != "user" or s.history[-1].get("content") != text:
         s.record_user(text)
     session_context = s.render_transcript()
@@ -72,8 +74,10 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         result = await process_answer(
             question=question,
             answer=text,
-            domain_hint=real_hint,
-            context_concepts=context_concepts,
+            area=active_target["area"],
+            category=active_target["category"],
+            theme=active_target["theme"],
+            context_atoms=context_atoms,
             bot_mood=bot_mood,
             session_context=session_context,
             mode=s.mode,
@@ -90,7 +94,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     moods.record_mask_frequency_draft(result.get("mask_frequency_draft"), bot_mood=bot_mood)
 
     try:
-        apply_processed(result, q_num, s.asked_at, question, text, session_domain=real_hint)
+        apply_processed(result, q_num, s.asked_at, question, text, target=active_target, session_domain=real_hint)
     except Exception:
         log.exception("recovery: apply_processed failed")
         vault.append_log("error", "pending_answer_apply_failed", f"Q{q_num} apply_processed raised")
@@ -103,14 +107,16 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     # Реакция (как в _handle_probe): реплика-укол, сессия остаётся открытой.
     reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
     new_n = vault.next_q_num()
-    next_domain = s.last_domain if s.last_domain in DOMAINS else "everyday"
-    session.set_question(session_messages.question_field_with_face(reaction, bot_mood), next_domain, q_num=new_n)
+    session.set_question(session_messages.question_field_with_face(reaction, bot_mood), target=active_target, q_num=new_n, domain=real_hint)
     session.persist()
     try:
         user_event = session_log.find_event(pending_event_id)
         await session_messages.send_question(
             bot, uid,
-            q_num=new_n, mode=s.mode, domain=next_domain, text=reaction, plain=True,
+            q_num=new_n, mode=s.mode,
+            area=active_target["area"], category=active_target["category"],
+            theme=active_target["theme"], theme_key=active_target["theme_key"],
+            domain=real_hint or "", text=reaction, plain=True,
             bot_mood=bot_mood,
             admin_controls=bool(bot_mood),
             action_context={
@@ -158,6 +164,9 @@ async def process_queued_on_startup(bot: Bot, uid: int) -> None:
                 is_owner=users.is_owner(uid),
                 question=str(item.get("question") or ""),
                 domain_hint=item.get("domain"),
+                area=item.get("area"),
+                category=item.get("category"),
+                theme=item.get("theme"),
                 q_num=vault.next_q_num(),
                 asked_at=item.get("asked_at"),
                 session_context_snapshot=str(item.get("session_context") or ""),
@@ -175,7 +184,9 @@ async def process_queued_on_startup(bot: Bot, uid: int) -> None:
             await bot.send_message(uid, payload.mood_message)
         await session_messages.send_question(
             bot, uid,
-            q_num=payload.q_num, mode=payload.mode, domain=payload.domain, text=payload.text, plain=True,
+            q_num=payload.q_num, mode=payload.mode, domain=payload.domain,
+            area=payload.area, category=payload.category, theme=payload.theme,
+            theme_key=payload.theme_key, text=payload.text, plain=True,
             bot_mood=payload.bot_mood,
             admin_controls=bool(payload.bot_mood),
             action_context={
@@ -280,6 +291,10 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
                     q_num=payload.q_num,
                     mode=payload.mode,
                     domain=payload.domain,
+                    area=payload.area,
+                    category=payload.category,
+                    theme=payload.theme,
+                    theme_key=payload.theme_key,
                     text=payload.text,
                     plain=True,
                     bot_mood=payload.bot_mood,
@@ -311,7 +326,7 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
         if not ratelimit.try_acquire(uid):
             return
         try:
-            session.start(mode="probe", domain=None)
+            session.start(mode="probe")
             payload = await note_service.ingest_note(clean, at=getattr(carrier, "date", None))
             if payload is not None:
                 await session_messages.send_question(
@@ -319,6 +334,10 @@ async def _process_offline_user(bot: Bot, uid: int, msgs: list[Message]) -> None
                     q_num=payload.q_num,
                     mode=payload.mode,
                     domain=payload.domain,
+                    area=payload.area,
+                    category=payload.category,
+                    theme=payload.theme,
+                    theme_key=payload.theme_key,
                     text=payload.text,
                     plain=True,
                     bot_mood=payload.bot_mood,

@@ -32,6 +32,10 @@ class ReminderCandidate:
     day: str
     q_num: int
     session_id: str
+    area: str
+    category: str
+    theme: str
+    theme_key: str
     domain: str
     question: str
 
@@ -173,7 +177,11 @@ def _candidate_for_current_user(day: str) -> ReminderCandidate | None:
         day=day,
         q_num=q_num,
         session_id=session_id,
-        domain=str(event.get("domain") or "everyday"),
+        area=str(event.get("area") or ""),
+        category=str(event.get("category") or ""),
+        theme=str(event.get("theme") or ""),
+        theme_key=str(event.get("theme_key") or ""),
+        domain=str(event.get("domain") or ""),
         question=str(event.get("text") or ""),
     )
 
@@ -294,6 +302,10 @@ async def send_daily_reminder(bot: Bot, candidate: ReminderCandidate) -> bool:
         candidate.uid,
         q_num=candidate.q_num,
         mode="probe",
+        area=candidate.area,
+        category=candidate.category,
+        theme=candidate.theme,
+        theme_key=candidate.theme_key,
         domain=candidate.domain,
         text=text,
         plain=True,

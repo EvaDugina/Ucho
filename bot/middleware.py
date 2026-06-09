@@ -86,20 +86,21 @@ class AccessMiddleware(BaseMiddleware):
             users.set_consent(uid)
         # Любая команда закрывает активную сессию-обсуждение (снапшот в кольцо —
         # её можно продолжить reply на любое её сообщение). Команды-открыватели
-        # (/ask, /echo, /requestion, /about) затем заведут новую.
+        # (/ask, /echo, /about) затем заведут новую.
         # ИСКЛЮЧЕНИЯ: /pebble — проверка живости; /like, /regen и /remask —
-        # действия над reply-сообщением; /leta — сначала только предупреждение.
+        # действия над reply-сообщением; /leta — сначала только предупреждение;
+        # /start — безопасный смыв queued_answer во время busy.
         if isinstance(event, Message) and (event.text or "").startswith("/"):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
             busy = session.has_unfinished_answer() or ratelimit.is_inflight(uid)
             if busy:
-                if cmd not in {"cancel", "echo"}:
+                if cmd not in {"start", "echo"}:
                     try:
                         await event.answer(ratelimit.BUSY_MESSAGE)
                     except Exception:
                         log.exception("failed to send busy reply to %s", uid)
                     return
                 return await handler(event, data)
-            if cmd not in {"pebble", "like", "regen", "remask", "cancel", "leta"} and session.close():
+            if cmd not in {"pebble", "like", "regen", "remask", "leta"} and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)

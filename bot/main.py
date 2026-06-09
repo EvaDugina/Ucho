@@ -22,14 +22,11 @@ BOT_COMMANDS = [
     BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
     BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
     BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
-    BotCommand(command="requestion", description="Повторить выбранный вопрос N"),
     BotCommand(command="about", description="Каким я тебя вижу"),
-    BotCommand(command="history", description="Последние вопросы"),
     BotCommand(command="regen", description="Перегенерировать reply-комментарий"),
     BotCommand(command="like", description="Отметить reply-реплику Иуды"),
     BotCommand(command="remask", description="Выбрать маску reply-реплики"),
-    BotCommand(command="cancel", description="Убрать отложенный ответ"),
-    BotCommand(command="leta", description="Смыть водами реки забвения черты своего лица"),
+    BotCommand(command="leta", description="Омыть водами реки забвения черты своего лица"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Бесполезная как мизинец на отрубленной руке."),
 ]
@@ -39,7 +36,6 @@ ADMIN_COMMANDS = [
     BotCommand(command="adduser", description="Добавить пользователя: /adduser <id>"),
     BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
     BotCommand(command="users", description="Список доверенных"),
-    BotCommand(command="dailyall", description="Разослать дневной вопрос всем сейчас"),
 ]
 
 
