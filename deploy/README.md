@@ -224,6 +224,9 @@ systemctl restart docker
 Если Telegram polling из контейнера падает на timeout, но хостовый `curl
 https://api.telegram.org` проходит через proxy, добавь тот же proxy в
 `/srv/psycho/app/.env` как `TELEGRAM_PROXY_URL=...` и пересобери контейнер.
+Если proxy слушает на `127.0.0.1`/`localhost`, deploy-скрипты автоматически
+подключают `docker-compose.proxy.yml`: build и runtime идут через host network,
+чтобы контейнер видел host-side proxy.
 
 ## Остановка
 

@@ -1,0 +1,5 @@
+services:
+  bot:
+    build:
+      network: host
+    network_mode: host

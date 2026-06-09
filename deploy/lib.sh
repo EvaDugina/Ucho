@@ -101,12 +101,35 @@ vault_git() {
 
 compose_cmd() {
   local key_path
+  local files=(-f docker-compose.yml)
+  if proxy_uses_loopback; then
+    [ -f "$APP_DIR/docker-compose.proxy.yml" ] || die "docker-compose.proxy.yml not found at $APP_DIR"
+    files+=(-f docker-compose.proxy.yml)
+  fi
+
   key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
   if [ -n "$key_path" ]; then
     [ -f "$APP_DIR/docker-compose.ssh.yml" ] || die "docker-compose.ssh.yml not found at $APP_DIR"
     [ -f "$key_path" ] || die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $key_path"
-    docker compose -f docker-compose.yml -f docker-compose.ssh.yml "$@"
-  else
-    docker compose "$@"
+    files+=(-f docker-compose.ssh.yml)
   fi
+
+  docker compose "${files[@]}" "$@"
+}
+
+proxy_uses_loopback() {
+  local key
+  local value
+  for key in TELEGRAM_PROXY_URL HTTP_PROXY HTTPS_PROXY ALL_PROXY; do
+    value="$(env_value "$key" || true)"
+    case "$value" in
+      *://127.* | *://localhost:* | *://[::1]:*)
+        return 0
+        ;;
+    esac
+  done
+  if [ "${USE_HOST_NETWORK_PROXY:-0}" = "1" ]; then
+    return 0
+  fi
+  return 1
 }
