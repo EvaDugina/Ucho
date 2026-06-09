@@ -126,6 +126,75 @@ class _FakeMessage:
 
 
 @pytest.mark.asyncio
+async def test_leta_without_args_warns_and_keeps_data(as_user, monkeypatch):
+    marker = userctx.user_root() / "00_raw" / "notes" / "keep.md"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("не трогать\n", encoding="utf-8")
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    message = _FakeMessage("/leta")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_leta(message, SimpleNamespace(args=None))
+
+    assert marker.exists()
+    answer = message.answers[-1]["text"]
+    assert f"/leta УДАЛИТЬ {as_user}" in answer
+    assert "git history" in answer
+
+
+@pytest.mark.asyncio
+async def test_leta_invalid_confirmation_keeps_data(as_user, monkeypatch):
+    marker = userctx.user_root() / "00_raw" / "notes" / "keep.md"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("не трогать\n", encoding="utf-8")
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    message = _FakeMessage("/leta УДАЛИТЬ не-то")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user + 1}"))
+
+    assert marker.exists()
+    assert "Не удалил" in message.answers[-1]["text"]
+    assert f"/leta УДАЛИТЬ {as_user}" in message.answers[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_leta_confirmation_deletes_current_user_data(as_user, monkeypatch):
+    root = userctx.user_root()
+    marker = root / "00_raw" / "notes" / "delete.md"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("удалить\n", encoding="utf-8")
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что забыть?", "everyday", q_num=vault.next_q_num())
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
+
+    assert not root.exists()
+    assert session.get() is None
+    assert "Удалил рабочую базу" in message.answers[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_start_only_clears_session_and_keeps_data(as_user, monkeypatch):
+    marker = userctx.user_root() / "00_raw" / "notes" / "keep.md"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("не трогать\n", encoding="utf-8")
+    session.start(mode="probe", domain="everyday")
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    message = _FakeMessage("/start")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_start(message)
+
+    assert marker.exists()
+    assert session.get() is None
+    assert "Данные целы" in message.answers[-1]["text"]
+
+
+@pytest.mark.asyncio
 async def test_busy_text_and_echo_merge_into_cancelable_queue(as_user, monkeypatch):
     session.start(mode="probe", domain="everyday")
     session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
@@ -178,6 +247,55 @@ async def test_busy_command_middleware_replies_and_keeps_session(as_user, monkey
 
     assert called is False
     assert message.answers[-1]["text"] == "Ещё думаю."
+    assert session.get() is not None
+    assert session.get().last_question == "Что держит?"
+
+
+@pytest.mark.asyncio
+async def test_busy_leta_middleware_replies_and_keeps_session(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    session.get().pending_answer_event_id = "already-in-llm"
+    session.persist()
+    message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
+    message.from_user = SimpleNamespace(id=as_user)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
+    monkeypatch.setattr(middleware, "Message", _FakeMessage)
+
+    await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
+
+    assert called is False
+    assert message.answers[-1]["text"] == "Ещё думаю."
+    assert session.get() is not None
+    assert session.get().last_question == "Что держит?"
+
+
+@pytest.mark.asyncio
+async def test_leta_warning_middleware_does_not_close_session(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    message = _FakeMessage("/leta")
+    message.from_user = SimpleNamespace(id=as_user)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
+    monkeypatch.setattr(middleware, "Message", _FakeMessage)
+
+    await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
+
+    assert called is True
     assert session.get() is not None
     assert session.get().last_question == "Что держит?"
 

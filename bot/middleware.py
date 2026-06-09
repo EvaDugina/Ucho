@@ -4,9 +4,7 @@
 callback. На КАЖДЫЙ update: проверяем whitelist (не в списке → молча роняем),
 ставим ``userctx`` (per-user маршрутизация данных), один раз показываем
 disclaimer о приватности новым гостям и закрываем активную сессию-обсуждение на
-любой команде (кроме ``/pebble``).
-команды reply-действий (``/like``, ``/regen``, ``/remask``) тоже не закрывают
-обсуждение.
+любой команде (кроме сервисных исключений).
 """
 from __future__ import annotations
 
@@ -90,7 +88,7 @@ class AccessMiddleware(BaseMiddleware):
         # её можно продолжить reply на любое её сообщение). Команды-открыватели
         # (/ask, /echo, /requestion, /about) затем заведут новую.
         # ИСКЛЮЧЕНИЯ: /pebble — проверка живости; /like, /regen и /remask —
-        # действия над reply-сообщением, они не должны закрывать текущую сессию.
+        # действия над reply-сообщением; /leta — сначала только предупреждение.
         if isinstance(event, Message) and (event.text or "").startswith("/"):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
             busy = session.has_unfinished_answer() or ratelimit.is_inflight(uid)
@@ -102,6 +100,6 @@ class AccessMiddleware(BaseMiddleware):
                         log.exception("failed to send busy reply to %s", uid)
                     return
                 return await handler(event, data)
-            if cmd not in {"pebble", "like", "regen", "remask", "cancel"} and session.close():
+            if cmd not in {"pebble", "like", "regen", "remask", "cancel", "leta"} and session.close():
                 log.info("session closed by command for uid=%s", uid)
         return await handler(event, data)

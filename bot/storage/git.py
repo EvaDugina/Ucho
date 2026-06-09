@@ -155,7 +155,7 @@ def _git_commit(
         return None
     try:
         if scope:
-            _git("add", "--", scope)
+            _git("add", "-A", "--", scope)
         else:
             _git("add", "-A")
         args = ["commit", "-m", message]

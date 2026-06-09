@@ -28,6 +28,7 @@ BOT_COMMANDS = [
     BotCommand(command="like", description="Отметить reply-реплику Иуды"),
     BotCommand(command="remask", description="Выбрать маску reply-реплики"),
     BotCommand(command="cancel", description="Убрать отложенный ответ"),
+    BotCommand(command="leta", description="Удалить свою рабочую базу"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Кнопка смыва"),
 ]

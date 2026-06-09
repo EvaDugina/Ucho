@@ -28,9 +28,15 @@ from . import (
     vault,
 )
 from .config import ALLOWED_TELEGRAM_IDS, DOMAINS, OWNER_TELEGRAM_ID
-from .errors import LLMError
+from .errors import LLMError, VaultError
 from .llm import about_present, ask_next, regenerate_reaction
-from .services import conversation_service, daily_service, note_service, session_messages
+from .services import (
+    conversation_service,
+    daily_service,
+    deletion_service,
+    note_service,
+    session_messages,
+)
 from .validation import (
     MAX_USER_TEXT,
     safe_chat_html,
@@ -527,6 +533,7 @@ _HELP_BODY = (
     "<b>Сервис</b>\n"
     "<b>/start</b> — смыв: закрыть сессию (данные целы)\n"
     "<b>/cancel</b> — убрать отложенный ответ, если он ещё не в LLM\n"
+    "<b>/leta</b> — удалить свою рабочую базу после точного подтверждения\n"
     "<b>/help</b> — этот список\n"
     "<b>/history</b> — последние вопросы"
 )
@@ -570,6 +577,64 @@ async def cmd_start(message: Message) -> None:
         "Смыто — сессия закрыта (если была). Данные целы; продолжить разговор можно "
         "reply на любое его сообщение.\nСписок команд — /help."
     )
+
+
+@router.message(Command("leta"))
+async def cmd_leta(message: Message, command: CommandObject) -> None:
+    """Удалить рабочую базу текущего пользователя после точной фразы."""
+    if not _is_allowed(message):
+        return
+    uid = userctx.current_uid()
+    if uid is None:
+        await message.answer("Не удалил: не понял, чью базу трогать.")
+        return
+    raw = (command.args or "").strip()
+    expected_args = deletion_service.confirmation_args(uid)
+    expected_command = deletion_service.confirmation_command(uid)
+
+    if not raw:
+        await message.answer(
+            "Это удалит твою рабочую базу в users/"
+            f"{uid}/: raw-логи, заметки, настроение, концепты, портрет, состояние "
+            "и активную сессию.\n\n"
+            "Не трогаю доступ, .psycho/users.json, .psycho/log.md, данные других "
+            "пользователей и git history.\n\n"
+            "Чтобы подтвердить, отправь ровно:\n"
+            f"<code>{html.escape(expected_command)}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if raw != expected_args:
+        await message.answer(
+            "Не удалил. Для удаления нужна точная команда:\n"
+            f"<code>{html.escape(expected_command)}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if session.has_unfinished_answer() or ratelimit.is_inflight(uid):
+        await message.answer(ratelimit.BUSY_MESSAGE)
+        return
+
+    try:
+        result = deletion_service.delete_current_user_data()
+    except VaultError:
+        log.exception("safe user data deletion rejected")
+        await message.answer("Не удалил: проверка безопасности не прошла.")
+        return
+    except Exception:
+        log.exception("user data deletion failed")
+        await message.answer("Не удалил: операция сорвалась. Я записал это в лог.")
+        return
+
+    if result.deleted:
+        await message.answer(
+            "Удалил рабочую базу. Доступ остался; при следующем обращении начнётся "
+            "новая пустая база. Git history не переписана."
+        )
+    else:
+        await message.answer("Рабочей базы уже не было. Доступ остался.")
 
 
 @router.message(Command("help"))
