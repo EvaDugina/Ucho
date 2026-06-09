@@ -6,6 +6,7 @@
 - classify_mood   → mood classifier (JSON)
 - analyze_psych   → OCEAN/PANAS classifier (JSON)
 - analyze_sensation_json → classifier for 01_Мироощущение candidates (JSON)
+- analyze_understanding_json → classifier for 02_Миропонимание candidates (JSON)
 - about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 - remind_presence → короткое вечернее напоминание по daily-вопросу
 """
@@ -182,6 +183,7 @@ _TASK_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
     "reaction": (LLM_MODEL_REACTION, LLM_FALLBACK_REACTION),
     "fast": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
     "sensation": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
+    "understanding": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
 }
 
 
@@ -604,6 +606,63 @@ async def analyze_sensation_json(
     ] if x)
     return await _chat_json(
         "sensation",
+        [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
+        temperature=0.2,
+    )
+
+
+async def analyze_understanding_json(
+    *,
+    answer: str,
+    question: str = "",
+    session_context: str = "",
+    taxonomy_context: str,
+    signal_context: str = "",
+    target: Optional[dict] = None,
+) -> dict:
+    """API-only анализ кандидатов для `02_Миропонимание`.
+
+    Метод не нормализует payload и не пишет в граф: это делает пакет
+    `bot.understanding_analysis`. Локальные модели здесь не используются — только
+    текущий OpenAI-compatible provider и его fallback-роутинг.
+    """
+    target = target or {}
+    sys = (
+        "Ты классификатор рационально-теоретического слоя мировоззрения. По "
+        "русскому ответу человека найди только уверенные кандидаты для области "
+        "`02_Миропонимание`: источники знания, убеждения, принципы мышления, "
+        "причинность, модель себя в мире и отношение к неизвестности. Верни "
+        "СТРОГО JSON без текста снаружи:\n"
+        '{"candidates":[{"category":"<канонический ключ>","theme":"<каноническая тема>",'
+        '"type":"belief|principle|claim","name":"<короткое имя атома>",'
+        '"summary":"<1 предложение>","quote":"<дословная подстрока ответа>",'
+        '"confidence":0.0,"evidence_reason":"<почему это именно эта тема>"}]}\n'
+        "- Используй только категории и темы из переданного understanding_taxonomy.\n"
+        "- `quote` обязан быть дословной подстрокой USER_ANSWER; не перефразируй.\n"
+        "- Не возвращай slug, raw_entry, связи, contradictions или stable-решения.\n"
+        "- Для category=principles обычно ставь type=principle; для остальных — "
+        "belief или claim.\n"
+        "- Если явного рационального объяснения, убеждения, источника знания, "
+        "правила мышления, self-model или отношения к неизвестности нет, верни "
+        "пустой список.\n"
+        "- Максимум 5 кандидатов, лучше меньше, но увереннее.\n"
+        "- Простые локальные signals — подсказка, не приговор; контекст и иронию "
+        "разрешено перебивать."
+    )
+    user_msg = "\n\n".join(x for x in [
+        "mode: analyze_understanding",
+        "selected_worldview_target:",
+        f"area: {target.get('area')}",
+        f"category: {target.get('category')}",
+        f"theme: {target.get('theme')}",
+        "understanding_taxonomy:\n" + taxonomy_context,
+        "local_signals_json:\n" + signal_context if signal_context else "",
+        _session_context_block(session_context),
+        "question:\n" + _fence_user(question, "QUESTION") if question else "",
+        "last_user_message:\n" + _fence_user(answer, "USER_ANSWER"),
+    ] if x)
+    return await _chat_json(
+        "understanding",
         [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
         temperature=0.2,
     )

@@ -11,7 +11,12 @@ from ..llm import classify_mood, process_answer
 from ..sensation_analysis import (
     analyze_sensation,
     append_report as append_sensation_report,
-    merge_into_processed,
+    merge_into_processed as merge_sensation_into_processed,
+)
+from ..understanding_analysis import (
+    analyze_understanding,
+    append_report as append_understanding_report,
+    merge_into_processed as merge_understanding_into_processed,
 )
 from ..worldview_taxonomy import coerce_target, get_area, legacy_domain_target
 from .answer_service import apply_processed
@@ -261,9 +266,23 @@ async def process_probe_answer(
                 method_results=analysis_results,
             )
             append_sensation_report(active_q_num, len(text), sensation)
-            result = merge_into_processed(result, sensation)
+            result = merge_sensation_into_processed(result, sensation)
         except Exception:
             log.exception("sensation analysis failed (non-fatal)")
+        try:
+            understanding = await analyze_understanding(
+                text,
+                question=active_question,
+                session_context=session_context,
+                target=active_target,
+                mood_vec=mood_vec,
+                vad=vad,
+                method_results=analysis_results,
+            )
+            append_understanding_report(active_q_num, len(text), understanding)
+            result = merge_understanding_into_processed(result, understanding)
+        except Exception:
+            log.exception("understanding analysis failed (non-fatal)")
 
     try:
         apply_processed(result, active_q_num, active_asked_at, active_question, text, target=active_target, session_domain=domain_hint)
