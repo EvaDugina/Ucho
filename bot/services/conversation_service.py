@@ -8,6 +8,11 @@ from datetime import datetime, timedelta
 from .. import about, analysis, lexicon, mood_file, moods, session, session_log, vault, worldview
 from ..config import ANALYSIS_ENABLED
 from ..llm import classify_mood, process_answer
+from ..sensation_analysis import (
+    analyze_sensation,
+    append_report as append_sensation_report,
+    merge_into_processed,
+)
 from ..worldview_taxonomy import coerce_target, get_area, legacy_domain_target
 from .answer_service import apply_processed
 from .session_messages import question_field_with_face
@@ -198,6 +203,7 @@ async def process_probe_answer(
     bot_mood = None
     vad = None
     mood_message = None
+    analysis_results = None
     if is_owner:
         try:
             vad = await lexicon.score(text)
@@ -213,6 +219,7 @@ async def process_probe_answer(
                     results = await analysis.run_all(
                         text, None, mood_vec=mood_vec, vad=vad, session_context=session_context,
                     )
+                    analysis_results = results
                     report = analysis.format_report(mood_vec, bot_mood, results)
                     analysis.append_report(s.current_q_num, len(text), report)
                     analysis.append_point(len(text), results)
@@ -242,6 +249,21 @@ async def process_probe_answer(
         bot_mood=bot_mood,
         at=at,
     )
+    if is_owner and ANALYSIS_ENABLED:
+        try:
+            sensation = await analyze_sensation(
+                text,
+                question=active_question,
+                session_context=session_context,
+                target=active_target,
+                mood_vec=mood_vec,
+                vad=vad,
+                method_results=analysis_results,
+            )
+            append_sensation_report(active_q_num, len(text), sensation)
+            result = merge_into_processed(result, sensation)
+        except Exception:
+            log.exception("sensation analysis failed (non-fatal)")
 
     try:
         apply_processed(result, active_q_num, active_asked_at, active_question, text, target=active_target, session_domain=domain_hint)

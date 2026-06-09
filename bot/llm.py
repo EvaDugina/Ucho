@@ -5,6 +5,7 @@
 - process_answer  → mode: process (разбор ответа + реакция)
 - classify_mood   → mood classifier (JSON)
 - analyze_psych   → OCEAN/PANAS classifier (JSON)
+- analyze_sensation_json → classifier for 01_Мироощущение candidates (JSON)
 - about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 - remind_presence → короткое вечернее напоминание по daily-вопросу
 """
@@ -142,8 +143,8 @@ def _user_prompt_block() -> str:
 
 
 def _portrait_block() -> str:
-    """Блок «# Кто перед тобой»: портрет (`03_personality/about.md`) + текущее
-    настроение (`03_personality/mood.md`). Пусто → ''."""
+    """Блок «# Кто перед тобой»: портрет (`05_Общее/about.md`) + текущее
+    настроение (`01_Мироощущение/mood/mood.md`). Пусто → ''."""
     p = ""
     try:
         p = about.render_for_prompt()
@@ -180,6 +181,7 @@ _TASK_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
     "about": (LLM_MODEL_ABOUT, LLM_FALLBACK_ABOUT),
     "reaction": (LLM_MODEL_REACTION, LLM_FALLBACK_REACTION),
     "fast": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
+    "sensation": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
 }
 
 
@@ -489,13 +491,16 @@ async def process_answer(
     messages.append({"role": "user", "content": user_msg})
 
     data = await _chat_json("process", messages, temperature=0.5)
-    # Контракт наблюдений валидируем сразу (pydantic): мусорные/безымянные
-    # отсеиваются здесь, а не падают позже в сервис-слое.
-    data["observations"] = normalize_observations(data.get("observations"))
+    worldview_observations = normalize_worldview_observations(
+        data.get("worldview_observations"),
+        fallback_target=selected,
+    )
+    if not worldview_observations and data.get("observations"):
+        worldview_observations = normalize_observations(data.get("observations"))
+    data["worldview_observations"] = worldview_observations
+    data["observations"] = worldview_observations
     data.setdefault("reaction", "")
-    data.setdefault("user_delta", {})  # портрет пользователя (about.apply_delta)
-    # Реплику Иуды чистим от лишней пунктуации (стиль персоны). observations/quote
-    # (слова человека) НЕ трогаем.
+    data.setdefault("user_delta", {})
     data["reaction"] = strip_comment_punctuation(data.get("reaction") or "")
     return data
 
@@ -551,6 +556,57 @@ async def classify_mood(
         log.exception("classify_mood failed (non-fatal)")
         data = {}
     return moods.normalize_per_msg(data)
+
+
+async def analyze_sensation_json(
+    *,
+    answer: str,
+    question: str = "",
+    session_context: str = "",
+    taxonomy_context: str,
+    signal_context: str = "",
+    target: Optional[dict] = None,
+) -> dict:
+    """API-only анализ кандидатов для `01_Мироощущение`.
+
+    Метод не нормализует payload и не пишет в граф: это делает пакет
+    `bot.sensation_analysis`. Локальные модели здесь не используются — только
+    текущий OpenAI-compatible provider и его fallback-роутинг.
+    """
+    target = target or {}
+    sys = (
+        "Ты классификатор феноменологического слоя мировоззрения. По русскому "
+        "ответу человека найди только уверенные кандидаты для области "
+        "`01_Мироощущение`. Верни СТРОГО JSON без текста снаружи:\n"
+        '{"candidates":[{"category":"<канонический ключ>","theme":"<каноническая тема>",'
+        '"type":"feeling","name":"<короткое имя атома>","summary":"<1 предложение>",'
+        '"quote":"<дословная подстрока ответа>","confidence":0.0,'
+        '"evidence_reason":"<почему это именно эта тема>"}]}\n'
+        "- Используй только категории и темы из переданного sensation_taxonomy.\n"
+        "- `quote` обязан быть дословной подстрокой USER_ANSWER; не перефразируй.\n"
+        "- Не возвращай slug, raw_entry, связи, contradictions или stable-решения.\n"
+        "- Если явного личного переживания нет, верни пустой список.\n"
+        "- Максимум 5 кандидатов, лучше меньше, но увереннее.\n"
+        "- Простые локальные signals — подсказка, не приговор; сарказм и контекст "
+        "разрешено перебивать."
+    )
+    user_msg = "\n\n".join(x for x in [
+        "mode: analyze_sensation",
+        "selected_worldview_target:",
+        f"area: {target.get('area')}",
+        f"category: {target.get('category')}",
+        f"theme: {target.get('theme')}",
+        "sensation_taxonomy:\n" + taxonomy_context,
+        "local_signals_json:\n" + signal_context if signal_context else "",
+        _session_context_block(session_context),
+        "question:\n" + _fence_user(question, "QUESTION") if question else "",
+        "last_user_message:\n" + _fence_user(answer, "USER_ANSWER"),
+    ] if x)
+    return await _chat_json(
+        "sensation",
+        [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
+        temperature=0.2,
+    )
 
 
 def _clamp01(x) -> float:
