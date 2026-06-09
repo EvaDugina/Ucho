@@ -241,6 +241,9 @@ async def test_probe_owner_merges_sensation_candidates_into_apply_processed(as_u
     async def fake_analyze_values_norms(*args, **kwargs):
         return None
 
+    async def fake_analyze_practice(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(conversation_service, "ANALYSIS_ENABLED", True)
     monkeypatch.setattr(conversation_service.lexicon, "score", fake_score)
     monkeypatch.setattr(conversation_service, "classify_mood", fake_classify_mood)
@@ -253,6 +256,8 @@ async def test_probe_owner_merges_sensation_candidates_into_apply_processed(as_u
     monkeypatch.setattr(conversation_service, "append_understanding_report", lambda *args, **kwargs: None)
     monkeypatch.setattr(conversation_service, "analyze_values_norms", fake_analyze_values_norms)
     monkeypatch.setattr(conversation_service, "append_values_norms_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(conversation_service, "analyze_practice", fake_analyze_practice)
+    monkeypatch.setattr(conversation_service, "append_practice_report", lambda *args, **kwargs: None)
 
     payload = await conversation_service.process_probe_answer(
         "честность важна, но тревога в теле не отпускает",

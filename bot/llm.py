@@ -8,6 +8,7 @@
 - analyze_sensation_json → classifier for 01_Мироощущение candidates (JSON)
 - analyze_understanding_json → classifier for 02_Миропонимание candidates (JSON)
 - analyze_values_norms_json → classifier for 03_Ценностно-нормативная подсистема candidates (JSON)
+- analyze_practice_json → classifier for 04_Практический уровень candidates (JSON)
 - about_present   → iuda.md + about.md (показать портрет; голос из общей персоны)
 - remind_presence → короткое вечернее напоминание по daily-вопросу
 """
@@ -186,6 +187,7 @@ _TASK_ROUTES: dict[str, tuple[str, tuple[str, ...]]] = {
     "sensation": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
     "understanding": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
     "values_norms": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
+    "practice": (LLM_MODEL_FAST, LLM_FALLBACK_FAST),
 }
 
 
@@ -725,6 +727,66 @@ async def analyze_values_norms_json(
     ] if x)
     return await _chat_json(
         "values_norms",
+        [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
+        temperature=0.2,
+    )
+
+
+async def analyze_practice_json(
+    *,
+    answer: str,
+    question: str = "",
+    session_context: str = "",
+    taxonomy_context: str,
+    signal_context: str = "",
+    target: Optional[dict] = None,
+) -> dict:
+    """API-only анализ кандидатов для `04_Практический уровень`.
+
+    Метод не нормализует payload и не пишет в граф: это делает пакет
+    `bot.practice_analysis`. Локальные модели здесь не используются — только
+    текущий OpenAI-compatible provider и его fallback-роутинг.
+    """
+    target = target or {}
+    sys = (
+        "Ты классификатор практического слоя мировоззрения. По русскому ответу "
+        "человека найди только уверенные кандидаты для области "
+        "`04_Практический уровень`: готовность действовать, воля, стиль жизни, "
+        "поступки, стратегии совладания и последствия выбора. Верни СТРОГО JSON "
+        "без текста снаружи:\n"
+        '{"candidates":[{"category":"<канонический ключ>","theme":"<каноническая тема>",'
+        '"type":"action|pattern|strategy","name":"<короткое имя атома>",'
+        '"summary":"<1 предложение>","quote":"<дословная подстрока ответа>",'
+        '"confidence":0.0,"evidence_reason":"<почему это именно эта тема>"}]}\n'
+        "- Используй только категории и темы из переданного practice_taxonomy.\n"
+        "- `quote` обязан быть дословной подстрокой USER_ANSWER; не перефразируй.\n"
+        "- Не возвращай slug, raw_entry, связи, contradictions или stable-решения.\n"
+        "- Для category=readiness/actions обычно ставь type=action; "
+        "strategies — strategy; will/lifestyle/consequences — pattern.\n"
+        "- Для lifestyle возвращай кандидата только при устойчивом стиле, режиме "
+        "или повторяемости, а не при случайном упоминании сна, работы или денег.\n"
+        "- Для consequences нужна явная связь выбора и результата: цена, итог, "
+        "потеря, приобретение, рост, разрушение связи или облегчение.\n"
+        "- Если явной готовности, воли, практики, поступка, стратегии или "
+        "последствия нет, верни пустой список.\n"
+        "- Максимум 5 кандидатов, лучше меньше, но увереннее.\n"
+        "- Простые локальные signals — подсказка, не приговор; контекст и иронию "
+        "разрешено перебивать."
+    )
+    user_msg = "\n\n".join(x for x in [
+        "mode: analyze_practice",
+        "selected_worldview_target:",
+        f"area: {target.get('area')}",
+        f"category: {target.get('category')}",
+        f"theme: {target.get('theme')}",
+        "practice_taxonomy:\n" + taxonomy_context,
+        "local_signals_json:\n" + signal_context if signal_context else "",
+        _session_context_block(session_context),
+        "question:\n" + _fence_user(question, "QUESTION") if question else "",
+        "last_user_message:\n" + _fence_user(answer, "USER_ANSWER"),
+    ] if x)
+    return await _chat_json(
+        "practice",
         [{"role": "system", "content": sys}, {"role": "user", "content": user_msg}],
         temperature=0.2,
     )

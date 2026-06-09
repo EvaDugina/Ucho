@@ -8,6 +8,11 @@ from datetime import datetime, timedelta
 from .. import about, analysis, lexicon, mood_file, moods, session, session_log, vault, worldview
 from ..config import ANALYSIS_ENABLED
 from ..llm import classify_mood, process_answer
+from ..practice_analysis import (
+    analyze_practice,
+    append_report as append_practice_report,
+    merge_into_processed as merge_practice_into_processed,
+)
 from ..sensation_analysis import (
     analyze_sensation,
     append_report as append_sensation_report,
@@ -302,6 +307,20 @@ async def process_probe_answer(
             result = merge_values_norms_into_processed(result, values_norms)
         except Exception:
             log.exception("values_norms analysis failed (non-fatal)")
+        try:
+            practice = await analyze_practice(
+                text,
+                question=active_question,
+                session_context=session_context,
+                target=active_target,
+                mood_vec=mood_vec,
+                vad=vad,
+                method_results=analysis_results,
+            )
+            append_practice_report(active_q_num, len(text), practice)
+            result = merge_practice_into_processed(result, practice)
+        except Exception:
+            log.exception("practice analysis failed (non-fatal)")
 
     try:
         apply_processed(result, active_q_num, active_asked_at, active_question, text, target=active_target, session_domain=domain_hint)
