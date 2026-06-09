@@ -29,9 +29,9 @@ BOT_COMMANDS = [
     BotCommand(command="like", description="Отметить reply-реплику Иуды"),
     BotCommand(command="remask", description="Выбрать маску reply-реплики"),
     BotCommand(command="cancel", description="Убрать отложенный ответ"),
-    BotCommand(command="leta", description="Удалить свою рабочую базу"),
+    BotCommand(command="leta", description="Смыть водами реки забвения черты своего лица"),
     BotCommand(command="help", description="Подсказка по командам"),
-    BotCommand(command="start", description="Кнопка смыва"),
+    BotCommand(command="start", description="Бесполезная как мизинец на отрубленной руке."),
 ]
 
 # Админ-команды — только владельцу, добавляются к базовому набору в его меню.
