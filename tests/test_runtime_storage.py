@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot import face_actions, handlers, middleware, moods, qmap, questions, session, session_log, sessions, userctx, vault
+from bot.config import DOMAINS
 from bot.errors import LLMError, VaultError
 from bot.services import conversation_service, note_service
 
@@ -97,6 +98,8 @@ def test_session_json_keeps_queued_answer_and_restore(as_user):
 class _FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
+        self.deleted: list[dict] = []
+        self.fail_delete_ids: set[int] = set()
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = SimpleNamespace(
@@ -105,6 +108,12 @@ class _FakeBot:
         )
         self.sent.append({"chat_id": chat_id, "text": text, "kwargs": kwargs, "message": msg})
         return msg
+
+    async def delete_message(self, chat_id, message_id):
+        if int(message_id) in self.fail_delete_ids:
+            raise RuntimeError("telegram refused")
+        self.deleted.append({"chat_id": chat_id, "message_id": int(message_id)})
+        return True
 
 
 class _FakeMessage:
@@ -164,9 +173,26 @@ async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     marker = root / "00_raw" / "notes" / "delete.md"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("удалить\n", encoding="utf-8")
+    stale_files = [
+        root / "00_raw" / "sessions" / "old.jsonl",
+        root / "00_raw" / "qna" / "old.md",
+        root / "01_mood" / "events" / "old.jsonl",
+        root / "01_mood" / "timeseries" / "old.jsonl",
+        root / "02_concepts" / "everyday" / "old.md",
+        root / "02_digest" / "old.md",
+        root / "03_personality" / "liked_replies.json",
+        root / "_state.json",
+    ]
+    for stale in stale_files:
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        if stale.name == "_state.json":
+            stale.write_text('{"last_q_num": 99}\n', encoding="utf-8")
+        else:
+            stale.write_text("stale\n", encoding="utf-8")
     session.start(mode="probe", domain="everyday")
     session.set_question("Что забыть?", "everyday", q_num=vault.next_q_num())
     monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(handlers, "LETA_CHAT_PURGE_DELAY_SECONDS", 0)
     message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
     message.from_user = SimpleNamespace(id=as_user)
 
@@ -175,9 +201,69 @@ async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     assert root.exists()
     assert not marker.exists()
     assert (root / "00_raw" / "sessions").is_dir()
+    assert not any((root / "00_raw" / "sessions").glob("*.jsonl"))
+    assert not any((root / "00_raw" / "qna").glob("*.md"))
+    assert not any((root / "00_raw" / "notes").glob("*.md"))
+    assert not any((root / "01_mood" / "events").glob("*.jsonl"))
+    assert not any((root / "01_mood" / "timeseries").glob("*.jsonl"))
+    assert not any((root / "02_concepts").rglob("*.md"))
+    assert not any((root / "02_digest").glob("*.md"))
+    assert not (root / "03_personality" / "liked_replies.json").exists()
+    assert not (root / "_state.json").exists()
+    assert not (root / "_session.json").exists()
     assert (root / "_index.md").exists()
+    assert (root / ".obsidian" / "graph.json").exists()
+    assert (root / "03_personality" / "about.md").exists()
+    assert (root / "03_personality" / "mood.md").exists()
+    for domain in DOMAINS:
+        assert (root / "02_profile" / f"{domain}.md").exists()
     assert session.get() is None
-    assert "Очистил рабочую базу" in message.answers[-1]["text"]
+    assert [a["text"] for a in message.answers] == ["Приступаю к смытию данных.", "Смыто."]
+    deleted_ids = {item["message_id"] for item in message.bot.deleted}
+    assert {77, 800, 801}.issubset(deleted_ids)
+
+
+@pytest.mark.asyncio
+async def test_leta_failure_keeps_error_message_and_does_not_purge_chat(as_user, monkeypatch):
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+
+    def fail_delete():
+        raise VaultError("no")
+
+    monkeypatch.setattr(handlers.deletion_service, "delete_current_user_data", fail_delete)
+    message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
+
+    assert [a["text"] for a in message.answers] == [
+        "Приступаю к смытию данных.",
+        "Не удалил: проверка безопасности не прошла.",
+    ]
+    assert message.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_leta_chat_purge_deletes_in_order_with_delay_and_ignores_failures(monkeypatch):
+    delays: list[float] = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", fake_sleep)
+    bot = _FakeBot()
+    bot.fail_delete_ids = {2}
+    message = _FakeMessage(bot=bot)
+    message.from_user = SimpleNamespace(id=123)
+
+    await handlers._delete_chat_messages_after_leta(
+        message,
+        [3, None, 1, 2, 2],
+        delete_delay=0.05,
+    )
+
+    assert [item["message_id"] for item in bot.deleted] == [1, 3]
+    assert delays == [0.05, 0.05, 0.05]
 
 
 @pytest.mark.asyncio

@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import random
@@ -51,6 +52,8 @@ router = Router()
 # Гейтинг доступа — внутренний `_is_owner` в каждом хэндлере (не router-фильтр:
 # фильтр уронил бы команду гостя в on_text как текст-заметку — см. cmd_adduser).
 admin_router = Router()
+
+LETA_CHAT_PURGE_DELAY_SECONDS = 0.08
 
 _DOMAIN_LABELS = {
     "ethics": "Этика",
@@ -533,7 +536,7 @@ _HELP_BODY = (
     "<b>Сервис</b>\n"
     "<b>/start</b> — Бесполезная как мизинец на отрубленной руке.\n"
     "<b>/cancel</b> — убрать отложенный ответ, если он ещё не в LLM\n"
-    "<b>/leta</b> — Смыть водами реки забвения черты своего лица\n"
+    "<b>/leta</b> — смыть базу и постепенно растворить переписку\n"
     "<b>/help</b> — этот список\n"
     "<b>/history</b> — последние вопросы"
 )
@@ -621,8 +624,10 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         extra_ids=[getattr(message, "message_id", None)],
         fill_until_message_id=getattr(message, "message_id", None),
     )
+    started = await message.answer("Приступаю к смытию данных.")
+    chat_message_ids.append(getattr(started, "message_id", None))
     try:
-        result = deletion_service.delete_current_user_data()
+        deletion_service.delete_current_user_data()
     except VaultError:
         log.exception("safe user data deletion rejected")
         await message.answer("Не удалил: проверка безопасности не прошла.")
@@ -632,20 +637,19 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         await message.answer("Не удалил: операция сорвалась. Я записал это в лог.")
         return
 
-    if result.cleared:
-        sent = await message.answer(
-            "Очистил рабочую базу. Доступ остался; папка пользователя сохранена "
-            "и готова к новой пустой базе. Git history не переписана."
-        )
-    else:
-        sent = await message.answer("Рабочая база уже была пустой. Доступ остался.")
+    sent = await message.answer("Смыто.")
     await _delete_chat_messages_after_leta(
         message,
         chat_message_ids + [getattr(sent, "message_id", None)],
     )
 
 
-async def _delete_chat_messages_after_leta(message: Message, message_ids: list[int | None]) -> None:
+async def _delete_chat_messages_after_leta(
+    message: Message,
+    message_ids: list[int | None],
+    *,
+    delete_delay: float | None = None,
+) -> None:
     """Best-effort удалить Telegram-следы после подтверждённой `/leta`.
 
     Ограничения задаёт Telegram Bot API: старые/недоступные сообщения останутся.
@@ -653,6 +657,7 @@ async def _delete_chat_messages_after_leta(message: Message, message_ids: list[i
     """
     chat_id = message.chat.id
     unique_ids = sorted({int(mid) for mid in message_ids if mid is not None})
+    delay = LETA_CHAT_PURGE_DELAY_SECONDS if delete_delay is None else delete_delay
     deleted = 0
     failed = 0
     for mid in unique_ids:
@@ -667,6 +672,8 @@ async def _delete_chat_messages_after_leta(message: Message, message_ids: list[i
                 mid,
                 exc,
             )
+        if delay > 0:
+            await asyncio.sleep(delay)
     log.info(
         "telegram chat purge after leta: uid=%s chat_id=%s deleted=%s failed=%s",
         message.from_user.id if message.from_user else None,
