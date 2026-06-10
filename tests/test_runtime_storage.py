@@ -220,10 +220,11 @@ async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     assert session.get() is None
     assert [a["text"] for a in message.answers] == [
         "Смываю твоё дерьмо в унитаз сраный подонок.",
-        "Смыто.",
+        "Кончил.",
     ]
     deleted_ids = {item["message_id"] for item in message.bot.deleted}
-    assert {77, 800, 801}.issubset(deleted_ids)
+    assert {77, 800}.issubset(deleted_ids)
+    assert 801 not in deleted_ids
 
 
 @pytest.mark.asyncio

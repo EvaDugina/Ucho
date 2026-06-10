@@ -637,11 +637,11 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         await message.answer("Не удалил: операция сорвалась. Я записал это в лог.")
         return
 
-    sent = await message.answer("Смыто.")
     await _delete_chat_messages_after_leta(
         message,
-        chat_message_ids + [getattr(sent, "message_id", None)],
+        chat_message_ids,
     )
+    await message.answer("Кончил.")
 
 
 async def _delete_chat_messages_after_leta(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from bot import session, session_log, userctx, users, vault
@@ -76,6 +78,39 @@ def test_delete_current_user_data_commit_is_scoped(as_user):
     assert other_note.exists()
     assert current_root.exists()
     assert not (current_root / "00_raw" / "notes" / "to-delete.md").exists()
+
+
+def test_delete_current_user_data_uses_git_wrap_push_attempt(as_user, tmp_path):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    remote = tmp_path / "vault-remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    vault._git("remote", "remove", "origin", check=False)
+    vault._git("remote", "add", "origin", str(remote))
+    try:
+        current_root = userctx.user_root()
+        _write(current_root / "00_raw" / "notes" / "to-delete.md", "delete me\n")
+
+        deletion_service.delete_current_user_data()
+
+        local_head = vault._git("rev-parse", "HEAD").stdout.strip()
+        remote_head = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+        assert remote_head == local_head
+    finally:
+        vault._git("remote", "remove", "origin", check=False)
 
 
 def test_collect_chat_message_ids_from_logs_and_recent_window(as_user):
