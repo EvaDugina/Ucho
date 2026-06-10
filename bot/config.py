@@ -5,6 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_PROXY_URL = (os.getenv("TELEGRAM_PROXY_URL") or "").strip()
 
@@ -173,18 +181,25 @@ ALLOWED_TELEGRAM_IDS = tuple(
     int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
 )
 
+# Dev/prod режим. DEBUG=true оставляет ручной Telegram-путь рабочим, но по
+# умолчанию выключает тяжёлую/фонующую обвязку: git-vault и startup jobs.
+DEBUG = _env_bool("DEBUG", False)
+VAULT_GIT_ENABLED = _env_bool("VAULT_GIT_ENABLED", not DEBUG)
+BACKGROUND_JOBS_ENABLED = _env_bool("BACKGROUND_JOBS_ENABLED", not DEBUG)
+STARTUP_RECOVERY_ENABLED = _env_bool("STARTUP_RECOVERY_ENABLED", not DEBUG)
+
 # Уровень логирования (stderr/docker logs). Из env, чтобы поднять до DEBUG без
 # пересборки образа. Невалидное значение → INFO (см. main.py).
 # ВНИМАНИЕ: на уровне DEBUG в логи попадает персональный контент (например,
 # сырой ответ LLM в llm._chat_json). На INFO и выше код контент не пишет —
-# только метаданные (uid, q_num, длины). DEBUG включать осознанно и не на проде.
+# только метаданные (uid, q_num, длины). LOG_LEVEL=DEBUG включать осознанно и не на проде.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Мульти-методный анализ ответа (сравнение методов оценки настроения/состояния):
 # гоняется ТОЛЬКО для владельца, пишет разбор в 01_Мироощущение/mood/analysis/ и durable-ряд
 # 01_Мироощущение/mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
 # выключить без пересборки. false → остаётся только базовый разбор настроения в чат.
-ANALYSIS_ENABLED = os.getenv("ANALYSIS_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+ANALYSIS_ENABLED = _env_bool("ANALYSIS_ENABLED", True)
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).

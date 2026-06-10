@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from .models import UnderstandingCandidate
 from .taxonomy import is_valid_theme

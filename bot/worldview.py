@@ -21,7 +21,6 @@ from .atomic import atomic_write_text
 from .validation import (
     safe_evidence_text,
     safe_name,
-    safe_open_question,
     safe_slug,
     safe_summary,
 )
@@ -30,7 +29,6 @@ from .worldview_taxonomy import (
     WORLDVIEW_TYPES,
     coerce_target,
     get_area,
-    get_category,
 )
 
 log = logging.getLogger(__name__)

@@ -25,8 +25,13 @@
 | `TELEGRAM_PROXY_URL` | optional proxy для Telegram Bot API polling, если сервер не ходит в `api.telegram.org` напрямую | `http://proxy-host:3128` |
 | `OWNER_TELEGRAM_ID` | владелец/админ (всегда разрешён) | `123456789` |
 | `ALLOWED_TELEGRAM_IDS` | доп. доверенные id через запятую (начальный список; рантайм — в `.psycho/users.json`) | `111,222` |
+| `DEBUG` | dev/prod переключатель: `true` меняет дефолты dev-флагов, но не включает verbose logging само по себе | `false` |
+| `LOG_LEVEL` | уровень stderr/app-log; `DEBUG` может писать персональный LLM payload, для локальной проверки держать `INFO` | `INFO` |
 | `VAULT_HOST_PATH` | абсолютный путь к Obsidian-vault на хосте/сервере; пробрасывается в контейнер как `/vault` | `/srv/psycho/vault` |
 | `VAULT_PATH` | путь внутри контейнера (можно переопределить для тестов) | `/vault` |
+| `VAULT_GIT_ENABLED` | git safety net внутри vault: default `false` при `DEBUG=true`, иначе `true`; `false` оставляет Markdown-запись без `git init/commit/push` | `true` |
+| `BACKGROUND_JOBS_ENABLED` | scheduler daily/reminder и startup catch-up: default `false` при `DEBUG=true`, иначе `true` | `true` |
+| `STARTUP_RECOVERY_ENABLED` | startup pending/queued/offline recovery: default `false` при `DEBUG=true`, иначе `true` | `true` |
 | `OPENROUTER_API_KEY` | OpenRouter key; если непустой, провайдер выбирается с приоритетом | `sk-or-...` |
 | `OPENROUTER_BASE_URL` | OpenRouter API URL | `https://openrouter.ai/api/v1` |
 | `OPENROUTER_MODEL_DEFAULT` | стартовая OpenRouter live-модель | `qwen/qwen3-235b-a22b-2507` |
@@ -39,7 +44,7 @@
 | `LLM_MODEL_FALLBACKS` | fallback-модели через запятую | `deepseek-v4-flash` |
 | `LLM_TIMEOUT` | таймаут одного LLM-вызова, сек (без него sdk ждёт ~600 c) | `90` |
 | `LLM_COOLDOWN_SEC` | мин. интервал между LLM-операциями одного пользователя (anti-DoS) | `4` |
-| `ANALYSIS_ENABLED` | мульти-методный разбор ответа для OWNER: отчёт в `01_Мироощущение/mood/analysis/` + durable-ряд `01_Мироощущение/mood/timeseries/`; `false` → только базовый разбор настроения в чат | `true` |
+| `ANALYSIS_ENABLED` | инструментальный OWNER-анализ: mood-отчёт в `01_Мироощущение/mood/analysis/`, durable-ряд `01_Мироощущение/mood/timeseries/` и API-only draft-анализы полного канона 01-04 с отчётами `analysis01`-`analysis04`; `false` → без этих отчётов и дополнительных API-кандидатов, только базовый разбор настроения в чат | `true` |
 | `DAILY_HOUR` | час суток для авто-вопроса (в поясе `DAILY_TZ`) | `19` |
 | `DAILY_TZ` | пояс расписания авто-вопроса | `Europe/Moscow` |
 | `DAILY_REMINDER_START` | время сбора неответивших на daily-вопрос | `23:00` |
@@ -47,7 +52,9 @@
 
 **Поведение `DEBUG`:**
 
-Сейчас флага `DEBUG` нет — single-user проект, prod-конфигурация и есть «как запускаем». Если будем выкладывать на shared сервер, добавим `DEBUG` для разделения hardening (см. notes → active plans).
+`DEBUG=true` — локальный тихий режим для проверки ручного Telegram-диалога и формирования Obsidian-графа. Если явно не переопределить, он выключает `VAULT_GIT_ENABLED`, `BACKGROUND_JOBS_ENABLED` и `STARTUP_RECOVERY_ENABLED`: бот пишет Markdown в vault, но не создаёт git-коммиты/push и не шлёт фоновые daily/reminder/catch-up сообщения при старте. `LOG_LEVEL` остаётся отдельным флагом; не ставить `LOG_LEVEL=DEBUG`, если не нужен сырой LLM payload в логах.
+
+`DEBUG=false` — server/prod-like режим: git safety net vault и фоновые задачи включены по умолчанию.
 
 ---
 
@@ -234,6 +241,9 @@ docker compose logs -f bot
 Перед запуском заполнить в `.env`: `TELEGRAM_BOT_TOKEN`, `OWNER_TELEGRAM_ID`,
 `VAULT_HOST_PATH` и один LLM-ключ: `OPENROUTER_API_KEY` или `AITUNNEL_API_KEY`.
 Локальную модель скачивать не нужно.
+Для локального dev-прогона Obsidian-графа: `DEBUG=true`, `ANALYSIS_ENABLED=false`
+и локальный `VAULT_HOST_PATH`; тогда бот пишет Markdown без git-операций vault и
+без фоновых daily/reminder/catch-up задач.
 
 ### Развёртывание
 

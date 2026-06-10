@@ -9,7 +9,7 @@ from typing import Optional
 
 from .. import userctx
 from ..atomic import atomic_write_text
-from ..config import VAULT_PATH
+from ..config import VAULT_GIT_ENABLED, VAULT_PATH
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ def _git_available() -> bool:
         return False
 
 
+def git_enabled() -> bool:
+    return VAULT_GIT_ENABLED
+
+
 def _is_git_repo() -> bool:
     if not (VAULT_PATH / ".git").exists():
         return False
@@ -106,6 +110,9 @@ def _ensure_git_identity() -> None:
 
 def ensure_git_repo() -> None:
     """Гарантировать, что vault — git репозиторий."""
+    if not git_enabled():
+        log.info("vault git disabled by config")
+        return
     if not _git_available():
         log.warning("git not available — safety net disabled; install git in the container")
         return
@@ -152,6 +159,8 @@ def _git_head() -> Optional[str]:
 def _git_commit(
     message: str, scope: Optional[str] = None, allow_empty: bool = False
 ) -> Optional[str]:
+    if not git_enabled():
+        return None
     if not _git_available() or not _is_git_repo():
         return None
     try:
@@ -197,7 +206,7 @@ def _git_push(remote: str = "origin") -> bool:
     In production, a configured `origin` makes every scoped user commit leave the
     container immediately after it is created.
     """
-    if not _git_available() or not _is_git_repo():
+    if not git_enabled() or not _git_available() or not _is_git_repo():
         return False
     branch = _git_current_branch()
     if not branch:

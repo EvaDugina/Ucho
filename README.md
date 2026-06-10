@@ -75,6 +75,22 @@ cp .env.example .env
 в `23:00` бот собирает тех, кто не ответил на сегодняшний daily-вопрос, и
 выбирает одно случайное время отправки до `01:00`.
 
+Для локальной проверки работоспособности бота и формирования Obsidian-графа можно
+включить тихий dev-режим:
+
+```dotenv
+DEBUG=true
+VAULT_GIT_ENABLED=false
+BACKGROUND_JOBS_ENABLED=false
+STARTUP_RECOVERY_ENABLED=false
+ANALYSIS_ENABLED=false
+LOG_LEVEL=INFO
+```
+
+В этом режиме бот пишет Markdown в `VAULT_HOST_PATH` и формирует атомы/MOC, но не
+создаёт git-коммиты vault и не запускает daily/reminder/catch-up задачи. `ANALYSIS_ENABLED=false`
+экономит дополнительные API-вызовы 01-04, если проверяется только базовый граф.
+
 ### 4. Запуск
 
 ```powershell

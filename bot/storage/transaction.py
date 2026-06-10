@@ -5,13 +5,16 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from ..errors import VaultError
-from .git import _git_available, _git_commit, _git_head, _is_git_repo, _restore_scope, _scope
+from .git import _git_available, _git_commit, _git_head, _is_git_repo, _restore_scope, _scope, git_enabled
 from .log import append_log
 
 
 @contextmanager
 def git_wrap(op_name: str) -> Iterator[None]:
     """pre-commit -> write block -> post-commit with rollback on exceptions."""
+    if not git_enabled():
+        yield
+        return
     if not _git_available() or not _is_git_repo():
         append_log("warn", "git_unavailable", f"op={op_name} ran without safety net")
         yield
@@ -34,4 +37,3 @@ def git_wrap(op_name: str) -> Iterator[None]:
         raise
     else:
         _git_commit(f"psycho({label}): {op_name}", scope=scope)
-

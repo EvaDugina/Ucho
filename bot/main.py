@@ -6,7 +6,14 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
 from . import recovery, selfcheck, session, userctx, users, vault
-from .config import LOG_LEVEL, OWNER_TELEGRAM_ID, TELEGRAM_PROXY_URL, TELEGRAM_BOT_TOKEN
+from .config import (
+    BACKGROUND_JOBS_ENABLED,
+    LOG_LEVEL,
+    OWNER_TELEGRAM_ID,
+    STARTUP_RECOVERY_ENABLED,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_PROXY_URL,
+)
 from .handlers import admin_router, router
 from .logging_setup import configure_logging
 from .middleware import AccessMiddleware
@@ -102,51 +109,58 @@ async def main() -> None:
         return True
 
     await _setup_commands(bot)
-    scheduler = start_scheduler(bot)
+    scheduler = start_scheduler(bot) if BACKGROUND_JOBS_ENABLED else None
+    if not BACKGROUND_JOBS_ENABLED:
+        log.info("background jobs disabled by config")
 
     # Recovery несработавшего LLM-цикла — синхронно (await), ДО склейки офлайн-
     # бэклога: прерванный ответ дожимается и может задать новый вопрос, на который
     # затем лягут офлайн-сообщения. (Раньше был create_task — гонка с поллингом.)
-    for uid in pending_uids:
-        try:
-            await recovery.process_pending_on_startup(bot, uid)
-        except Exception:
-            log.exception("pending recovery failed for uid=%s", uid)
+    if STARTUP_RECOVERY_ENABLED:
+        for uid in pending_uids:
+            try:
+                await recovery.process_pending_on_startup(bot, uid)
+            except Exception:
+                log.exception("pending recovery failed for uid=%s", uid)
 
-    # Durable merge-slot сообщений, пришедших во время прошлой генерации, дожимаем
-    # после pending recovery: он не должен обгонять уже взятый в LLM ответ.
-    for uid in queued_uids:
-        try:
-            await recovery.process_queued_on_startup(bot, uid)
-        except Exception:
-            log.exception("queued recovery failed for uid=%s", uid)
+        # Durable merge-slot сообщений, пришедших во время прошлой генерации, дожимаем
+        # после pending recovery: он не должен обгонять уже взятый в LLM ответ.
+        for uid in queued_uids:
+            try:
+                await recovery.process_queued_on_startup(bot, uid)
+            except Exception:
+                log.exception("queued recovery failed for uid=%s", uid)
 
-    # Сообщения, пришедшие пока контейнер лежал, — обработать склеенными в один
-    # ответ (один итоговый комментарий), ДО старта обычного поллинга.
-    try:
-        await recovery.process_offline_backlog(bot, dp)
-    except Exception:
-        log.exception("offline backlog processing failed")
+        # Сообщения, пришедшие пока контейнер лежал, — обработать склеенными в один
+        # ответ (один итоговый комментарий), ДО старта обычного поллинга.
+        try:
+            await recovery.process_offline_backlog(bot, dp)
+        except Exception:
+            log.exception("offline backlog processing failed")
+    else:
+        log.info("startup recovery disabled by config")
 
     # Догон дневного вопроса: если бот лежал в час рассылки — дослать сегодняшний
     # (не за прошлые дни). Дедуп по дате внутри send_daily_question.
-    try:
-        from .scheduler import catch_up_daily
-        await catch_up_daily(bot)
-    except Exception:
-        log.exception("catch_up_daily failed")
+    if BACKGROUND_JOBS_ENABLED:
+        try:
+            from .scheduler import catch_up_daily
+            await catch_up_daily(bot)
+        except Exception:
+            log.exception("catch_up_daily failed")
 
-    try:
-        from .scheduler import catch_up_daily_reminders
-        await catch_up_daily_reminders(bot, scheduler)
-    except Exception:
-        log.exception("catch_up_daily_reminders failed")
+        try:
+            from .scheduler import catch_up_daily_reminders
+            await catch_up_daily_reminders(bot, scheduler)
+        except Exception:
+            log.exception("catch_up_daily_reminders failed")
 
     log.info("bot starting polling…")
     try:
         await dp.start_polling(bot)
     finally:
-        scheduler.shutdown(wait=False)
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
         await bot.session.close()
 
 

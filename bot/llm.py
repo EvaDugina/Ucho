@@ -14,7 +14,6 @@
 """
 import json
 import logging
-import random
 from typing import Optional
 
 from openai import AsyncOpenAI

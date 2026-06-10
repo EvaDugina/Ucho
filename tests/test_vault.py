@@ -12,6 +12,7 @@ from bot.config import LOG_PATH, VAULT_PATH
 from bot.errors import ValidationError, VaultError
 from bot.graph import Concept
 from bot.storage import git as git_storage
+from bot.storage import transaction as git_transaction
 
 
 def test_next_q_num_monotonic(as_user):
@@ -205,6 +206,36 @@ def test_git_wrap_rolls_back_on_error(as_user):
             raise RuntimeError("boom")
     # untracked-файл, созданный в провалившейся транзакции, должен быть вычищен
     assert not graph._path_for("rollme", "ethics").exists()
+
+
+def test_disabled_vault_git_does_not_initialize_or_commit(tmp_path, monkeypatch):
+    monkeypatch.setattr(git_storage, "VAULT_GIT_ENABLED", False)
+    monkeypatch.setattr(git_storage, "VAULT_PATH", tmp_path)
+
+    def fail_git(*args, **kwargs):
+        raise AssertionError("git command must not run when VAULT_GIT_ENABLED=false")
+
+    monkeypatch.setattr(git_storage, "_git", fail_git)
+
+    git_storage.ensure_git_repo()
+
+    assert not (tmp_path / ".git").exists()
+    assert git_storage.commit_all("disabled") is None
+
+
+def test_disabled_vault_git_wrap_runs_without_commit(tmp_path, monkeypatch):
+    marker = tmp_path / "marker.txt"
+    monkeypatch.setattr(git_storage, "VAULT_GIT_ENABLED", False)
+
+    def fail_git_commit(*args, **kwargs):
+        raise AssertionError("git commit must not run when VAULT_GIT_ENABLED=false")
+
+    monkeypatch.setattr(git_transaction, "_git_commit", fail_git_commit)
+
+    with vault.git_wrap("disabled_wrap"):
+        marker.write_text("written\n", encoding="utf-8")
+
+    assert marker.read_text(encoding="utf-8") == "written\n"
 
 
 def test_append_raw_wraps_oserror_in_vaulterror(as_user):
