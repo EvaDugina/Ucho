@@ -617,6 +617,10 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         await message.answer(ratelimit.BUSY_MESSAGE)
         return
 
+    chat_message_ids = deletion_service.collect_chat_message_ids(
+        extra_ids=[getattr(message, "message_id", None)],
+        fill_until_message_id=getattr(message, "message_id", None),
+    )
     try:
         result = deletion_service.delete_current_user_data()
     except VaultError:
@@ -629,12 +633,47 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         return
 
     if result.deleted:
-        await message.answer(
+        sent = await message.answer(
             "Удалил рабочую базу. Доступ остался; при следующем обращении начнётся "
             "новая пустая база. Git history не переписана."
         )
     else:
-        await message.answer("Рабочей базы уже не было. Доступ остался.")
+        sent = await message.answer("Рабочей базы уже не было. Доступ остался.")
+    await _delete_chat_messages_after_leta(
+        message,
+        chat_message_ids + [getattr(sent, "message_id", None)],
+    )
+
+
+async def _delete_chat_messages_after_leta(message: Message, message_ids: list[int | None]) -> None:
+    """Best-effort удалить Telegram-следы после подтверждённой `/leta`.
+
+    Ограничения задаёт Telegram Bot API: старые/недоступные сообщения останутся.
+    Это не часть удаления vault-данных и не должно валить уже подтверждённую `/leta`.
+    """
+    chat_id = message.chat.id
+    unique_ids = sorted({int(mid) for mid in message_ids if mid is not None})
+    deleted = 0
+    failed = 0
+    for mid in unique_ids:
+        try:
+            await message.bot.delete_message(chat_id=chat_id, message_id=mid)
+            deleted += 1
+        except Exception as exc:
+            failed += 1
+            log.debug(
+                "telegram chat purge skipped message: chat_id=%s message_id=%s error=%r",
+                chat_id,
+                mid,
+                exc,
+            )
+    log.info(
+        "telegram chat purge after leta: uid=%s chat_id=%s deleted=%s failed=%s",
+        message.from_user.id if message.from_user else None,
+        chat_id,
+        deleted,
+        failed,
+    )
 
 
 @router.message(Command("help"))

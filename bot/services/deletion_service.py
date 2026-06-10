@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 from dataclasses import dataclass
@@ -32,6 +33,59 @@ def confirmation_args(uid: int) -> str:
 
 def confirmation_command(uid: int) -> str:
     return f"/leta {confirmation_args(uid)}"
+
+
+def collect_chat_message_ids(
+    *,
+    extra_ids: list[int | None] | None = None,
+    fill_until_message_id: int | None = None,
+    fill_window: int = 300,
+) -> list[int]:
+    """Собрать Telegram message_id текущего пользователя для best-effort chat purge.
+
+    Bot API не умеет "очистить историю чата" одним вызовом и не удаляет старые
+    сообщения. Поэтому собираем известные ids из session-log и добавляем узкое
+    окно перед текущей командой: туда попадают сама `/leta`, предыдущее
+    предупреждение с точной фразой и другие недавние служебные сообщения.
+    """
+    ids: set[int] = set()
+    root = userctx.user_root()
+    sessions_dir = root / "00_raw" / "sessions"
+    if sessions_dir.exists():
+        for path in sorted(sessions_dir.glob("*.jsonl")):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                log.exception("failed to read session log for chat purge: %s", path)
+                continue
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                for key in ("telegram_message_id", "message_id", "reply_to_message_id"):
+                    value = row.get(key)
+                    if value is not None:
+                        try:
+                            ids.add(int(value))
+                        except (TypeError, ValueError):
+                            pass
+
+    if extra_ids:
+        for value in extra_ids:
+            if value is not None:
+                ids.add(int(value))
+
+    if fill_until_message_id is not None and fill_window > 0:
+        end = int(fill_until_message_id)
+        start = max(1, end - int(fill_window) + 1)
+        ids.update(range(start, end + 1))
+
+    return sorted(ids)
 
 
 def _current_user_root() -> tuple[int, Path]:

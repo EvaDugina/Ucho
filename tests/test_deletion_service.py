@@ -5,6 +5,7 @@ import pytest
 from bot import session, userctx, users, vault
 from bot.errors import VaultError
 from bot.services import deletion_service
+from bot import session_log
 
 
 def _write(path, text: str = "data\n") -> None:
@@ -67,3 +68,30 @@ def test_delete_current_user_data_commit_is_scoped(as_user):
     assert all(line.startswith(f"users/{as_user}/") for line in changed)
     assert not any(line.startswith(f"users/{other_uid}/") for line in changed)
     assert other_note.exists()
+
+
+def test_collect_chat_message_ids_from_logs_and_recent_window(as_user):
+    session_log.append(
+        session_id="chat-purge",
+        role="assistant",
+        kind="question",
+        text="Что стереть?",
+        message_id=100,
+        reply_to_message_id=None,
+    )
+    session_log.append(
+        session_id="chat-purge",
+        role="user",
+        kind="answer",
+        text="всё",
+        message_id=105,
+        reply_to_message_id=100,
+    )
+
+    ids = deletion_service.collect_chat_message_ids(
+        extra_ids=[110, None],
+        fill_until_message_id=112,
+        fill_window=5,
+    )
+
+    assert ids == [100, 105, 108, 109, 110, 111, 112]
