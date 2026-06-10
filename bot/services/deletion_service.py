@@ -1,10 +1,11 @@
-"""Удаление рабочей базы текущего пользователя.
+"""Сброс рабочей базы текущего пользователя.
 
 Опасная операция держит две границы:
 - только request-scoped пользователь из ``userctx``;
-- только ровный путь ``<VAULT_PATH>/users/<uid>`` после resolve-проверки.
+- только ровный корень ``<VAULT_PATH>/users/<uid>`` после resolve-проверки.
 
-Это не privacy purge: git history/remote не переписываются.
+Корень пользователя, whitelist и git history остаются на месте: это reset базы,
+а не privacy purge.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 class DeleteUserDataResult:
     uid: int
     path: Path
-    deleted: bool
+    cleared: bool
 
 
 def confirmation_args(uid: int) -> str:
@@ -109,20 +110,35 @@ def _current_user_root() -> tuple[int, Path]:
     return uid, target
 
 
+def _clear_directory_contents(target: Path) -> None:
+    for child in target.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+        else:
+            raise VaultError(f"delete_user_data unsupported path type: {child}")
+
+
 def delete_current_user_data() -> DeleteUserDataResult:
-    """Удалить ``users/<uid>`` текущего пользователя и забыть runtime-сессию."""
+    """Очистить содержимое ``users/<uid>``, сохранить корень и забыть runtime-сессию."""
     uid, target = _current_user_root()
     if not target.exists():
+        with vault.git_wrap("reset user data"):
+            vault.ensure_layout()
         session.clear()
-        vault.append_log("info", "leta_noop", f"uid={uid} data_absent")
-        return DeleteUserDataResult(uid=uid, path=target, deleted=False)
+        vault.append_log("warn", "user_data_reset", f"uid={uid} data_absent")
+        log.warning("user data reset from absent root: uid=%s", uid)
+        return DeleteUserDataResult(uid=uid, path=target, cleared=True)
     if not target.is_dir() or target.is_symlink():
         raise VaultError("delete_user_data target is not a regular directory")
 
-    with vault.git_wrap("delete user data"):
-        shutil.rmtree(target)
+    had_contents = any(target.iterdir())
+    with vault.git_wrap("reset user data"):
+        _clear_directory_contents(target)
+        vault.ensure_layout()
 
     session.clear()
-    vault.append_log("warn", "user_data_deleted", f"uid={uid}")
-    log.warning("user data deleted: uid=%s", uid)
-    return DeleteUserDataResult(uid=uid, path=target, deleted=True)
+    vault.append_log("warn", "user_data_reset", f"uid={uid}")
+    log.warning("user data reset: uid=%s", uid)
+    return DeleteUserDataResult(uid=uid, path=target, cleared=had_contents)

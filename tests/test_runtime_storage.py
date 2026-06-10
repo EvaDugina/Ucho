@@ -159,7 +159,7 @@ async def test_leta_invalid_confirmation_keeps_data(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_leta_confirmation_deletes_current_user_data(as_user, monkeypatch):
+async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     root = userctx.user_root()
     marker = root / "00_raw" / "notes" / "delete.md"
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -172,9 +172,12 @@ async def test_leta_confirmation_deletes_current_user_data(as_user, monkeypatch)
 
     await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
 
-    assert not root.exists()
+    assert root.exists()
+    assert not marker.exists()
+    assert (root / "00_raw" / "sessions").is_dir()
+    assert (root / "_index.md").exists()
     assert session.get() is None
-    assert "Удалил рабочую базу" in message.answers[-1]["text"]
+    assert "Очистил рабочую базу" in message.answers[-1]["text"]
 
 
 @pytest.mark.asyncio

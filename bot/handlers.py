@@ -632,13 +632,13 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         await message.answer("Не удалил: операция сорвалась. Я записал это в лог.")
         return
 
-    if result.deleted:
+    if result.cleared:
         sent = await message.answer(
-            "Удалил рабочую базу. Доступ остался; при следующем обращении начнётся "
-            "новая пустая база. Git history не переписана."
+            "Очистил рабочую базу. Доступ остался; папка пользователя сохранена "
+            "и готова к новой пустой базе. Git history не переписана."
         )
     else:
-        sent = await message.answer("Рабочей базы уже не было. Доступ остался.")
+        sent = await message.answer("Рабочая база уже была пустой. Доступ остался.")
     await _delete_chat_messages_after_leta(
         message,
         chat_message_ids + [getattr(sent, "message_id", None)],

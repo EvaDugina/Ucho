@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from bot import session, userctx, users, vault
+from bot import session, session_log, userctx, users, vault
 from bot.errors import VaultError
 from bot.services import deletion_service
-from bot import session_log
 
 
 def _write(path, text: str = "data\n") -> None:
@@ -24,16 +23,23 @@ def test_delete_current_user_data_only_removes_current_user_and_keeps_registry(a
     other_uid = as_user + 10_000
     other_note = userctx.root_for(other_uid) / "00_raw" / "notes" / "other.md"
     _write(other_note, "other user data\n")
+    users.add_user(as_user, by=1)
     users.add_user(other_uid, by=as_user)
     users_before = users.USERS_FILE.read_text(encoding="utf-8")
 
     result = deletion_service.delete_current_user_data()
 
-    assert result.deleted is True
+    assert result.cleared is True
     assert result.uid == as_user
-    assert not current_root.exists()
+    assert current_root.exists()
+    assert not current_note.exists()
+    assert (current_root / "00_raw" / "sessions").is_dir()
+    assert (current_root / "00_raw" / "qna").is_dir()
+    assert (current_root / "03_personality").is_dir()
+    assert (current_root / "_index.md").exists()
     assert other_note.exists()
     assert users.USERS_FILE.read_text(encoding="utf-8") == users_before
+    assert users.is_allowed(as_user)
     assert session.get() is None
 
 
@@ -68,6 +74,8 @@ def test_delete_current_user_data_commit_is_scoped(as_user):
     assert all(line.startswith(f"users/{as_user}/") for line in changed)
     assert not any(line.startswith(f"users/{other_uid}/") for line in changed)
     assert other_note.exists()
+    assert current_root.exists()
+    assert not (current_root / "00_raw" / "notes" / "to-delete.md").exists()
 
 
 def test_collect_chat_message_ids_from_logs_and_recent_window(as_user):
