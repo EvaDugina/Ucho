@@ -624,7 +624,7 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         extra_ids=[getattr(message, "message_id", None)],
         fill_until_message_id=getattr(message, "message_id", None),
     )
-    started = await message.answer("Приступаю к смытию данных.")
+    started = await message.answer("Смываю твоё дерьмо в унитаз сраный подонок.")
     chat_message_ids.append(getattr(started, "message_id", None))
     try:
         deletion_service.delete_current_user_data()

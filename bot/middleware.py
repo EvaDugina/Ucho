@@ -93,7 +93,7 @@ class AccessMiddleware(BaseMiddleware):
             cmd = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0].lstrip("/").lower()
             busy = session.has_unfinished_answer() or ratelimit.is_inflight(uid)
             if busy:
-                if cmd not in {"cancel", "echo"}:
+                if cmd not in {"cancel", "echo", "pebble"}:
                     try:
                         await event.answer(ratelimit.BUSY_MESSAGE)
                     except Exception:

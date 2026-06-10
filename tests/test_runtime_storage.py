@@ -218,7 +218,10 @@ async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     for domain in DOMAINS:
         assert (root / "02_profile" / f"{domain}.md").exists()
     assert session.get() is None
-    assert [a["text"] for a in message.answers] == ["Приступаю к смытию данных.", "Смыто."]
+    assert [a["text"] for a in message.answers] == [
+        "Смываю твоё дерьмо в унитаз сраный подонок.",
+        "Смыто.",
+    ]
     deleted_ids = {item["message_id"] for item in message.bot.deleted}
     assert {77, 800, 801}.issubset(deleted_ids)
 
@@ -237,7 +240,7 @@ async def test_leta_failure_keeps_error_message_and_does_not_purge_chat(as_user,
     await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
 
     assert [a["text"] for a in message.answers] == [
-        "Приступаю к смытию данных.",
+        "Смываю твоё дерьмо в унитаз сраный подонок.",
         "Не удалил: проверка безопасности не прошла.",
     ]
     assert message.bot.deleted == []
@@ -336,6 +339,33 @@ async def test_busy_command_middleware_replies_and_keeps_session(as_user, monkey
 
     assert called is False
     assert message.answers[-1]["text"] == "Ещё думаю."
+    assert session.get() is not None
+    assert session.get().last_question == "Что держит?"
+
+
+@pytest.mark.asyncio
+async def test_busy_pebble_middleware_reaches_handler_and_keeps_session(as_user, monkeypatch):
+    session.start(mode="probe", domain="everyday")
+    session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
+    session.get().pending_answer_event_id = "already-in-llm"
+    session.persist()
+    message = _FakeMessage("/pebble")
+    message.from_user = SimpleNamespace(id=as_user)
+    called = False
+
+    async def handler(event, data):
+        nonlocal called
+        called = True
+        await handlers.cmd_pebble(event)
+
+    monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
+    monkeypatch.setattr(middleware, "Message", _FakeMessage)
+
+    await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
+
+    assert called is True
+    assert message.answers[-1]["text"] == "Больно."
     assert session.get() is not None
     assert session.get().last_question == "Что держит?"
 
