@@ -332,7 +332,27 @@ def test_corrupt_metadata_and_unusable_structure_are_not_candidates(as_user):
     for item in books.list_books():
         books.set_reminder_enabled(str(item["id"]), item["id"] == book["id"])
     directory = books.vault.books_dir() / book["id"]
-    (directory / "structure.json").unlink()
+    structure_path = directory / "structure.json"
+    structure_path.write_text("{broken", encoding="utf-8")
+    assert books.get_book(book["id"]) is None
+    with pytest.raises(books.BookError, match="индекс повреждён"):
+        books.choose_excerpt(book["id"])
+    assert books.choose_for_reminder() is None
+
+    structure_path.write_text(
+        json.dumps(
+            {
+                "version": books.STRUCTURE_VERSION,
+                "parser_version": books.PARSER_VERSION,
+                "source_format": "md",
+                "source_sha256": book["source_sha256"],
+                "content_sha256": book["content_sha256"],
+                "chapters": [{"id": "not-a-chapter"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert books.get_book(book["id"]) is None
     assert books.choose_for_reminder() is None
 
     bad_dir = books.vault.books_dir() / "aaaaaaaaaaaaaaaa"

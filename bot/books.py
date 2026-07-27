@@ -883,17 +883,78 @@ def scan_books() -> list[dict]:
     return result
 
 
-def _structure_ready(metadata: dict) -> bool:
+def _read_structure(metadata: dict) -> dict | None:
     book_id = str(metadata.get("id") or "")
     path = vault.books_dir() / book_id / "structure.json"
-    return (
-        str(metadata.get("source_format") or "").casefold() in SUPPORTED_FORMATS
-        and metadata.get("structure_version") == STRUCTURE_VERSION
-        and metadata.get("parser_version") == PARSER_VERSION
-        and path.exists()
-        and not path.is_symlink()
-        and not path.parent.is_symlink()
-    )
+    if (
+        str(metadata.get("source_format") or "").casefold() not in SUPPORTED_FORMATS
+        or metadata.get("structure_version") != STRUCTURE_VERSION
+        or metadata.get("parser_version") != PARSER_VERSION
+        or not path.exists()
+        or path.is_symlink()
+        or path.parent.is_symlink()
+    ):
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != STRUCTURE_VERSION
+        or data.get("parser_version") != PARSER_VERSION
+        or data.get("source_format") != metadata.get("source_format")
+        or data.get("source_sha256") != metadata.get("source_sha256")
+        or data.get("content_sha256") != metadata.get("content_sha256")
+        or not isinstance(data.get("chapters"), list)
+        or not data["chapters"]
+    ):
+        return None
+
+    chapter_ids: set[str] = set()
+    has_text = False
+    for chapter in data["chapters"]:
+        if not isinstance(chapter, dict):
+            return None
+        chapter_id = str(chapter.get("id") or "")
+        paragraphs = chapter.get("paragraphs")
+        sections = chapter.get("sections")
+        if (
+            not CHAPTER_ID_RE.fullmatch(chapter_id)
+            or chapter_id in chapter_ids
+            or not isinstance(chapter.get("title"), str)
+            or not isinstance(chapter.get("source_locator"), str)
+            or not isinstance(paragraphs, list)
+            or not isinstance(sections, list)
+        ):
+            return None
+        chapter_ids.add(chapter_id)
+        for section in sections:
+            if (
+                not isinstance(section, dict)
+                or not isinstance(section.get("title"), str)
+                or not isinstance(section.get("level"), int)
+                or not isinstance(section.get("source_locator"), str)
+            ):
+                return None
+        for paragraph in paragraphs:
+            if (
+                not isinstance(paragraph, dict)
+                or not isinstance(paragraph.get("text"), str)
+                or not paragraph["text"].strip()
+                or not isinstance(paragraph.get("section_path"), list)
+                or not all(
+                    isinstance(value, str) for value in paragraph["section_path"]
+                )
+                or not isinstance(paragraph.get("source_locator"), str)
+            ):
+                return None
+            has_text = True
+    return data if has_text else None
+
+
+def _structure_ready(metadata: dict) -> bool:
+    return _read_structure(metadata) is not None
 
 
 def ingest(data: bytes, filename: str, *, uploader_uid: int, at: datetime | None = None) -> dict:
@@ -1049,22 +1110,13 @@ def reindex_saved_book(book_id: str, *, at: datetime | None = None) -> dict:
 
 
 def _load_structure(book_id: str) -> dict:
-    metadata = get_book(book_id)
-    if metadata is None:
+    safe_id = str(book_id)
+    if not BOOK_ID_RE.fullmatch(safe_id):
         raise BookError("Книга не найдена или требует переиндексации.")
-    path = vault.books_dir() / book_id / "structure.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise BookError("Структурный индекс книги повреждён.") from exc
-    if (
-        not isinstance(data, dict)
-        or data.get("version") != STRUCTURE_VERSION
-        or data.get("parser_version") != PARSER_VERSION
-        or data.get("source_sha256") != metadata.get("source_sha256")
-        or not isinstance(data.get("chapters"), list)
-    ):
-        raise BookError("Структурный индекс книги устарел.")
+    metadata = _read_metadata(_metadata_path(safe_id))
+    data = _read_structure(metadata) if metadata is not None else None
+    if data is None:
+        raise BookError("Книга не найдена или структурный индекс повреждён.")
     return data
 
 
