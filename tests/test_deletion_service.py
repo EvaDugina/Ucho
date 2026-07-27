@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
-from bot import session, userctx, users, vault
+from bot import session, session_log, userctx, users, vault
 from bot.errors import VaultError
 from bot.services import deletion_service
 
@@ -23,16 +25,23 @@ def test_delete_current_user_data_only_removes_current_user_and_keeps_registry(a
     other_uid = as_user + 10_000
     other_note = userctx.root_for(other_uid) / "00_raw" / "notes" / "other.md"
     _write(other_note, "other user data\n")
+    users.add_user(as_user, by=1)
     users.add_user(other_uid, by=as_user)
     users_before = users.USERS_FILE.read_text(encoding="utf-8")
 
     result = deletion_service.delete_current_user_data()
 
-    assert result.deleted is True
+    assert result.cleared is True
     assert result.uid == as_user
-    assert not current_root.exists()
+    assert current_root.exists()
+    assert not current_note.exists()
+    assert (current_root / "00_raw" / "sessions").is_dir()
+    assert (current_root / "00_raw" / "qna").is_dir()
+    assert (current_root / "03_personality").is_dir()
+    assert (current_root / "_index.md").exists()
     assert other_note.exists()
     assert users.USERS_FILE.read_text(encoding="utf-8") == users_before
+    assert users.is_allowed(as_user)
     assert session.get() is None
 
 
@@ -67,3 +76,65 @@ def test_delete_current_user_data_commit_is_scoped(as_user):
     assert all(line.startswith(f"users/{as_user}/") for line in changed)
     assert not any(line.startswith(f"users/{other_uid}/") for line in changed)
     assert other_note.exists()
+    assert current_root.exists()
+    assert not (current_root / "00_raw" / "notes" / "to-delete.md").exists()
+
+
+def test_delete_current_user_data_uses_git_wrap_push_attempt(as_user, tmp_path):
+    if not vault._git_available():
+        pytest.skip("git недоступен")
+
+    remote = tmp_path / "vault-remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    vault._git("remote", "remove", "origin", check=False)
+    vault._git("remote", "add", "origin", str(remote))
+    try:
+        current_root = userctx.user_root()
+        _write(current_root / "00_raw" / "notes" / "to-delete.md", "delete me\n")
+
+        deletion_service.delete_current_user_data()
+
+        local_head = vault._git("rev-parse", "HEAD").stdout.strip()
+        remote_head = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/main"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+        assert remote_head == local_head
+    finally:
+        vault._git("remote", "remove", "origin", check=False)
+
+
+def test_collect_chat_message_ids_from_logs_and_recent_window(as_user):
+    session_log.append(
+        session_id="chat-purge",
+        role="assistant",
+        kind="question",
+        text="Что стереть?",
+        message_id=100,
+        reply_to_message_id=None,
+    )
+    session_log.append(
+        session_id="chat-purge",
+        role="user",
+        kind="answer",
+        text="всё",
+        message_id=105,
+        reply_to_message_id=100,
+    )
+
+    ids = deletion_service.collect_chat_message_ids(
+        extra_ids=[110, None],
+        fill_until_message_id=112,
+        fill_window=5,
+    )
+
+    assert ids == [100, 105, 108, 109, 110, 111, 112]

@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import face_actions, handlers, middleware, moods, qmap, session, session_log, sessions, userctx, vault
+from bot import face_actions, handlers, middleware, moods, qmap, questions, session, session_log, sessions, userctx, vault
+from bot.config import DOMAINS
 from bot.errors import LLMError, VaultError
 from bot.services import conversation_service, note_service
 
@@ -37,7 +38,7 @@ def test_runtime_indexes_derive_from_session_log(as_user):
     entry = qmap.find_by_message_id(10)
     assert entry["q_num"] == 3
     assert entry["text"] == "Что тебя держит?"
-    assert session_log.recent_questions(1)[0]["n"] == 3
+    assert questions.recent(1)[0]["n"] == 3
     assert sessions.find_by_message_id(11) == "s-derive"
 
 
@@ -97,6 +98,8 @@ def test_session_json_keeps_queued_answer_and_restore(as_user):
 class _FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
+        self.deleted: list[dict] = []
+        self.fail_delete_ids: set[int] = set()
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = SimpleNamespace(
@@ -105,6 +108,12 @@ class _FakeBot:
         )
         self.sent.append({"chat_id": chat_id, "text": text, "kwargs": kwargs, "message": msg})
         return msg
+
+    async def delete_message(self, chat_id, message_id):
+        if int(message_id) in self.fail_delete_ids:
+            raise RuntimeError("telegram refused")
+        self.deleted.append({"chat_id": chat_id, "message_id": int(message_id)})
+        return True
 
 
 class _FakeMessage:
@@ -159,22 +168,106 @@ async def test_leta_invalid_confirmation_keeps_data(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_leta_confirmation_deletes_current_user_data(as_user, monkeypatch):
+async def test_leta_confirmation_clears_current_user_data(as_user, monkeypatch):
     root = userctx.user_root()
     marker = root / "00_raw" / "notes" / "delete.md"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("удалить\n", encoding="utf-8")
+    stale_files = [
+        root / "00_raw" / "sessions" / "old.jsonl",
+        root / "00_raw" / "qna" / "old.md",
+        root / "01_mood" / "events" / "old.jsonl",
+        root / "01_mood" / "timeseries" / "old.jsonl",
+        root / "02_concepts" / "everyday" / "old.md",
+        root / "02_digest" / "old.md",
+        root / "03_personality" / "liked_replies.json",
+        root / "_state.json",
+    ]
+    for stale in stale_files:
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        if stale.name == "_state.json":
+            stale.write_text('{"last_q_num": 99}\n', encoding="utf-8")
+        else:
+            stale.write_text("stale\n", encoding="utf-8")
     session.start(mode="probe", domain="everyday")
     session.set_question("Что забыть?", "everyday", q_num=vault.next_q_num())
     monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+    monkeypatch.setattr(handlers, "LETA_CHAT_PURGE_DELAY_SECONDS", 0)
     message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
     message.from_user = SimpleNamespace(id=as_user)
 
     await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
 
-    assert not root.exists()
+    assert root.exists()
+    assert not marker.exists()
+    assert (root / "00_raw" / "sessions").is_dir()
+    assert not any((root / "00_raw" / "sessions").glob("*.jsonl"))
+    assert not any((root / "00_raw" / "qna").glob("*.md"))
+    assert not any((root / "00_raw" / "notes").glob("*.md"))
+    assert not any((root / "01_mood" / "events").glob("*.jsonl"))
+    assert not any((root / "01_mood" / "timeseries").glob("*.jsonl"))
+    assert not any((root / "02_concepts").rglob("*.md"))
+    assert not any((root / "02_digest").glob("*.md"))
+    assert not (root / "03_personality" / "liked_replies.json").exists()
+    assert not (root / "_state.json").exists()
+    assert not (root / "_session.json").exists()
+    assert (root / "_index.md").exists()
+    assert (root / ".obsidian" / "graph.json").exists()
+    assert (root / "03_personality" / "about.md").exists()
+    assert (root / "03_personality" / "mood.md").exists()
+    for domain in DOMAINS:
+        assert (root / "02_profile" / f"{domain}.md").exists()
     assert session.get() is None
-    assert "Удалил рабочую базу" in message.answers[-1]["text"]
+    assert [a["text"] for a in message.answers] == [
+        "Смываю твоё дерьмо в унитаз сраный подонок.",
+        "Кончил.",
+    ]
+    deleted_ids = {item["message_id"] for item in message.bot.deleted}
+    assert {77, 800}.issubset(deleted_ids)
+    assert 801 not in deleted_ids
+
+
+@pytest.mark.asyncio
+async def test_leta_failure_keeps_error_message_and_does_not_purge_chat(as_user, monkeypatch):
+    monkeypatch.setattr(handlers.users, "is_allowed", lambda uid: True)
+
+    def fail_delete():
+        raise VaultError("no")
+
+    monkeypatch.setattr(handlers.deletion_service, "delete_current_user_data", fail_delete)
+    message = _FakeMessage(f"/leta УДАЛИТЬ {as_user}")
+    message.from_user = SimpleNamespace(id=as_user)
+
+    await handlers.cmd_leta(message, SimpleNamespace(args=f"УДАЛИТЬ {as_user}"))
+
+    assert [a["text"] for a in message.answers] == [
+        "Смываю твоё дерьмо в унитаз сраный подонок.",
+        "Не удалил: проверка безопасности не прошла.",
+    ]
+    assert message.bot.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_leta_chat_purge_deletes_in_order_with_delay_and_ignores_failures(monkeypatch):
+    delays: list[float] = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(handlers.asyncio, "sleep", fake_sleep)
+    bot = _FakeBot()
+    bot.fail_delete_ids = {2}
+    message = _FakeMessage(bot=bot)
+    message.from_user = SimpleNamespace(id=123)
+
+    await handlers._delete_chat_messages_after_leta(
+        message,
+        [3, None, 1, 2, 2],
+        delete_delay=0.05,
+    )
+
+    assert [item["message_id"] for item in bot.deleted] == [1, 3]
+    assert delays == [0.05, 0.05, 0.05]
 
 
 @pytest.mark.asyncio
@@ -195,7 +288,7 @@ async def test_start_only_clears_session_and_keeps_data(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_busy_text_and_echo_merge_into_start_clearable_queue(as_user, monkeypatch):
+async def test_busy_text_and_echo_merge_into_cancelable_queue(as_user, monkeypatch):
     session.start(mode="probe", domain="everyday")
     session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
     session.get().pending_answer_event_id = "already-in-llm"
@@ -216,13 +309,13 @@ async def test_busy_text_and_echo_merge_into_start_clearable_queue(as_user, monk
     assert text_msg.answers[-1]["text"] == "Ещё думаю."
     assert echo_msg.answers[-1]["text"] == "Ещё думаю."
 
-    start_msg = _FakeMessage("/start")
-    start_msg.from_user = SimpleNamespace(id=as_user)
-    await handlers.cmd_start(start_msg)
+    cancel_msg = _FakeMessage("/cancel")
+    cancel_msg.from_user = SimpleNamespace(id=as_user)
+    await handlers.cmd_cancel(cancel_msg)
 
     assert session.get().queued_answer is None
     assert session.get().pending_answer_event_id == "already-in-llm"
-    assert "Смыл отложенный ответ" in start_msg.answers[-1]["text"]
+    assert cancel_msg.answers[-1]["text"] == "Я удалил тебя из памяти"
 
 
 @pytest.mark.asyncio
@@ -252,20 +345,19 @@ async def test_busy_command_middleware_replies_and_keeps_session(as_user, monkey
 
 
 @pytest.mark.asyncio
-async def test_busy_start_middleware_clears_queue_and_keeps_pending(as_user, monkeypatch):
+async def test_busy_pebble_middleware_reaches_handler_and_keeps_session(as_user, monkeypatch):
     session.start(mode="probe", domain="everyday")
     session.set_question("Что держит?", "everyday", q_num=vault.next_q_num())
     session.get().pending_answer_event_id = "already-in-llm"
-    session.enqueue_answer("досланный текст", source="text")
     session.persist()
-    message = _FakeMessage("/start")
+    message = _FakeMessage("/pebble")
     message.from_user = SimpleNamespace(id=as_user)
     called = False
 
     async def handler(event, data):
         nonlocal called
         called = True
-        await handlers.cmd_start(event)
+        await handlers.cmd_pebble(event)
 
     monkeypatch.setattr(middleware.users, "is_allowed", lambda uid: True)
     monkeypatch.setattr(middleware.users, "is_owner", lambda uid: True)
@@ -274,10 +366,9 @@ async def test_busy_start_middleware_clears_queue_and_keeps_pending(as_user, mon
     await middleware.AccessMiddleware()(handler, message, {"event_from_user": message.from_user})
 
     assert called is True
+    assert message.answers[-1]["text"] == "Больно."
     assert session.get() is not None
-    assert session.get().queued_answer is None
-    assert session.get().pending_answer_event_id == "already-in-llm"
-    assert "Смыл отложенный ответ" in message.answers[-1]["text"]
+    assert session.get().last_question == "Что держит?"
 
 
 @pytest.mark.asyncio
@@ -347,10 +438,6 @@ async def test_drain_queued_answer_uses_old_question_snapshot(as_user, monkeypat
         return conversation_service.ReactionPayload(
             q_num=999,
             mode="probe",
-            area="practice",
-            category="lifestyle",
-            theme="быт",
-            theme_key="practice/lifestyle/быт",
             domain="everyday",
             text="ответ",
             bot_mood=None,
@@ -386,7 +473,7 @@ async def test_probe_does_not_call_llm_when_session_log_required_fails(as_user, 
     async def fake_process_answer(**kwargs):
         nonlocal called
         called = True
-        return {"worldview_observations": [], "reaction": "вижу"}
+        return {"observations": [], "reaction": "вижу"}
 
     def fail_append_required(**kwargs):
         raise VaultError("session log is unavailable")
@@ -510,9 +597,7 @@ async def test_ask_next_llm_error_is_silent_to_user(as_user, monkeypatch):
 
     monkeypatch.setattr(handlers, "ask_next", fail_ask_next)
 
-    await handlers._send_next_question(
-        bot, 123, target={"area": "practice", "category": "lifestyle", "theme": "быт"}
-    )
+    await handlers._send_next_question(bot, 123, domain="everyday")
 
     assert bot.sent == []
 
@@ -525,13 +610,7 @@ async def test_ask_next_commits_after_successful_question(as_user, monkeypatch):
 
     async def fake_ask_next(**kwargs):
         _ = kwargs
-        return {
-            "question": "Что держит форму?",
-            "area": "practice",
-            "category": "lifestyle",
-            "theme": "быт",
-            "theme_key": "practice/lifestyle/быт",
-        }
+        return {"question": "Что держит форму?", "domain": "everyday"}
 
     monkeypatch.setattr(handlers, "ask_next", fake_ask_next)
     monkeypatch.setattr(
@@ -540,9 +619,7 @@ async def test_ask_next_commits_after_successful_question(as_user, monkeypatch):
         lambda message, allow_empty=False: commits.append(message) or "sha",
     )
 
-    await handlers._send_next_question(
-        bot, 123, target={"area": "practice", "category": "lifestyle", "theme": "быт"}
-    )
+    await handlers._send_next_question(bot, 123, domain="everyday")
 
     assert bot.sent
     assert commits == ["ask question"]
@@ -556,7 +633,7 @@ async def test_ingest_note_reacts_without_saved_status(as_user, monkeypatch):
 
     async def fake_process_answer(**kwargs):
         captured.update(kwargs)
-        return {"worldview_observations": [], "reaction": "Вот теперь слышу трещину.", "user_delta": {}}
+        return {"observations": [], "reaction": "Вот теперь слышу трещину.", "user_delta": {}}
 
     monkeypatch.setattr(note_service, "process_answer", fake_process_answer)
 
@@ -609,7 +686,7 @@ async def test_ingest_note_does_not_call_llm_when_note_write_fails(as_user, monk
     async def fake_process_answer(**kwargs):
         nonlocal called
         called = True
-        return {"worldview_observations": [], "reaction": "не должен"}
+        return {"observations": [], "reaction": "не должен"}
 
     monkeypatch.setattr(note_service.vault, "append_note", fail_append_note)
     monkeypatch.setattr(note_service, "process_answer", fake_process_answer)
