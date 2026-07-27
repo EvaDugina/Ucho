@@ -1,116 +1,69 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
-
 ## Что это
 
-Telegram-бот «Ухо» (персона «Иуда из Кариота»), который ведёт граф психо-философского
-портрета пользователя в Obsidian-vault. На каждый ответ извлекает концепты-черновики,
-пишет сырые Q&A и (раз в неделю, отдельным проходом) собирает выверенный граф связей.
-Стадия проекта — **POC B**. Рабочий язык кода, документации и промптов — русский.
+Telegram-бот «Ухо» с персоной «Иуда из Кариота». Стадия — **POC B**. Бот хранит
+raw-разговор, производные mood/personality и общую библиотеку книг. Рабочий язык
+кода, документации и промптов — русский.
 
-Авторитетная глубокая документация — [.docs/technical.md](.docs/technical.md)
-(устройство, контракты данных, безопасность, stage-ограничения). README местами
-отстаёт от кода по списку команд — источник правды по командам это
-`bot/main.py::BOT_COMMANDS` и хэндлеры в `bot/handlers.py`.
+Канонические документы:
 
-## Запуск и разработка
+- `.docs/product.md` — цель;
+- `.docs/functionality.md` — требования и приёмка;
+- `.docs/technical.md` — реализация;
+- `.docs/demo.md` — демо.
 
-Всё исполняется в Docker — локальный запуск скриптов/тестов вне контейнера запрещён
-(см. глобальный `~/.Codex/AGENTS.md`). Live-LLM работает через AITunnel:
+## Запуск и тесты
 
-```powershell
-docker compose up -d                 # поднять bot
-docker compose logs -f bot           # логи бота
-docker compose up -d --build bot     # пересобрать только bot после правок кода
-```
-
-Конфиг — `.env` (из `.env.example`). `VAULT_HOST_PATH` обязателен: путь к vault на
-хосте, пробрасывается в контейнер как `/vault`; `AITUNNEL_API_KEY` — ключ AITunnel.
-`.env` под `.gitignore` и **закрыт для чтения** — не пытайся его прочитать.
-
-## Тесты
-
-Pytest-набор гоняется внутри Docker на изолированном vault:
+Любое выполнение кода — только в Docker. `.env` закрыт для чтения.
 
 ```powershell
+docker compose up -d --build bot
+docker compose logs -f bot
 docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot pytest
+docker compose run --rm bot ruff check bot scripts tests
 ```
 
-Ad-hoc e2e-сценарии тоже запускай только через `docker compose run --rm ... bot`.
+После изменений `bot/`, `prompts/`, `scripts/`, `tests/` image нужно пересобрать:
+эти каталоги копируются на build-стадии.
 
-После правок кода всегда пересобирай образ (`--build`) — `bot/`, `prompts/`, `scripts/`
-и `tests/` копируются внутрь образа на build-стадии, а не монтируются.
+## Архитектура
 
-## Архитектура (большая картина)
+- `00_raw/sessions` — единственный источник истины переписки.
+- Обработка текста: raw commit → mood → process_answer → personality deltas →
+  реакция.
+- Mood работает через один LLM-классификатор для всех доверенных.
+- Personality delta валидна только с дословной quote из raw.
+- `/about` сводит pending-дельты в нейтральный профиль и отдельным вызовом
+  озвучивает его персоной.
+- Per-user маршрутизация — `userctx`/`contextvar`, данные в `users/<uid>`.
+- Общие книги — `books/`; toggles/scores/pending — в `_state.json` пользователя.
+- `_session.json` хранит только recovery/queue runtime.
+- `.psycho/` содержит whitelist и технический лог.
 
-**Capture-first, две модели с разными ролями** — ключевой принцип:
-- **AITunnel live-модель** только *захватывает*: режимы `ask` / `process` /
-  `classify_mood` / `about_present`. Primary:
-  `qwen3-235b-a22b-2507`, fallback: `deepseek-v4-flash`. В `process` создаёт лишь черновые
-  концепты (`status: draft`) с evidence — **без связей и конфликтов**.
-- **Codex (вручную, НЕ в контейнере)** *собирает выверенные документы* двумя скиллами:
-  `.Codex/skills/reconcista/` — граф знаний (промоушн draft→stable, дедуп/слияние, связи,
-  реальные противоречия, `02_profile/`, MOC, теги, digest); `.Codex/skills/depersonalization/`
-  — портрет носителя (`03_personality/about.md`), анализ настроения (`03_personality/mood.md`),
-  психометрика (`03_personality/profile.md`), soft skills (`03_personality/softskills.md`),
-  граф `01_mood/`, `03_personality/user_prompt.md`. Live-модель для этого не используется.
+## Критичные инварианты
 
-**Хранилище — файлы, не БД.** Граф живёт в Obsidian-vault как Markdown:
-`00_raw/sessions/` (полный event-log сессий, источник истины переписки),
-`00_raw/qna/` (человекочитаемая Q&A-проекция), `02_concepts/<domain>/<slug>.md`,
-`02_profile/`, `02_digest/`, `03_personality/`, `01_mood/`.
-Служебное per-user: `_state.json` (счётчик Q/daily marker), `_session.json`
-(только активное runtime-состояние и pending refs, без полной истории).
+- Raw обязательно записывается до LLM. При ошибке pending ref остаётся для recovery.
+- Вопросы отправляются через `services/session_messages.py`, чтобы Telegram ID попал
+  в session-log.
+- Новые публичные каталоги пользователя ограничены `00_raw`, `01_mood`,
+  `01_personality`.
+- Не возвращать `qna`, `notes`, graph/concepts/MOC/profile/digest и psychometrics.
+- Список команд изменяется только вместе с каноническим списком в требованиях.
+- Неизвестные slash-команды не анализировать.
+- Пользовательский Git scope — `users/<uid>`; книжный — `books/`.
+- `/leta` удаляет только `users/<uid>` и не трогает общую библиотеку.
+- EPUB/FB2 — недоверенный ввод: без извлечения ZIP на диск, с лимитами и traversal
+  проверками.
+- Ошибки не показывают stacktrace в Telegram.
 
-**Multi-user изоляция через contextvar.** У каждого доверенного — своя база в
-`<vault>/users/<uid>/`. Текущий пользователь хранится в `bot/userctx.py` (request-scoped
-contextvar, async-безопасно); `AccessMiddleware` ставит его на каждый update. Весь
-data-слой (`vault`/`graph`/`moc`/`session`) маршрутизирует пути через
-`userctx.user_root()` — uid не прокидывается через сигнатуры. `.psycho/` (manifest,
-log, users.json) и `.git/` — **глобальные** на корне, НЕ per-user.
+## Миграция
 
-**Поток обработки ответа:** сообщение → `00_raw/sessions` (до LLM) → `01_mood`
-→ `llm.process_answer` (возвращает ТОЛЬКО анализ) → `_apply_processed` пишет
-`00_raw/qna`, `02_concepts`, `02_profile`, `03_personality/deltas` кодом:
-raw дословно, slug через `validation.slugify`, create-vs-update через дедуп
-(`resolve_slug` + Jaccard) → всё под `vault.git_wrap` транзакцией → MOC rebuild.
-
-**Дневной вопрос:** `bot/scheduler.py` (APScheduler, cron) → `send_daily_question`
-заходит в обход Telegram-входа, по каждому пользователю в цикле.
-
-**Restart-safety:** на старте `selfcheck.run()` (механический, без LLM) +
-`session.restore_all()` + recovery незавершённых ответов (`pending_answer_event_id`
-в `00_raw/sessions`, двухфазный коммит). Polling не выставляет
-`drop_pending_updates` — офлайн-сообщения доезжают.
-
-## Критичные инварианты (легко сломать)
-
-- **LLM в `process` отдаёт только `observations`** (анализ + следующий вопрос). Запись
-  в граф, идентичность концептов, slug, create/update — целиком на коде. Не возвращай
-  LLM к генерации slug/raw_entry/связей — контракт в `prompts/process.md` строгий.
-- **`_send_question()` в `handlers.py` — единственная точка отправки любого вопроса**
-  (главный, кларифер, `/echo`, `/requestion`, recovery). Только она пишет bot-событие
-  в `00_raw/sessions`; `qmap/questions/sessions` — восстановимые обёртки.
-  Отправляешь вопрос мимо неё — reply/`/answer N` на него не разрезолвятся.
-- **Не меняй `slug` во frontmatter существующих концептов** — сломаешь wikilink-связи.
-- **`stable`-концепты (выверены reconcista) имеют русский `slug`=имя файла=заголовок.**
-  `safe_slug` бота принимает только ASCII — это намеренный write-barrier: бот физически
-  не может перезаписать `stable`. Новые цитаты к ним доносит reconcista из `00_raw/`.
-- **Один git-коммит = данные одного пользователя** (поддерево `users/<uid>/`). `.psycho/`
-  выведена из-под git. Пары коммитов `psycho(<uid>): before <op>` / `psycho(<uid>): <op>`.
-- **Бот не удаляет отдельные файлы графа автоматически**: чистка концептов/профилей —
-  руками в Obsidian или выверенным агентским проходом. Единственное штатное удаление —
-  подтверждённая команда `/leta`, которая стирает всю рабочую базу текущего
-  пользователя `users/<uid>/` и не трогает `.psycho/`, `.git/` и чужие данные.
-- **Все exceptions перехвачены** — пользователю уходит нейтральная фраза, stacktrace
-  в stderr + `.psycho/log.md`. Не выпускай trace в чат.
+`scripts/migrate_simplified_storage.py` без аргументов — preview, `--apply` —
+пользовательские Git-транзакции. Автоматически при старте не запускать.
 
 ## Соглашения
 
-- Комментарии — про намерение и ограничения (`# что и почему`), не про очевидный код.
-  Новые модули имеют module-docstring с угрозами/инвариантами.
-- При смене стадии или значимых решениях актуализируй `.docs/*` (формат Vibe++,
-  ведётся скиллом `brunelleschi-plus`) — это часть контракта проекта.
-- Промпты (`prompts/`) несут персону «Иуда из Кариота» в формулировках; JSON-контракт
-  и механику персона не меняет.
+- Комментарии объясняют намерение и угрозы.
+- Значимые решения отражаются в `.docs/*` в формате Vibe++.
+- Persona в `prompts/iuda.md`; JSON-механику persona не меняет.

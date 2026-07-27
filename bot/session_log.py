@@ -1,8 +1,7 @@
 """Append-only полный лог сообщений активной сессии.
 
-`00_raw/sessions/<session_id>.jsonl` — канонический машинный event-log сессии:
-вопросы бота, команды/ответы пользователя и реакции Иуды. `00_raw/qna/*.md`
-остаётся человекочитаемой Q&A-проекцией для Obsidian/evidence.
+`00_raw/sessions/<session_id>.jsonl` — единственный источник истины: вопросы,
+ответы, заметки, реакции и книжные фрагменты.
 """
 from __future__ import annotations
 
@@ -40,12 +39,9 @@ def append(
     message_id: int | None = None,
     reply_to_message_id: int | None = None,
     q_num: int | None = None,
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-    theme_key: str | None = None,
     domain: str | None = None,
     bot_mood: str | None = None,
+    metadata: dict | None = None,
     required: bool = False,
 ) -> dict | None:
     """Дописать событие сообщения в `00_raw/sessions/<session_id>.jsonl`."""
@@ -68,19 +64,14 @@ def append(
             "role": role,
             "kind": kind,
             "telegram_message_id": telegram_mid,
-            # Back-compat: старые runtime-хелперы и тесты ещё читают message_id.
-            "message_id": telegram_mid,
             "reply_to_message_id": (
                 int(reply_to_message_id) if reply_to_message_id is not None else None
             ),
             "q_num": q_num,
-            "area": area,
-            "category": category,
-            "theme": theme,
-            "theme_key": theme_key,
             "bot_mood": bot_mood,
             "text": text or "",
             "source": "telegram",
+            "metadata": dict(metadata or {}),
         }
         if domain is not None:
             entry["domain"] = domain
@@ -179,7 +170,10 @@ def find_assistant_event_by_message_id(message_id: int | None) -> dict | None:
             continue
         if e.get("telegram_message_id", e.get("message_id")) != mid:
             continue
-        if e.get("kind") in {"question", "reaction", "regen", "service", "reminder"}:
+        if e.get("kind") in {
+            "question", "book_question", "reaction", "regen",
+            "service", "reminder", "book_reminder",
+        }:
             return e
     return None
 
@@ -294,22 +288,13 @@ def find_question_by_message_id(message_id: int) -> dict | None:
             continue
         if e.get("telegram_message_id", e.get("message_id")) != mid:
             continue
-        if e.get("kind") not in {"question", "reaction", "service", "reminder"}:
+        if e.get("kind") not in {"question", "book_question", "reaction", "service"}:
             continue
         text = question_field_text(e)
-        if e.get("kind") == "reminder":
-            source = find_question_event_by_q_num(
-                e.get("q_num"), session_id=e.get("session_id"), kind="question"
-            )
-            text = question_field_text(source) or text
         return {
             "message_id": mid,
             "q_num": e.get("q_num"),
             "text": text,
-            "area": e.get("area") or "",
-            "category": e.get("category") or "",
-            "theme": e.get("theme") or "",
-            "theme_key": e.get("theme_key") or "",
             "domain": e.get("domain") or "",
             "answered": _is_answered(e.get("q_num")),
             "ts": e.get("ts"),
@@ -336,10 +321,6 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "message_id": e.get("telegram_message_id", e.get("message_id")),
             "q_num": target,
             "text": question_field_text(e),
-            "area": e.get("area") or "",
-            "category": e.get("category") or "",
-            "theme": e.get("theme") or "",
-            "theme_key": e.get("theme_key") or "",
             "domain": e.get("domain") or "",
             "answered": _is_answered(target),
             "ts": e.get("ts"),
@@ -351,10 +332,6 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "message_id": fallback.get("telegram_message_id", fallback.get("message_id")),
             "q_num": target,
             "text": question_field_text(fallback),
-            "area": fallback.get("area") or "",
-            "category": fallback.get("category") or "",
-            "theme": fallback.get("theme") or "",
-            "theme_key": fallback.get("theme_key") or "",
             "domain": fallback.get("domain") or "",
             "answered": _is_answered(target),
             "ts": fallback.get("ts"),
@@ -362,31 +339,6 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "bot_mood": fallback.get("bot_mood"),
         }
     return None
-
-
-def recent_questions(limit: int = 25) -> list[dict]:
-    out: list[dict] = []
-    seen: set[int] = set()
-    for e in reversed(iter_events()):
-        if e.get("role") != "assistant" or e.get("kind") != "question":
-            continue
-        qn = e.get("q_num")
-        if qn is None or qn in seen:
-            continue
-        seen.add(int(qn))
-        out.append({
-            "n": int(qn),
-            "area": e.get("area") or "",
-            "category": e.get("category") or "",
-            "theme": e.get("theme") or "",
-            "theme_key": e.get("theme_key") or "",
-            "domain": e.get("domain") or "",
-            "text": e.get("text") or "",
-            "ts": e.get("ts"),
-        })
-        if len(out) >= limit:
-            break
-    return list(reversed(out))
 
 
 def question_field_text(event: dict | None) -> str:

@@ -1,9 +1,4 @@
-"""Отправка session-сообщений бота + запись в канонический event-log.
-
-Это публичная transport-утилита для handlers/recovery/daily: она знает про
-Telegram HTML, qmap/questions/session bookkeeping и обязательный session-log.
-Сценарная логика (что именно сказать) живёт в сервисах выше.
-"""
+"""Единая отправка session-сообщений с обязательной raw-записью."""
 from __future__ import annotations
 
 import html
@@ -12,9 +7,8 @@ from datetime import datetime
 from aiogram import Bot
 from aiogram.types import Message
 
-from .. import face_actions, qmap, questions, session, session_log
+from .. import face_actions, session, session_log
 from ..validation import safe_chat_html
-from ..worldview_taxonomy import coerce_target, get_area, get_category, legacy_domain_target
 
 DOMAIN_LABELS = {
     "ethics": "Этика",
@@ -28,10 +22,7 @@ DOMAIN_LABELS = {
     "knowledge": "Знание",
     "work": "Труд",
 }
-
 TG_MSG_LIMIT = 4000
-USER_DOMAIN = "user"
-USER_DOMAIN_LABEL = "пользовательский"
 
 _FACE_POSTSCRIPTS = {
     "раскачивание": "Я трясу эту клетку, пока она не признается, что жива.",
@@ -60,18 +51,13 @@ _FACE_POSTSCRIPTS = {
 
 
 def face_postscript(bot_mood: str | None) -> str:
-    """Короткий художественный P.S. выбранной маски, без служебного label."""
-    if not bot_mood:
-        return ""
-    return _FACE_POSTSCRIPTS.get(bot_mood, "")
+    return _FACE_POSTSCRIPTS.get(bot_mood or "", "")
 
 
 def with_face_signature(text: str, bot_mood: str | None) -> str:
     body = safe_chat_html(text)
     postscript = face_postscript(bot_mood)
-    if not postscript:
-        return body
-    return f"{body}\n\n<i>{html.escape(postscript)}</i>"
+    return f"{body}\n\n<i>{html.escape(postscript)}</i>" if postscript else body
 
 
 def question_field_with_face(text: str, bot_mood: str | None) -> str:
@@ -79,57 +65,11 @@ def question_field_with_face(text: str, bot_mood: str | None) -> str:
     return text
 
 
-def _target_from_values(
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-    domain: str | None = None,
-) -> dict | None:
-    if area and get_area(area):
-        return coerce_target(area, category, theme)
-    legacy = legacy_domain_target(domain)
-    if legacy:
-        return legacy
-    return None
-
-
-def topic_label(
-    *,
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-    domain: str | None = None,
-) -> str:
-    if domain == USER_DOMAIN:
-        return USER_DOMAIN_LABEL
-    target = _target_from_values(area, category, theme, domain)
-    if target:
-        cat = get_category(target["area"], target["category"])
-        category_title = cat.title if cat else target["category"]
-        return f"{target['area_title']} / {category_title} / {target['theme']}"
-    if domain:
-        return DOMAIN_LABELS.get(domain, domain)
-    return "unknown"
-
-
-def format_q(
-    q_num: int,
-    mode: str,
-    domain: str = "",
-    question_text: str = "",
-    *,
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-) -> str:
-    label = topic_label(area=area, category=category, theme=theme, domain=domain)
+def format_q(q_num: int, mode: str, domain: str = "", question_text: str = "", **_: object) -> str:
+    label = DOMAIN_LABELS.get(domain, domain or "на выбор")
     mode_part = "" if mode == "probe" else f" · {mode}"
-    head = f"Q{q_num}{mode_part} · <i>{html.escape(label)}</i>"
-    safe_q = question_text or ""
-    if len(safe_q) > 3500:
-        safe_q = safe_q[:3500].rstrip() + "…"
-    body = html.escape(safe_q)
-    return f"{head}\n\n<code>{body}</code>"
+    body = question_text[:3500].rstrip() + ("…" if len(question_text) > 3500 else "")
+    return f"Q{q_num}{mode_part} · <i>{html.escape(label)}</i>\n\n<code>{html.escape(body)}</code>"
 
 
 def split_for_telegram(text: str) -> list[str]:
@@ -139,8 +79,7 @@ def split_for_telegram(text: str) -> list[str]:
     rest = text
     while len(rest) > TG_MSG_LIMIT:
         cut = rest.rfind("\n", 0, TG_MSG_LIMIT)
-        if cut < 1000:
-            cut = TG_MSG_LIMIT
+        cut = cut if cut >= 1000 else TG_MSG_LIMIT
         chunks.append(rest[:cut].rstrip())
         rest = rest[cut:].lstrip()
     if rest:
@@ -155,10 +94,6 @@ async def send_question(
     q_num: int,
     mode: str,
     domain: str = "",
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-    theme_key: str | None = None,
     text: str = "",
     suffix: str = "",
     plain: bool = False,
@@ -166,8 +101,9 @@ async def send_question(
     admin_controls: bool = False,
     action_context: dict | None = None,
     event_kind: str | None = None,
-) -> Message | None:
-    """Отправить вопрос/реакцию и обязательно записать assistant event."""
+    metadata: dict | None = None,
+    **_: object,
+) -> Message:
     token: str | None = None
     if plain and admin_controls and bot_mood and action_context:
         token = face_actions.create_action(
@@ -183,70 +119,44 @@ async def send_question(
             reply_to_user_message_id=action_context.get("reply_to_user_message_id"),
             parent_token=action_context.get("parent_token"),
         )
-
-    if plain:
-        body = with_face_signature(text, bot_mood)
-    else:
-        body = format_q(q_num, mode, domain, text, area=area, category=category, theme=theme)
+    body = with_face_signature(text, bot_mood) if plain else format_q(q_num, mode, domain, text)
     if suffix:
         body += suffix
     sent = await bot.send_message(chat_id, body, parse_mode="HTML")
-    try:
-        qmap.append(
-            sent.message_id,
-            q_num,
-            text,
-            domain,
-            at=getattr(sent, "date", None),
-            area=area,
-            category=category,
-            theme=theme,
-            theme_key=theme_key,
-        )
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception("failed to record question in qmap (q_num=%s)", q_num)
-    if not plain:
-        questions.record(q_num, domain or theme_key or "", text)
-    s = session.get()
-    if s is not None:
-        log_reply_to = None
-        if plain and action_context:
-            log_reply_to = action_context.get("reply_to_user_message_id")
-        s.add_message_id(sent.message_id)
-        s.record_assistant(text, at=getattr(sent, "date", None))
+    current = session.get()
+    if current is not None:
+        current.add_message_id(sent.message_id)
         session_log.append_required(
-            session_id=s.id,
+            session_id=current.id,
             role="assistant",
             kind=event_kind or ("reaction" if plain else "question"),
             text=text,
             at=getattr(sent, "date", None),
-            message_id=getattr(sent, "message_id", None),
-            reply_to_message_id=log_reply_to,
+            message_id=sent.message_id,
+            reply_to_message_id=(
+                action_context.get("reply_to_user_message_id")
+                if plain and action_context
+                else None
+            ),
             q_num=q_num,
-            area=area,
-            category=category,
-            theme=theme,
-            theme_key=theme_key,
             domain=domain,
             bot_mood=bot_mood,
+            metadata=metadata,
         )
     if token:
-        face_actions.set_message(token, getattr(sent, "message_id", None), at=getattr(sent, "date", None))
+        face_actions.set_message(token, sent.message_id, at=getattr(sent, "date", None))
     return sent
 
 
 def event_with_face(event: dict, bot_mood: str) -> str:
-    text = str(event.get("text") or "")
-    kind = event.get("kind")
-    q_num = event.get("q_num")
-    domain = event.get("domain") or "everyday"
-    area = event.get("area") or ""
-    category = event.get("category") or ""
-    theme = event.get("theme") or ""
-    if kind == "question" and q_num:
-        return format_q(int(q_num), "probe", domain, text, area=area, category=category, theme=theme)
-    return with_face_signature(text, bot_mood)
+    if event.get("kind") in {"question", "book_question"} and event.get("q_num"):
+        return format_q(
+            int(event["q_num"]),
+            "probe",
+            str(event.get("domain") or ""),
+            str(event.get("text") or ""),
+        )
+    return with_face_signature(str(event.get("text") or ""), bot_mood)
 
 
 def now() -> datetime:

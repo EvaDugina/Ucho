@@ -149,7 +149,6 @@ LLM_MODEL_FALLBACKS = _parse_model_list(
 
 LLM_MODEL_PROCESS = _model_from_env(_model_env("PROCESS"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_MOOD = _model_from_env(_model_env("MOOD"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
-LLM_MODEL_PSYCH = _model_from_env(_model_env("PSYCH"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_ASK = _model_from_env(_model_env("ASK"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_ABOUT = _model_from_env(_model_env("ABOUT"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_REACTION = _model_from_env(_model_env("REACTION"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
@@ -157,7 +156,6 @@ LLM_MODEL_FAST = _model_from_env(_model_env("FAST"), _MODEL_FAST, provider=_MODE
 
 LLM_FALLBACK_PROCESS = _parse_model_list(_fallback_env("PROCESS"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_MOOD = _parse_model_list(_fallback_env("MOOD"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
-LLM_FALLBACK_PSYCH = _parse_model_list(_fallback_env("PSYCH"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_ASK = _parse_model_list(_fallback_env("ASK"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_ABOUT = _parse_model_list(_fallback_env("ABOUT"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_REACTION = _parse_model_list(_fallback_env("REACTION"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
@@ -195,12 +193,6 @@ STARTUP_RECOVERY_ENABLED = _env_bool("STARTUP_RECOVERY_ENABLED", not DEBUG)
 # только метаданные (uid, q_num, длины). LOG_LEVEL=DEBUG включать осознанно и не на проде.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
-# Мульти-методный анализ ответа (сравнение методов оценки настроения/состояния):
-# гоняется ТОЛЬКО для владельца, пишет разбор в 01_Мироощущение/mood/analysis/ и durable-ряд
-# 01_Мироощущение/mood/timeseries/. Это экспериментальный режим (OWNER-тестирование) — можно
-# выключить без пересборки. false → остаётся только базовый разбор настроения в чат.
-ANALYSIS_ENABLED = _env_bool("ANALYSIS_ENABLED", True)
-
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
 DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
@@ -209,9 +201,12 @@ DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
 DAILY_REMINDER_START = os.getenv("DAILY_REMINDER_START", "23:00")
 DAILY_REMINDER_END = os.getenv("DAILY_REMINDER_END", "01:00")
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
+BOOKS_PATH = VAULT_PATH / "books"
+BOOK_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+BOOK_EXTRACTED_MAX_BYTES = 60 * 1024 * 1024
+UPLOAD_PENDING_SECONDS = 10 * 60
 
-# Legacy domain list for old graph/tests/migrations. New question/runtime target is
-# WORLDVIEW_AREAS/CATEGORIES/THEMES in bot.worldview_taxonomy.
+# Темы используются только для навигации `/ask` и metadata raw-события.
 DOMAINS = (
     "ethics",
     "aesthetics",
@@ -227,9 +222,6 @@ DOMAINS = (
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-# Служебная папка внутри vault — наша «приватная» зона.
-# Юзер не должен в ней копаться в Obsidian; это manifest + лог + (на будущее)
-# migration-proposal.
+# Служебная папка внутри vault: whitelist и нейтральный технический лог.
 PSYCHO_META_DIR = VAULT_PATH / ".psycho"
-MANIFEST_PATH = PSYCHO_META_DIR / "manifest.json"
 LOG_PATH = PSYCHO_META_DIR / "log.md"

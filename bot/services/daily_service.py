@@ -1,16 +1,16 @@
-"""Daily-question use case without dependency on handlers internals."""
+"""Ежедневный вопрос без мировоззренческого графа."""
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass
 
 from aiogram import Bot
 
-from .. import mood_file, moods, session, userctx, users, vault
-from ..config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, OWNER_TELEGRAM_ID
+from .. import books, mood_file, moods, session, userctx, users, vault
+from ..config import ALLOWED_TELEGRAM_IDS, DAILY_TZ, DOMAINS, OWNER_TELEGRAM_ID
 from ..errors import LLMError
 from ..llm import ask_next
-from ..worldview_taxonomy import choose_random_target, coerce_target
 from .session_messages import question_field_with_face, send_question
 
 log = logging.getLogger(__name__)
@@ -29,16 +29,9 @@ def daily_targets() -> list[int]:
     return sorted(targets)
 
 
-async def _send_next_question(bot: Bot, chat_id: int, target: dict | None = None) -> int | None:
-    s = session.get()
-    if s is None:
-        s = session.start(mode="probe", target=target)
-    target = coerce_target(
-        (target or {}).get("area"),
-        (target or {}).get("category"),
-        (target or {}).get("theme"),
-    ) if target else choose_random_target()
-    log.info("worldview target selected for daily question: %s", target["theme_key"])
+async def _send_next_question(bot: Bot, chat_id: int, domain: str | None = None) -> int | None:
+    s = session.get() or session.start(mode="probe")
+    selected_domain = domain if domain in DOMAINS else random.choice(tuple(DOMAINS))
     try:
         await bot.send_chat_action(chat_id, "typing")
     except Exception:
@@ -46,15 +39,17 @@ async def _send_next_question(bot: Bot, chat_id: int, target: dict | None = None
 
     bot_mood = None
     try:
-        mv = moods.session_mood(getattr(s, "mood_trajectory", []) or [], mood_file.baseline())
-        bot_mood = moods.pick_bot_mood(mv)
+        mood_vector = moods.session_mood(
+            getattr(s, "mood_trajectory", []) or [],
+            mood_file.baseline(),
+        )
+        bot_mood = moods.pick_bot_mood(mood_vector)
     except Exception:
         log.exception("daily mood pick failed (non-fatal)")
 
     try:
         result = await ask_next(
-            target=target,
-            context_atoms="",
+            domain=selected_domain,
             recent_raw="",
             hint=None,
             bot_mood=bot_mood,
@@ -63,18 +58,29 @@ async def _send_next_question(bot: Bot, chat_id: int, target: dict | None = None
     except LLMError:
         log.warning("daily ask_next LLM error; user reply suppressed")
         return None
+
     q_num = vault.next_q_num()
-    session.set_question(question_field_with_face(result["question"], bot_mood), target=result, q_num=q_num)
-    s.main_question = result["question"]
+    question = str(result["question"])
+    session.set_question(
+        question_field_with_face(question, bot_mood),
+        domain=selected_domain,
+        q_num=q_num,
+        metadata={"source": "daily", "topic": selected_domain},
+    )
+    s.main_question = question
     s.main_q_num = q_num
-    s.clarifier_count = 0
     session.persist()
     await send_question(
-        bot, chat_id,
-        q_num=q_num, mode=s.mode, area=result["area"], category=result["category"],
-        theme=result["theme"], theme_key=result["theme_key"], text=result["question"],
+        bot,
+        chat_id,
+        q_num=q_num,
+        mode=s.mode,
+        domain=selected_domain,
+        text=question,
         bot_mood=bot_mood,
+        metadata={"source": "daily", "topic": selected_domain},
     )
+    books.expire_pending_reminder()
     return q_num
 
 
@@ -84,14 +90,14 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
         log.info("daily skipped: already sent today uid=%s", uid)
         return False
     session.start(mode="probe")
-    q_num = await _send_next_question(bot, uid, target=None)
+    q_num = await _send_next_question(bot, uid)
     if q_num is None:
         return False
-    s = session.get()
+    current = session.get()
     vault.mark_daily_sent_details(
         DAILY_TZ,
         q_num=q_num,
-        session_id=s.id if s is not None else None,
+        session_id=current.id if current is not None else None,
     )
     vault.commit_all("daily question")
     return True

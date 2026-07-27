@@ -7,8 +7,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from .config import DAILY_HOUR, DAILY_TZ
-from .services.daily_service import daily_targets, send_daily_question
 from .services import reminder_service
+from .services.daily_service import daily_targets, send_daily_question
 
 log = logging.getLogger(__name__)
 

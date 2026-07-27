@@ -21,7 +21,7 @@ MAX_ACTIONS = 200
 
 
 def _root() -> Path:
-    return vault.general_dir()
+    return vault.face_dir()
 
 
 def _actions_file() -> Path:
@@ -29,7 +29,7 @@ def _actions_file() -> Path:
 
 
 def _feedback_file() -> Path:
-    return vault.mood_dir() / "feedback.jsonl"
+    return _root() / "feedback.jsonl"
 
 
 def _liked_file() -> Path:
@@ -142,10 +142,6 @@ def create_action(
         "q_num": q_num,
         "answered_q_num": answered_q_num,
         "domain": question_event.get("domain") if question_event else None,
-        "area": question_event.get("area") if question_event else None,
-        "category": question_event.get("category") if question_event else None,
-        "theme": question_event.get("theme") if question_event else None,
-        "theme_key": question_event.get("theme_key") if question_event else None,
         "kind": kind,
         "bot_mood": moods.coerce_bot_mood(bot_mood),
         "assistant_event_id": None,
@@ -173,10 +169,6 @@ def create_remask_action(event: dict, *, parent_token: str | None = None, at: ob
         "q_num": event.get("q_num"),
         "answered_q_num": None,
         "domain": event.get("domain"),
-        "area": event.get("area"),
-        "category": event.get("category"),
-        "theme": event.get("theme"),
-        "theme_key": event.get("theme_key"),
         "kind": "remask",
         "bot_mood": event.get("bot_mood"),
         "assistant_event_id": event.get("event_id"),
@@ -295,10 +287,6 @@ def record_user_score(token: str, score: float, reason: str, at: object | None =
         "message_id": rec.get("message_id"),
         "action_token": token,
         "bot_mood": rec.get("bot_mood"),
-        "area": rec.get("area"),
-        "category": rec.get("category"),
-        "theme": rec.get("theme"),
-        "theme_key": rec.get("theme_key"),
         "kind": rec.get("kind"),
         "score": float(score),
         "reason": reason,
@@ -333,10 +321,6 @@ def set_liked(token: str, liked: bool = True, at: object | None = None) -> Optio
         "assistant_message_id": rec.get("message_id"),
         "reply_to_user_message_id": rec.get("reply_to_user_message_id"),
         "bot_mood": rec.get("bot_mood"),
-        "area": rec.get("area"),
-        "category": rec.get("category"),
-        "theme": rec.get("theme"),
-        "theme_key": rec.get("theme_key"),
         "kind": rec.get("kind"),
         "assistant_event_id": rec.get("assistant_event_id"),
         "user_event_id": rec.get("user_event_id"),

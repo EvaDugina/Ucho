@@ -1,50 +1,23 @@
-"""Application-сценарий обработки ответа в открытой probe-сессии."""
+"""Обработка ответа: raw → mood → personality delta → реакция."""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 
-from .. import about, analysis, lexicon, mood_file, moods, session, session_log, vault, worldview
-from ..config import ANALYSIS_ENABLED
+from .. import about, mood_file, moods, session, session_log, vault
+from ..config import DOMAINS
 from ..llm import classify_mood, process_answer
-from ..practice_analysis import (
-    analyze_practice,
-    append_report as append_practice_report,
-    merge_into_processed as merge_practice_into_processed,
-)
-from ..sensation_analysis import (
-    analyze_sensation,
-    append_report as append_sensation_report,
-    merge_into_processed as merge_sensation_into_processed,
-)
-from ..understanding_analysis import (
-    analyze_understanding,
-    append_report as append_understanding_report,
-    merge_into_processed as merge_understanding_into_processed,
-)
-from ..values_norms_analysis import (
-    analyze_values_norms,
-    append_report as append_values_norms_report,
-    merge_into_processed as merge_values_norms_into_processed,
-)
-from ..worldview_taxonomy import coerce_target, get_area, legacy_domain_target
 from .answer_service import apply_processed
 from .session_messages import question_field_with_face
 
 log = logging.getLogger(__name__)
-
-_DIRECTION_RU = {"auto": "на себя", "hetero": "на других/мир", "neutral": "нейтрально"}
 
 
 @dataclass
 class ReactionPayload:
     q_num: int
     mode: str
-    area: str
-    category: str
-    theme: str
-    theme_key: str
+    domain: str
     text: str
     bot_mood: str | None
     answered_q_num: int | None
@@ -53,98 +26,11 @@ class ReactionPayload:
     user_text: str
     session_context: str
     reply_to_user_message_id: int | None
-    domain: str = ""
     mood_message: str | None = None
 
 
-def real_domain(d: str | None) -> str | None:
-    return d if legacy_domain_target(d) is not None else None
-
-
-def _target_from_values(
-    *,
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
-    domain: str | None = None,
-    fallback: dict | None = None,
-) -> dict:
-    if area and get_area(area):
-        return coerce_target(area, category, theme)
-    legacy = legacy_domain_target(domain or area)
-    if legacy:
-        return legacy
-    if fallback:
-        return coerce_target(fallback.get("area"), fallback.get("category"), fallback.get("theme"))
-    return coerce_target(None, None, None)
-
-
-def format_mood(mv: dict, bot_mood: str | None, vad: dict | None = None) -> str:
-    lines = [
-        "🎭 Настроение",
-        f"эмоция: {mv.get('quality', '—')}",
-        f"валентность: {mv.get('valence')} ({mv.get('sign')})",
-        f"энергия: {mv.get('energy')} (arousal {mv.get('arousal')})",
-        f"доминирование: {mv.get('dominance_label')} ({mv.get('dominance')})",
-        f"направленность: {_DIRECTION_RU.get(mv.get('direction'), mv.get('direction'))}",
-        f"устойчивость: {mv.get('stability')}",
-        f"лицо: {bot_mood or '—'}",
-    ]
-    if isinstance(vad, dict):
-        lines.append(
-            f"лексикон VAD: v={vad.get('valence')} a={vad.get('arousal')} "
-            f"d={vad.get('dominance')} (слов: {vad.get('n')})"
-        )
-    return "\n".join(lines)
-
-
-def recent_raw_text(days: int = 7, max_chars: int = 8000) -> str:
-    cutoff = datetime.now() - timedelta(days=days)
-    rows = []
-    for e in vault.iter_history():
-        try:
-            dt = datetime.fromisoformat(f"{e['date']}T{e['time']}:00")
-        except Exception:
-            continue
-        if dt >= cutoff:
-            rows.append(e)
-    parts: list[str] = []
-    for e in rows[-50:]:
-        parts.append(
-            f"Q{e['n']} · {e['date']} {e['time']} · {e.get('theme_key') or e.get('domain')}\n"
-            f"Q: {e['question']}\nA: {e['answer']}"
-        )
-    text = "\n\n".join(parts)
-    if len(text) > max_chars:
-        text = text[-max_chars:]
-    return text
-
-
-def context_for_target(area: str | None = None, category: str | None = None, theme: str | None = None) -> str:
-    target = _target_from_values(area=area, category=category, theme=theme)
-    atoms = worldview.find_atoms(area=target["area"], category=target["category"], limit=40)
-    if not atoms:
-        atoms = worldview.find_atoms(area=target["area"], limit=40)
-    if not atoms:
-        atoms = worldview.find_atoms(limit=40)
-    return worldview.context_snapshot(atoms)
-
-
-def context_for_domain(domain: str | None) -> str:
-    """Legacy wrapper for old callers/tests."""
-    target = _target_from_values(domain=domain)
-    return context_for_target(target["area"], target["category"], target["theme"])
-
-
-def _coerce_datetime(value: object | None, fallback: datetime) -> datetime:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value:
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return fallback
-    return fallback
+def real_domain(value: str | None) -> str | None:
+    return value if value in DOMAINS else None
 
 
 async def process_probe_answer(
@@ -156,205 +42,108 @@ async def process_probe_answer(
     is_owner: bool = False,
     question: str | None = None,
     domain_hint: str | None = None,
-    area: str | None = None,
-    category: str | None = None,
-    theme: str | None = None,
     q_num: int | None = None,
-    asked_at: object | None = None,
     session_context_snapshot: str | None = None,
     mode: str | None = None,
+    event_kind: str = "answer",
+    metadata: dict | None = None,
 ) -> ReactionPayload | None:
-    """Обработать уже принятый user text и вернуть payload реакции для отправки."""
-    s = session.get()
-    if s is None:
+    _ = is_owner
+    current = session.get()
+    if current is None:
         return None
-    if s.current_q_num is None and q_num is None:
-        log.warning("session has no current_q_num; assigning fresh")
-        s.current_q_num = vault.next_q_num()
-        session.persist()
-    active_q_num = q_num if q_num is not None else s.current_q_num
-    active_question = question if question is not None else s.last_question
-    active_target = _target_from_values(
-        area=area or s.last_area or s.area,
-        category=category or s.last_category or s.category,
-        theme=theme or s.last_theme or s.theme,
-        domain=domain_hint or s.last_domain or s.domain,
-    )
-    active_asked_at = _coerce_datetime(asked_at, s.asked_at)
-    active_mode = mode or s.mode
+    active_q_num = q_num if q_num is not None else current.current_q_num
     if active_q_num is None:
         active_q_num = vault.next_q_num()
-    s.current_q_num = active_q_num
-    s.last_question = active_question
-    s.last_area = active_target["area"]
-    s.last_category = active_target["category"]
-    s.last_theme = active_target["theme"]
-    s.last_theme_key = active_target["theme_key"]
-    s.last_domain = str(domain_hint or s.last_domain or "")
-    s.asked_at = active_asked_at
+    active_question = question if question is not None else current.last_question
+    active_domain = real_domain(domain_hint) or real_domain(current.last_domain) or "everyday"
+    active_mode = mode or current.mode
+
     event = session_log.append_required(
-        session_id=s.id,
+        session_id=current.id,
         role="user",
-        kind="answer",
+        kind=event_kind,
         text=text,
         at=at,
         message_id=message_id,
         reply_to_message_id=reply_to_message_id,
         q_num=active_q_num,
-        area=active_target["area"],
-        category=active_target["category"],
-        theme=active_target["theme"],
-        theme_key=active_target["theme_key"],
-        domain=domain_hint,
+        domain=active_domain,
+        metadata=metadata or current.question_metadata,
     )
-    s.pending_answer_event_id = event.get("event_id")
-    s.pending_answer = None
+    current.pending_answer_event_id = event["event_id"]
+    current.pending_answer = text
     session.persist()
-    s.record_user(text, at=at)
-    session_context = session_context_snapshot or s.render_transcript()
-    context_atoms = context_for_target(active_target["area"], active_target["category"], active_target["theme"])
+    vault.commit_all(f"raw {event_kind}")
 
-    mood_vec = None
-    bot_mood = None
-    vad = None
-    mood_message = None
-    analysis_results = None
-    if is_owner:
-        try:
-            vad = await lexicon.score(text)
-            per_msg = await classify_mood(
-                text, about.render_for_prompt(), vad=vad, session_context=session_context
-            )
-            s.record_mood(per_msg)
-            mood_vec = moods.session_mood(s.mood_trajectory, mood_file.baseline())
-            bot_mood = moods.pick_bot_mood(mood_vec)
-            mood_file.set_current(mood_vec, bot_mood)
-            try:
-                if ANALYSIS_ENABLED:
-                    results = await analysis.run_all(
-                        text, None, mood_vec=mood_vec, vad=vad, session_context=session_context,
-                    )
-                    analysis_results = results
-                    report = analysis.format_report(mood_vec, bot_mood, results)
-                    analysis.append_report(s.current_q_num, len(text), report)
-                    analysis.append_point(len(text), results)
-                    analysis.rebuild_chart()
-                else:
-                    mood_message = format_mood(mood_vec, bot_mood, vad)
-            except Exception:
-                log.exception("analysis report failed (non-fatal)")
-        except Exception:
-            log.exception("mood detection failed (non-fatal)")
+    session_context = session_context_snapshot or current.render_transcript()
+    mood_vec: dict | None = None
+    bot_mood: str | None = None
+    try:
+        per_message = await classify_mood(
+            text,
+            about.render_for_prompt(),
+            session_context=session_context,
+        )
+        current.record_mood(per_message)
+        mood_vec = moods.session_mood(current.mood_trajectory, mood_file.baseline())
+        bot_mood = moods.pick_bot_mood(mood_vec)
+        mood_file.set_current(mood_vec, bot_mood)
+    except Exception:
+        log.exception("mood detection failed (non-fatal)")
     if bot_mood is None:
         bot_mood = moods.random_bot_mood()
 
     result = await process_answer(
         question=active_question,
         answer=text,
-        area=active_target["area"],
-        category=active_target["category"],
-        theme=active_target["theme"],
-        context_atoms=context_atoms,
+        domain_hint=active_domain,
         bot_mood=bot_mood,
         session_context=session_context,
         mode=active_mode,
+        metadata=metadata or current.question_metadata,
     )
     moods.record_mask_frequency_draft(
         result.get("mask_frequency_draft"),
         bot_mood=bot_mood,
         at=at,
     )
-    if is_owner and ANALYSIS_ENABLED:
-        try:
-            sensation = await analyze_sensation(
-                text,
-                question=active_question,
-                session_context=session_context,
-                target=active_target,
-                mood_vec=mood_vec,
-                vad=vad,
-                method_results=analysis_results,
-            )
-            append_sensation_report(active_q_num, len(text), sensation)
-            result = merge_sensation_into_processed(result, sensation)
-        except Exception:
-            log.exception("sensation analysis failed (non-fatal)")
-        try:
-            understanding = await analyze_understanding(
-                text,
-                question=active_question,
-                session_context=session_context,
-                target=active_target,
-                mood_vec=mood_vec,
-                vad=vad,
-                method_results=analysis_results,
-            )
-            append_understanding_report(active_q_num, len(text), understanding)
-            result = merge_understanding_into_processed(result, understanding)
-        except Exception:
-            log.exception("understanding analysis failed (non-fatal)")
-        try:
-            values_norms = await analyze_values_norms(
-                text,
-                question=active_question,
-                session_context=session_context,
-                target=active_target,
-                mood_vec=mood_vec,
-                vad=vad,
-                method_results=analysis_results,
-            )
-            append_values_norms_report(active_q_num, len(text), values_norms)
-            result = merge_values_norms_into_processed(result, values_norms)
-        except Exception:
-            log.exception("values_norms analysis failed (non-fatal)")
-        try:
-            practice = await analyze_practice(
-                text,
-                question=active_question,
-                session_context=session_context,
-                target=active_target,
-                mood_vec=mood_vec,
-                vad=vad,
-                method_results=analysis_results,
-            )
-            append_practice_report(active_q_num, len(text), practice)
-            result = merge_practice_into_processed(result, practice)
-        except Exception:
-            log.exception("practice analysis failed (non-fatal)")
+    apply_processed(
+        result,
+        raw_event_id=event["event_id"],
+        original_answer=text,
+        at=at,
+    )
 
-    try:
-        apply_processed(result, active_q_num, active_asked_at, active_question, text, target=active_target, session_domain=domain_hint)
-    except Exception:
-        log.exception("apply_processed failed")
-
-    s.pending_answer = None
-    s.pending_answer_event_id = None
+    current.pending_answer = None
+    current.pending_answer_event_id = None
     session.persist()
+    if mood_vec:
+        moods.log_turn(
+            mood_vec,
+            bot_mood,
+            raw_event_id=event["event_id"],
+            session_id=current.id,
+            q_num=active_q_num,
+        )
 
-    if mood_vec and bot_mood:
-        moods.log_turn(mood_vec, bot_mood, vad=vad)
-
-    reaction = (result.get("reaction") or "").strip() or "Складно. Слишком складно."
-    answered_question = active_question
-    answered_q_num = active_q_num
-    new_n = vault.next_q_num()
-    session.set_question(question_field_with_face(reaction, bot_mood), target=active_target, q_num=new_n, domain=domain_hint)
-    session.persist()
+    reaction = str(result.get("reaction") or "").strip() or "Складно. Слишком складно."
+    new_q_num = vault.next_q_num()
+    session.set_question(
+        question_field_with_face(reaction, bot_mood),
+        active_domain,
+        q_num=new_q_num,
+    )
     return ReactionPayload(
-        q_num=new_n,
+        q_num=new_q_num,
         mode=active_mode,
-        area=active_target["area"],
-        category=active_target["category"],
-        theme=active_target["theme"],
-        theme_key=active_target["theme_key"],
-        domain=domain_hint or "",
+        domain=active_domain,
         text=reaction,
         bot_mood=bot_mood,
-        answered_q_num=answered_q_num,
-        answered_question=answered_question,
-        session_id=s.id,
+        answered_q_num=active_q_num,
+        answered_question=active_question,
+        session_id=current.id,
         user_text=text,
         session_context=session_context,
         reply_to_user_message_id=message_id,
-        mood_message=mood_message,
     )

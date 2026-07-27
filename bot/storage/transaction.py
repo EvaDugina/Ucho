@@ -5,13 +5,40 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from ..errors import VaultError
-from .git import _git_available, _git_commit, _git_head, _is_git_repo, _restore_scope, _scope, git_enabled
+from .git import (
+    _git_available,
+    _git_commit,
+    _git_head,
+    _is_git_repo,
+    _restore_scope,
+    _scope,
+    git_enabled,
+)
 from .log import append_log
 
 
 @contextmanager
 def git_wrap(op_name: str) -> Iterator[None]:
     """pre-commit -> write block -> post-commit with rollback on exceptions."""
+    scope, label = _scope()
+    with _git_wrap_scope(op_name, scope=scope, label=label):
+        yield
+
+
+@contextmanager
+def books_git_wrap(op_name: str) -> Iterator[None]:
+    """Транзакция, ограниченная общей директорией `books/`."""
+    with _git_wrap_scope(op_name, scope="books", label="books"):
+        yield
+
+
+@contextmanager
+def _git_wrap_scope(
+    op_name: str,
+    *,
+    scope: str | None,
+    label: str,
+) -> Iterator[None]:
     if not git_enabled():
         yield
         return
@@ -20,7 +47,6 @@ def git_wrap(op_name: str) -> Iterator[None]:
         yield
         return
 
-    scope, label = _scope()
     pre_sha = _git_commit(f"psycho({label}): before {op_name}", scope=scope) or _git_head()
     try:
         yield

@@ -1,6 +1,6 @@
 """Atomic write helpers.
 
-Все критичные файлы в vault (JSON state, концепты, manifest) пишутся через
+Все критичные JSON/Markdown-файлы в vault пишутся через
 ``atomic_write_text`` / ``atomic_write_json``: контент уходит в ``<path>.tmp``,
 fsync на ручку, потом ``os.replace(tmp, path)`` — атомарная подмена на NTFS и
 ext4. Это убирает риск битых файлов при:
@@ -9,8 +9,7 @@ ext4. Это убирает риск битых файлов при:
 * git pull/checkout или другой внешний sync, который иначе мог бы увидеть
   полу-записанный файл.
 
-Append-only логи (``00_raw/qna/YYYY-MM-DD.md``, ``.psycho/log.md``) не используют этот
-модуль — там append безопасен сам по себе.
+Session-log дописывается отдельно, а производные файлы заменяются атомарно.
 """
 from __future__ import annotations
 
@@ -52,3 +51,23 @@ def atomic_write_json(path: Path, obj: Any, indent: int = 2) -> None:
     """Записать JSON в файл атомарно. ``ensure_ascii=False`` для кириллицы."""
     text = json.dumps(obj, ensure_ascii=False, indent=indent)
     atomic_write_text(path, text + "\n")
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Атомарно записать бинарный файл (например, исходник книги)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    if tmp.exists():
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    with open(tmp, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, path)

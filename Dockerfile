@@ -26,19 +26,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
 
-# Dostoevsky ставим с --no-deps (его пин fasttext==0.9.2 не собирается на py3.12;
-# бинарники даёт fasttext-wheel из requirements.txt). Модель тянем на build: сначала
-# официальный архив, затем совместимый fallback из RuSentiment, если storage.b-labs.pro
-# недоступен. Если не вышло и это, провайдер тональности останется graceful-optional.
-COPY scripts/install_dostoevsky_model.py ./scripts/install_dostoevsky_model.py
-RUN pip install --no-cache-dir --no-deps dostoevsky==0.6.0 \
-    && python scripts/install_dostoevsky_model.py
-
 COPY bot/ ./bot/
 COPY prompts/ ./prompts/
 COPY scripts/ ./scripts/
 COPY deploy/ ./deploy/
 COPY tests/ ./tests/
+COPY pytest.ini ruff.toml ./
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

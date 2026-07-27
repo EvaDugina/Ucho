@@ -189,6 +189,15 @@ def commit_all(message: str, allow_empty: bool = False) -> Optional[str]:
     return _git_commit(f"psycho({label}): {message}", scope=scope, allow_empty=allow_empty)
 
 
+def commit_books(message: str, allow_empty: bool = False) -> Optional[str]:
+    """Зафиксировать только общую библиотеку, не захватывая users/*."""
+    return _git_commit(
+        f"psycho(books): {message}",
+        scope="books",
+        allow_empty=allow_empty,
+    )
+
+
 def _git_current_branch() -> Optional[str]:
     try:
         branch = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
@@ -252,9 +261,11 @@ def _restore_scope(sha: str, scope: Optional[str]) -> bool:
     if not _git_available() or not _is_git_repo() or not sha:
         return False
     try:
-        _git("checkout", sha, "--", scope)
+        tracked = _git("ls-tree", "-r", "--name-only", sha, "--", scope, check=False)
+        checkout = _git("checkout", sha, "--", scope, check=False)
+        _git("reset", sha, "--", scope, check=False)
         _git("clean", "-fd", scope, check=False)
-        return True
+        return checkout.returncode == 0 or not (tracked.stdout or "").strip()
     except subprocess.CalledProcessError as exc:
         log.error("git restore %s -- %s failed: %s", sha, scope, exc.stderr.strip())
         return False

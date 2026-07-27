@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
-from . import recovery, selfcheck, session, userctx, users, vault
+from . import recovery, session, userctx, users, vault
 from .config import (
     BACKGROUND_JOBS_ENABLED,
     LOG_LEVEL,
@@ -27,7 +27,6 @@ log = logging.getLogger("psycho.main")
 BOT_COMMANDS = [
     BotCommand(command="pebble", description="Бросить камень"),
     BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
-    BotCommand(command="echo", description="Свой вопрос: /echo <вопрос>"),
     BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
     BotCommand(command="about", description="Каким я тебя вижу"),
     BotCommand(command="regen", description="Перегенерировать reply-комментарий"),
@@ -36,6 +35,8 @@ BOT_COMMANDS = [
     BotCommand(command="leta", description="Омыть водами реки забвения черты своего лица"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Бесполезная как мизинец на отрубленной руке."),
+    BotCommand(command="upload", description="Добавить книгу в общую библиотеку"),
+    BotCommand(command="sea", description="Книжные разговоры и настройки"),
 ]
 
 # Админ-команды — только владельцу, добавляются к базовому набору в его меню.
@@ -69,13 +70,6 @@ async def main() -> None:
     # Контекст владельца + структура его данных (на случай свежего вольта).
     userctx.set_user(OWNER_TELEGRAM_ID)
     vault.ensure_layout()
-
-    # Механический self-check по всем пользователям (без LLM). Не валит старт.
-    try:
-        summary = selfcheck.run()
-        log.info("startup self-check: %s", summary)
-    except Exception:
-        log.exception("startup self-check failed (non-fatal)")
 
     # Восстановление сессий всех пользователей + список pending для recovery.
     restored = session.restore_all()
