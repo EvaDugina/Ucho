@@ -28,13 +28,10 @@ BOT_COMMANDS = [
     BotCommand(command="pebble", description="Бросить камень"),
     BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
     BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
-    BotCommand(command="about", description="Каким я тебя вижу"),
-    BotCommand(command="regen", description="Перегенерировать reply-комментарий"),
-    BotCommand(command="like", description="Отметить reply-реплику Иуды"),
-    BotCommand(command="remask", description="Выбрать маску reply-реплики"),
-    BotCommand(command="leta", description="Омыть водами реки забвения черты своего лица"),
+    BotCommand(command="about", description="Показать внутренний профиль"),
+    BotCommand(command="leta", description="Удалить личные данные"),
     BotCommand(command="help", description="Подсказка по командам"),
-    BotCommand(command="start", description="Бесполезная как мизинец на отрубленной руке."),
+    BotCommand(command="start", description="Начать работу с ботом"),
     BotCommand(command="upload", description="Добавить книгу в общую библиотеку"),
     BotCommand(command="sea", description="Книжные разговоры и настройки"),
 ]
@@ -73,8 +70,12 @@ async def main() -> None:
 
     # Восстановление сессий всех пользователей + список pending для recovery.
     restored = session.restore_all()
-    pending_uids = [uid for uid, s in restored if session.has_pending(s)]
-    queued_uids = [uid for uid, s in restored if session.has_queued(s)]
+    pending_uids = [
+        uid for uid, s in restored if users.is_allowed(uid) and session.has_pending(s)
+    ]
+    queued_uids = [
+        uid for uid, s in restored if users.is_allowed(uid) and session.has_queued(s)
+    ]
     for uid in pending_uids:
         log.info("pending_answer detected for uid=%s — recovery will run after startup", uid)
     for uid in queued_uids:

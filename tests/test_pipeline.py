@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import about, recovery, session, session_log, userctx
-from bot.errors import LLMError
+from bot import about, moods, recovery, session, session_log, userctx, vault
+from bot.errors import LLMError, VaultError
 from bot.services import conversation_service
 
 
@@ -20,9 +20,31 @@ def _mood():
     }
 
 
+def test_session_log_rejects_unsafe_session_id(as_user):
+    with pytest.raises(VaultError):
+        session_log.append_required(
+            session_id="../../escape",
+            role="user",
+            kind="answer",
+            text="Не должно записаться",
+        )
+    assert not (userctx.user_root() / "00_raw" / "escape.jsonl").exists()
+
+
+def test_user_git_transaction_requires_current_uid(as_user):
+    token = userctx._current_uid.set(None)
+    entered = False
+    try:
+        with pytest.raises(VaultError), vault.git_wrap("unsafe unscoped write"):
+            entered = True
+    finally:
+        userctx._current_uid.reset(token)
+    assert entered is False
+
+
 @pytest.mark.asyncio
 async def test_raw_before_llm_and_mood_personality_outputs(as_user, monkeypatch):
-    current = session.start(mode="probe", domain="ethics")
+    current = session.start(domain="ethics")
     session.set_question("Что для тебя честность?", "ethics", q_num=1)
     observed = {}
 
@@ -43,7 +65,6 @@ async def test_raw_before_llm_and_mood_personality_outputs(as_user, monkeypatch)
                     "confidence": 0.9,
                 }
             ],
-            "mask_frequency_draft": {"сомнение": 0.4},
         }
 
     monkeypatch.setattr(conversation_service, "classify_mood", classify)
@@ -70,7 +91,7 @@ async def test_raw_before_llm_and_mood_personality_outputs(as_user, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_failed_llm_keeps_raw_pending_for_recovery(as_user, monkeypatch):
-    current = session.start(mode="probe", domain="everyday")
+    current = session.start(domain="everyday")
     session.set_question("Что случилось?", "everyday", q_num=1)
 
     async def classify(*args, **kwargs):
@@ -87,11 +108,97 @@ async def test_failed_llm_keeps_raw_pending_for_recovery(as_user, monkeypatch):
     event_id = session.get().pending_answer_event_id
     assert session_log.find_event(event_id)["text"] == "Я устал."
     assert len(session_log.session_events(current.id)) == 1
+    mood_events = list((userctx.user_root() / "01_mood" / "events").glob("*.jsonl"))
+    assert len(mood_events) == 1
+    assert len(mood_events[0].read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_manual_question_preserves_current_session(as_user, monkeypatch):
+    from bot import handlers
+
+    current = session.start(domain="ethics")
+    session.set_question("Текущий вопрос", "ethics", q_num=1)
+
+    async def fail(*args, **kwargs):
+        raise LLMError("offline")
+
+    monkeypatch.setattr(handlers, "ask_next", fail)
+
+    class Bot:
+        async def send_chat_action(self, *args, **kwargs):
+            return None
+
+    with pytest.raises(LLMError):
+        await handlers._generate_question(Bot(), as_user, domain="work")
+    assert session.get().id == current.id
+    assert session.get().last_question == "Текущий вопрос"
+
+
+@pytest.mark.asyncio
+async def test_failed_daily_question_preserves_current_session(as_user, monkeypatch):
+    from bot.services import daily_service
+
+    current = session.start(domain="ethics")
+    session.set_question("Текущий вопрос", "ethics", q_num=1)
+
+    async def fail(*args, **kwargs):
+        raise LLMError("offline")
+
+    monkeypatch.setattr(daily_service, "ask_next", fail)
+    monkeypatch.setattr(daily_service.users, "is_allowed", lambda _: True)
+    monkeypatch.setattr(daily_service.vault, "daily_already_sent", lambda _: False)
+
+    class Bot:
+        async def send_chat_action(self, *args, **kwargs):
+            return None
+
+    assert await daily_service.send_daily_question(Bot(), as_user) is False
+    assert session.get().id == current.id
+    assert session.get().last_question == "Текущий вопрос"
+
+
+@pytest.mark.asyncio
+async def test_note_service_uses_current_process_contract(as_user, monkeypatch):
+    from bot.services import note_service
+
+    captured = {}
+
+    async def process(text, **kwargs):
+        captured.update({"text": text, **kwargs})
+        return None
+
+    monkeypatch.setattr(note_service, "process_probe_answer", process)
+    await note_service.ingest_note("Свободная заметка", message_id=42)
+    assert captured["text"] == "Свободная заметка"
+    assert captured["event_kind"] == "note"
+    assert "asked_at" not in captured
+
+
+@pytest.mark.asyncio
+async def test_busy_non_answer_generation_does_not_queue_old_session(
+    as_user,
+    monkeypatch,
+):
+    from bot import handlers
+
+    session.start(domain="ethics")
+    session.set_question("Старый вопрос", "ethics", q_num=1)
+    monkeypatch.setattr(handlers.ratelimit, "is_inflight", lambda _: True)
+    replies = []
+
+    async def answer(text):
+        replies.append(text)
+
+    message = SimpleNamespace(answer=answer)
+    await handlers._process_current_text(message, "Ответ не на тот вопрос")
+    assert session.has_queued() is False
+    assert replies == [handlers.ratelimit.BUSY_MESSAGE]
 
 
 @pytest.mark.asyncio
 async def test_recovery_processes_existing_event_without_duplicate(as_user, monkeypatch):
-    current = session.start(mode="probe", domain="everyday")
+    current = session.start(domain="everyday")
     session.set_question("Что случилось?", "everyday", q_num=1)
     event = session_log.append_required(
         session_id=current.id,
@@ -105,6 +212,20 @@ async def test_recovery_processes_existing_event_without_duplicate(as_user, monk
     current.pending_answer = "Я устал."
     current.pending_answer_event_id = event["event_id"]
     session.persist()
+    moods.log_turn(
+        {
+            **_mood(),
+            "valence": -0.3,
+            "arousal": 0.2,
+            "dominance_label": "low",
+            "stability": "adequate",
+            "n": 1,
+        },
+        raw_event_id=str(event["event_id"]),
+        session_id=current.id,
+        q_num=1,
+        at=event["ts"],
+    )
 
     async def classify(*args, **kwargs):
         return _mood()
@@ -120,7 +241,6 @@ async def test_recovery_processes_existing_event_without_duplicate(as_user, monk
                     "confidence": 0.8,
                 }
             ],
-            "mask_frequency_draft": {},
         }
 
     class BotStub:
@@ -129,6 +249,7 @@ async def test_recovery_processes_existing_event_without_duplicate(as_user, monk
 
     monkeypatch.setattr(recovery, "classify_mood", classify)
     monkeypatch.setattr(recovery, "process_answer", process)
+    monkeypatch.setattr(recovery.users, "is_allowed", lambda _: True)
     await recovery.process_pending_on_startup(BotStub(), as_user)
     user_events = [
         item for item in session_log.session_events(current.id) if item["role"] == "user"
@@ -136,13 +257,17 @@ async def test_recovery_processes_existing_event_without_duplicate(as_user, monk
     assert len(user_events) == 1
     assert session.get().pending_answer_event_id is None
     assert about.pending_deltas()[0]["raw_event_id"] == event["event_id"]
+    mood_events = list((userctx.user_root() / "01_mood" / "events").glob("*.jsonl"))
+    assert sum(
+        len(path.read_text(encoding="utf-8").splitlines()) for path in mood_events
+    ) == 1
 
 
 @pytest.mark.asyncio
 async def test_durable_queue_is_drained_with_original_anchor(as_user, monkeypatch):
     from bot import handlers
 
-    session.start(mode="probe", domain="ethics")
+    session.start(domain="ethics")
     session.set_question("Исходный вопрос", "ethics", q_num=12)
     session.enqueue_answer(
         "Ответ из очереди",
@@ -162,3 +287,27 @@ async def test_durable_queue_is_drained_with_original_anchor(as_user, monkeypatc
     assert captured["question"] == "Исходный вопрос"
     assert captured["q_num"] == 12
     assert session.has_queued() is False
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_user_removed_from_whitelist(as_user, monkeypatch):
+    current = session.start(domain="everyday")
+    session.set_question("Что случилось?", "everyday", q_num=1)
+    event = session_log.append_required(
+        session_id=current.id,
+        role="user",
+        kind="answer",
+        text="Ответ",
+        q_num=1,
+    )
+    current.pending_answer = "Ответ"
+    current.pending_answer_event_id = event["event_id"]
+    session.persist()
+    monkeypatch.setattr(recovery.users, "is_allowed", lambda _: False)
+
+    class Bot:
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("removed user must not receive recovery")
+
+    await recovery.process_pending_on_startup(Bot(), as_user)
+    assert session.get().pending_answer_event_id == event["event_id"]

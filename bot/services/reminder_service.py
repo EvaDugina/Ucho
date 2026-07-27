@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
-from .. import books, session, session_log, userctx, vault
+from .. import books, session, session_log, userctx, users, vault
 from ..config import DAILY_REMINDER_END, DAILY_REMINDER_START, DAILY_TZ
 from .daily_service import daily_targets
 
@@ -211,46 +211,54 @@ def due_planned_targets(*, now: datetime | None = None) -> list[int]:
 
 
 async def send_daily_reminder(bot: Bot, candidate: ReminderCandidate) -> bool:
+    if not users.is_allowed(candidate.uid):
+        log.info("book reminder skipped: uid=%s is not allowed", candidate.uid)
+        return False
     userctx.set_user(candidate.uid)
-    if session.has_unfinished_answer(session.get()):
-        log.info("book reminder skipped: unfinished answer uid=%s", candidate.uid)
-        return False
-    selected = books.choose_for_reminder()
-    if selected is None:
-        log.info("book reminder skipped: no enabled books uid=%s", candidate.uid)
-        return False
-    excerpt = books.choose_excerpt(selected["id"])
-    if not excerpt:
-        log.warning("book reminder skipped: empty book id=%s", selected["id"])
-        return False
-    title = str(selected.get("title") or selected["id"])
-    author = str(selected.get("author") or "Автор не указан")
-    text = (
-        f"<blockquote>{html.escape(excerpt)}</blockquote>\n"
-        f"<i>{html.escape(title)} — {html.escape(author)}</i>"
-    )
-    sent = await bot.send_message(candidate.uid, text, parse_mode="HTML")
-    event = session_log.append_required(
-        session_id=candidate.session_id,
-        role="assistant",
-        kind="book_reminder",
-        text=excerpt,
-        q_num=candidate.q_num,
-        message_id=sent.message_id,
-        metadata={
-            "book_id": selected["id"],
-            "title": title,
-            "author": author,
-            "source": "daily_reminder",
-        },
-    )
-    books.set_pending_reminder(
-        book=selected,
-        excerpt=excerpt,
-        message_id=sent.message_id,
-        raw_event_id=str(event["event_id"]),
-    )
-    return True
+    async with session.lock_for(candidate.uid):
+        if session.has_unfinished_answer(session.get()):
+            log.info("book reminder skipped: unfinished answer uid=%s", candidate.uid)
+            return False
+        selected = books.choose_for_reminder()
+        if selected is None:
+            log.info("book reminder skipped: no enabled books uid=%s", candidate.uid)
+            return False
+        try:
+            excerpt = books.choose_excerpt(selected["id"])
+        except books.BookError:
+            log.warning("book reminder skipped: unusable book id=%s", selected["id"])
+            return False
+        if not excerpt:
+            log.warning("book reminder skipped: empty book id=%s", selected["id"])
+            return False
+        title = str(selected.get("title") or selected["id"])
+        author = str(selected.get("author") or "Автор не указан")
+        text = (
+            f"<blockquote>{html.escape(excerpt)}</blockquote>\n"
+            f"<i>{html.escape(title)} — {html.escape(author)}</i>"
+        )
+        sent = await bot.send_message(candidate.uid, text, parse_mode="HTML")
+        event = session_log.append_required(
+            session_id=candidate.session_id,
+            role="assistant",
+            kind="book_reminder",
+            text=excerpt,
+            q_num=candidate.q_num,
+            message_id=sent.message_id,
+            metadata={
+                "book_id": selected["id"],
+                "title": title,
+                "author": author,
+                "source": "daily_reminder",
+            },
+        )
+        books.set_pending_reminder(
+            book=selected,
+            excerpt=excerpt,
+            message_id=sent.message_id,
+            raw_event_id=str(event["event_id"]),
+        )
+        return True
 
 
 async def send_due_daily_reminders(

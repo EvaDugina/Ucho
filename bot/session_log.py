@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 
 from . import userctx
-from .atomic import atomic_write_text
 from .errors import VaultError
 
 log = logging.getLogger(__name__)
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,80}")
 
 
 def _sessions_dir() -> Path:
@@ -40,14 +41,13 @@ def append(
     reply_to_message_id: int | None = None,
     q_num: int | None = None,
     domain: str | None = None,
-    bot_mood: str | None = None,
     metadata: dict | None = None,
     required: bool = False,
 ) -> dict | None:
     """Дописать событие сообщения в `00_raw/sessions/<session_id>.jsonl`."""
-    if not session_id:
+    if not session_id or not SESSION_ID_RE.fullmatch(session_id):
         if required:
-            raise VaultError("session log append failed: empty session_id")
+            raise VaultError("session log append failed: unsafe session_id")
         return None
     try:
         d = _sessions_dir()
@@ -68,7 +68,6 @@ def append(
                 int(reply_to_message_id) if reply_to_message_id is not None else None
             ),
             "q_num": q_num,
-            "bot_mood": bot_mood,
             "text": text or "",
             "source": "telegram",
             "metadata": dict(metadata or {}),
@@ -141,95 +140,6 @@ def find_event(event_id: str | None) -> dict | None:
     return None
 
 
-def find_event_by_message_id(
-    message_id: int | None,
-    *,
-    session_id: str | None = None,
-    role: str | None = None,
-) -> dict | None:
-    """Найти session event по Telegram message_id."""
-    if message_id is None:
-        return None
-    mid = int(message_id)
-    events = session_events(session_id) if session_id else iter_events()
-    for e in reversed(events):
-        if role is not None and e.get("role") != role:
-            continue
-        if e.get("telegram_message_id", e.get("message_id")) == mid:
-            return e
-    return None
-
-
-def find_assistant_event_by_message_id(message_id: int | None) -> dict | None:
-    """Найти bot-событие, на которое можно повесить/сменить лицо Иуды."""
-    if message_id is None:
-        return None
-    mid = int(message_id)
-    for e in reversed(iter_events()):
-        if e.get("role") != "assistant":
-            continue
-        if e.get("telegram_message_id", e.get("message_id")) != mid:
-            continue
-        if e.get("kind") in {
-            "question", "book_question", "reaction", "regen",
-            "service", "reminder", "book_reminder",
-        }:
-            return e
-    return None
-
-
-def set_event_bot_mood(event_id: str | None, bot_mood: str | None) -> dict | None:
-    """Точечная metadata-правка bot_mood у события.
-
-    Основной журнал остаётся append-first, но `/remask` — явная админская
-    корректировка выбранной маски уже отправленного bot-сообщения. Текст
-    события не переписываем; меняем только поле `bot_mood`.
-    """
-    if not event_id or ":" not in event_id:
-        return None
-    session_id, raw_no = event_id.rsplit(":", 1)
-    try:
-        line_no = int(raw_no)
-    except ValueError:
-        return None
-    path = _sessions_dir() / f"{session_id}.jsonl"
-    if not path.exists() or line_no < 1:
-        return None
-    lines = path.read_text(encoding="utf-8").splitlines()
-    idx = line_no - 1
-    if idx >= len(lines):
-        return None
-    try:
-        row = json.loads(lines[idx])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(row, dict):
-        return None
-    row.setdefault("event_id", event_id)
-    row["bot_mood"] = bot_mood
-    lines[idx] = json.dumps(row, ensure_ascii=False)
-    atomic_write_text(path, "\n".join(lines).rstrip() + "\n")
-    return row
-
-
-def find_question_event_by_q_num(
-    q_num: int | None,
-    *,
-    session_id: str | None = None,
-    kind: str | None = None,
-) -> dict | None:
-    if q_num is None:
-        return None
-    target = int(q_num)
-    events = session_events(session_id) if session_id else iter_events()
-    for e in reversed(events):
-        if e.get("role") == "assistant" and e.get("q_num") == target:
-            if kind is not None and e.get("kind") != kind:
-                continue
-            return e
-    return None
-
-
 def transcript(session_id: str | None, *, max_chars: int = 24_000) -> str:
     """LLM-friendly transcript из event-log сессии."""
     events = [e for e in session_events(session_id) if e.get("role") in {"assistant", "user"}]
@@ -281,29 +191,6 @@ def find_session_by_message_id(message_id: int) -> str | None:
     return None
 
 
-def find_question_by_message_id(message_id: int) -> dict | None:
-    mid = int(message_id)
-    for e in reversed(iter_events()):
-        if e.get("role") != "assistant":
-            continue
-        if e.get("telegram_message_id", e.get("message_id")) != mid:
-            continue
-        if e.get("kind") not in {"question", "book_question", "reaction", "service"}:
-            continue
-        text = question_field_text(e)
-        return {
-            "message_id": mid,
-            "q_num": e.get("q_num"),
-            "text": text,
-            "domain": e.get("domain") or "",
-            "answered": _is_answered(e.get("q_num")),
-            "ts": e.get("ts"),
-            "session_id": e.get("session_id"),
-            "bot_mood": e.get("bot_mood"),
-        }
-    return None
-
-
 def find_question_by_q_num(q_num: int) -> dict | None:
     target = int(q_num)
     fallback: dict | None = None
@@ -325,7 +212,6 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "answered": _is_answered(target),
             "ts": e.get("ts"),
             "session_id": e.get("session_id"),
-            "bot_mood": e.get("bot_mood"),
         }
     if fallback is not None:
         return {
@@ -336,17 +222,12 @@ def find_question_by_q_num(q_num: int) -> dict | None:
             "answered": _is_answered(target),
             "ts": fallback.get("ts"),
             "session_id": fallback.get("session_id"),
-            "bot_mood": fallback.get("bot_mood"),
         }
     return None
 
 
 def question_field_text(event: dict | None) -> str:
-    """Текст вопроса/якоря для дальнейшего ответа с выбранной маской.
-
-    В UI маска идёт отдельной HTML-строкой, а в question-field для LLM/raw —
-    обычным текстом. Это сохраняет информацию о лице без Telegram-разметки.
-    """
+    """Текст вопроса или реакции, служащий якорем следующего ответа."""
     if not isinstance(event, dict):
         return ""
     return str(event.get("text") or "")

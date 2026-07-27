@@ -8,7 +8,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from . import session_log, userctx
@@ -17,7 +17,6 @@ from .config import DAILY_TZ, VAULT_PATH
 
 log = logging.getLogger(__name__)
 
-Mode = Literal["probe"]
 SESSION_TRANSCRIPT_MAX_CHARS = 24_000
 
 
@@ -52,14 +51,11 @@ def _session_file() -> Path:
 
 @dataclass
 class Session:
-    mode: Mode = "probe"
     domain: Optional[str] = None
     last_question: str = ""
     last_domain: str = ""
     current_q_num: Optional[int] = None
-    asked_at: datetime = field(default_factory=datetime.now)
     main_question: str = ""
-    main_q_num: Optional[int] = None
     pending_answer: Optional[str] = None
     pending_answer_event_id: Optional[str] = None
     queued_answer: Optional[dict] = None
@@ -77,28 +73,24 @@ class Session:
         self.message_ids = (self.message_ids + [int(mid)])[-50:]
         _persist()
 
-    def record_assistant(self, text: str, at: object | None = None) -> None:
-        _ = (text, at)
-
-    def record_user(self, text: str, at: object | None = None) -> None:
-        _ = (text, at)
-
     def render_transcript(self, max_chars: int = SESSION_TRANSCRIPT_MAX_CHARS) -> str:
         return session_log.transcript(self.id, max_chars=max_chars)
 
     def to_dict(self) -> dict:
         data = asdict(self)
-        data["asked_at"] = self.asked_at.isoformat()
         data["message_ids"] = session_log.message_ids(self.id)[-50:] or self.message_ids[-50:]
         return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Session":
+        if not isinstance(data, dict):
+            raise ValueError("session root must be an object")
         valid = set(cls.__dataclass_fields__)
         clean = {key: value for key, value in data.items() if key in valid}
-        clean["mode"] = "probe"
-        clean["asked_at"] = _coerce_dt(clean.get("asked_at"))
-        return cls(**clean)
+        current = cls(**clean)
+        if not session_log.SESSION_ID_RE.fullmatch(current.id):
+            raise ValueError("unsafe session id")
+        return current
 
 
 _active: dict[int, Session] = {}
@@ -137,7 +129,13 @@ def restore_all() -> list[tuple[int, Session]]:
         return restored
     for directory in sorted(users_dir.iterdir()):
         path = directory / "_session.json"
-        if not directory.is_dir() or not directory.name.isdigit() or not path.exists():
+        if (
+            not directory.is_dir()
+            or directory.is_symlink()
+            or not directory.name.isdigit()
+            or not path.exists()
+            or path.is_symlink()
+        ):
             continue
         try:
             current = Session.from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -154,9 +152,9 @@ def get() -> Optional[Session]:
     return _active.get(uid) if uid is not None else None
 
 
-def start(mode: Mode = "probe", domain: Optional[str] = None, **_: object) -> Session:
+def start(domain: Optional[str] = None) -> Session:
     uid = userctx.current_uid()
-    current = Session(mode="probe", domain=domain, id=uuid.uuid4().hex)
+    current = Session(domain=domain, id=uuid.uuid4().hex)
     if uid is not None:
         _active[uid] = current
     _persist()
@@ -168,12 +166,6 @@ def clear() -> None:
     if uid is not None:
         _active.pop(uid, None)
     _persist()
-
-
-def close() -> bool:
-    existed = get() is not None
-    clear()
-    return existed
 
 
 def resume(session_id: str) -> Optional[Session]:
@@ -201,14 +193,11 @@ def resume(session_id: str) -> Optional[Session]:
         last,
     )
     current = Session(
-        mode="probe",
         domain=str(last.get("domain") or "") or None,
         last_question=str(last.get("text") or ""),
         last_domain=str(last.get("domain") or ""),
         current_q_num=int(last["q_num"]) if last.get("q_num") is not None else None,
-        asked_at=_coerce_dt(last.get("ts")),
         main_question=str(main.get("text") or ""),
-        main_q_num=int(main["q_num"]) if main.get("q_num") is not None else None,
         id=session_id,
         message_ids=session_log.message_ids(session_id)[-50:],
         question_metadata=dict(last.get("metadata") or {}),
@@ -274,7 +263,6 @@ def enqueue_answer(
             "domain": current.last_domain or current.domain,
             "origin_q_num": current.current_q_num,
             "session_id": current.id,
-            "mode": current.mode,
             "session_context": current.render_transcript(),
             "metadata": current.question_metadata,
         }
@@ -284,15 +272,6 @@ def enqueue_answer(
     current.queued_answer = queued
     _persist()
     return queued
-
-
-def clear_queued_answer(value: Optional[Session] = None) -> bool:
-    current = value or get()
-    if current is None or not has_queued(current):
-        return False
-    current.queued_answer = None
-    _persist()
-    return True
 
 
 def pop_queued_answer(value: Optional[Session] = None) -> Optional[dict]:
@@ -311,7 +290,6 @@ def set_question(
     q_num: Optional[int] = None,
     *,
     metadata: Optional[dict] = None,
-    **_: object,
 ) -> None:
     current = get()
     if current is None:
@@ -319,7 +297,6 @@ def set_question(
     current.last_question = question
     current.last_domain = domain or ""
     current.domain = domain
-    current.asked_at = datetime.now()
     current.question_metadata = dict(metadata or {})
     if q_num is not None:
         current.current_q_num = q_num

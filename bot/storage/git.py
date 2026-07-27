@@ -186,16 +186,10 @@ def _git_commit(
 
 def commit_all(message: str, allow_empty: bool = False) -> Optional[str]:
     scope, label = _scope()
+    if scope is None:
+        log.error("user-scoped commit skipped without current uid: %s", message)
+        return None
     return _git_commit(f"psycho({label}): {message}", scope=scope, allow_empty=allow_empty)
-
-
-def commit_books(message: str, allow_empty: bool = False) -> Optional[str]:
-    """Зафиксировать только общую библиотеку, не захватывая users/*."""
-    return _git_commit(
-        f"psycho(books): {message}",
-        scope="books",
-        allow_empty=allow_empty,
-    )
 
 
 def _git_current_branch() -> Optional[str]:
@@ -243,21 +237,10 @@ def _git_push(remote: str = "origin") -> bool:
         return False
 
 
-def _git_reset_hard(sha: str) -> bool:
-    if not _git_available() or not _is_git_repo() or not sha:
-        return False
-    try:
-        _git("reset", "--hard", sha)
-        _git("clean", "-fd", check=False)
-        return True
-    except subprocess.CalledProcessError as exc:
-        log.error("git reset --hard %s failed: %s", sha, exc.stderr.strip())
-        return False
-
-
 def _restore_scope(sha: str, scope: Optional[str]) -> bool:
     if not scope:
-        return _git_reset_hard(sha)
+        log.error("refusing unscoped vault rollback")
+        return False
     if not _git_available() or not _is_git_repo() or not sha:
         return False
     try:

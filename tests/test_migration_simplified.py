@@ -29,6 +29,9 @@ def _legacy_fixture(vault, uid="42"):
     )
     (root / "02_concepts").mkdir()
     (root / "02_concepts" / "old.md").write_text("legacy", encoding="utf-8")
+    face = root / "01_personality" / "face"
+    face.mkdir(parents=True)
+    (face / "mask_preferences.json").write_text("{}", encoding="utf-8")
     return root
 
 
@@ -45,6 +48,7 @@ def test_preview_apply_and_idempotency(tmp_path, capsys):
     assert not (root / "00_raw" / "qna").exists()
     assert not (root / "02_concepts").exists()
     assert not (root / "03_personality").exists()
+    assert not (root / "01_personality" / "face").exists()
     assert (root / "01_mood" / "current.md").exists()
     assert (root / "01_personality" / "about" / "current.md").exists()
     deltas = json.loads(

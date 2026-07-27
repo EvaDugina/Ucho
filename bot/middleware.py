@@ -62,5 +62,6 @@ class AccessMiddleware(BaseMiddleware):
                 await event.bot.send_message(uid, _CONSENT_TEXT)
             except Exception:
                 log.exception("failed to send consent disclaimer to %s", uid)
-            users.set_consent(uid)
+            else:
+                users.set_consent(uid)
         return await handler(event, data)

@@ -136,14 +136,6 @@ def current_profile() -> str:
         return ""
 
 
-def synthesis_context(max_chars: int = 24_000) -> tuple[str, list[dict]]:
-    current = current_profile()
-    pending = pending_deltas()
-    if len(current) > max_chars // 2:
-        current = current[-max_chars // 2 :]
-    return current, pending
-
-
 def save_synthesis(
     profile: str,
     delta_ids: list[str],
@@ -170,13 +162,6 @@ def save_synthesis(
             item["synthesized_at"] = now.isoformat(timespec="seconds")
     atomic_write_json(deltas_path(), store)
     return version_id
-
-
-def render_about_context(max_chars: int = 6500) -> str:
-    text = current_profile()
-    if len(text) > max_chars:
-        text = text[-max_chars:]
-    return text
 
 
 def render_for_prompt(max_chars: int = 3500) -> str:

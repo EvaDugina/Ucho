@@ -34,9 +34,9 @@
    сессию или свободную заметку.
 3. `conversation_service` обязательно дописывает typed user event в
    `00_raw/sessions/<session>.jsonl` и фиксирует raw.
-4. `classify_mood` обновляет `01_mood/current.md` и месячный event-log.
-5. `process_answer` возвращает `reaction`, `personality_delta`,
-   `mask_frequency_draft`.
+4. `classify_mood` обновляет `01_mood/current.md` и идемпотентный месячный
+   event-log до запуска `process_answer`.
+5. `process_answer` возвращает `reaction` и `personality_delta`.
 6. `answer_service` принимает только дельты с дословной quote, выдаёт ID/raw event
    ID/status pending.
 7. Реакция отправляется через `session_messages`, которое сохраняет assistant event.
@@ -46,8 +46,9 @@
 Полная переписка не дублируется в runtime-файлах.
 
 `about_service` делает два последовательных вызова: нейтральный synthesis, затем
-persona presentation. Сначала атомарно записываются version/current, после чего
-захваченные pending-дельты получают status `synthesized`.
+нейтральное представление пользователю. Сначала атомарно записываются
+version/current, после чего захваченные pending-дельты получают status
+`synthesized`.
 
 `books.py` разбирает TXT/MD/FB2/EPUB в памяти. Оригинал и metadata сохраняются под
 `books/<sha-prefix>`. EPUB ZIP не извлекается. Общие записи идут через
@@ -57,7 +58,7 @@ persona presentation. Сначала атомарно записываются v
 
 - `handlers.py` — разрешённые команды, callback и precedence входящего текста.
 - `session.py`/`session_log.py` — recovery state и единственный raw source.
-- `moods.py`/`mood_file.py` — нормализация mood и face preferences.
+- `moods.py`/`mood_file.py` — нормализация mood, current и месячные события.
 - `about.py` — хранилище дельт и версий профиля.
 - `books.py` — библиотека и персональное книжное состояние.
 - `scheduler.py`/`daily_service.py`/`reminder_service.py` — фоновые сообщения.
@@ -67,7 +68,7 @@ persona presentation. Сначала атомарно записываются v
 
 ```text
 bot/        runtime
-prompts/    persona и LLM-контракты
+prompts/    нейтральные LLM-контракты
 scripts/    ручная миграция vault
 tests/      pytest и smoke
 deploy/     server scripts
@@ -84,7 +85,6 @@ users/<uid>/
   01_personality/deltas.json
   01_personality/about/current.md
   01_personality/about/versions/*.md
-  01_personality/face/*
   _session.json
   _state.json
 books/<book-id>/{source.*,text.txt,metadata.json}
@@ -159,9 +159,20 @@ Python logging пишет stderr/docker logs и ротируемый `.logs/bot.
 - Whitelist применяется к message и callback.
 - Секреты только в `.env`.
 - XML DTD/entity запрещены; ZIP paths/объём/число членов проверяются.
+- Книжные ID и metadata проверяются до построения пути; symlink-книги отклоняются.
+- Session ID ограничен безопасным набором символов до построения пути JSONL.
 - Telegram/LLM dynamic output экранируется перед HTML.
+- Производные profile/mood и книжный контекст передаются LLM как fenced user-data,
+  а не как system prompt.
 - Git scope предотвращает захват чужих user dirs и библиотеки.
+- Пользовательская Git-транзакция без request-scoped uid отклоняется; глобального
+  `reset --hard` у runtime нет.
 - `/leta` проверяет точный resolved path `users/<uid>`.
+- Recovery, daily и reminder повторно проверяют действующий whitelist.
+- Ручные/книжные/daily-вопросы, ответы, `/about`, reminder и `/leta` меняют
+  пользовательскую сессию только под одним per-user lock.
+- Durable merge-slot принимает текст только во время уже записанного raw-pending
+  ответа; другие занятые LLM-операции возвращают busy без привязки к старой сессии.
 
 ## rules
 
@@ -206,24 +217,29 @@ Intentionally deferred:
 - 2026-07-27: mood и personality обслуживаются только runtime-кодом.
 - 2026-07-27: библиотека глобальна, предпочтения остаются per-user.
 - 2026-07-27: EPUB разбирается только in-memory stdlib-парсером.
+- 2026-07-27: персона, голос, лицо и пользовательские настройки тона удалены.
+- 2026-07-27: все фоновые пути повторно применяют актуальный whitelist.
 
 ### Технический долг
 
 - POC B не блокирует конкурентные uploads разных пользователей общим async lock;
   файловая Git-транзакция защищает целостность, но не даёт распределённой блокировки.
+- В репозитории пока нет GitHub Actions; pytest, Ruff, smoke и Gitleaks запускаются
+  вручную в Docker.
 
 ### Журнал изменений
 
-- 2026-07-27: документация полностью приведена к упрощённой архитектуре.
+- 2026-07-27: удалены персона и face-подсистема; документация приведена к
+  нейтральной упрощённой архитектуре.
 
 ## ai_pipeline
 
 - `ask`: один вопрос по теме или затравке.
 - `ask_book_question`: вопрос только по переданному фрагменту.
 - `classify_mood`: categorical sign/energy/direction/quality/dominance.
-- `process`: reaction + personality deltas + mask draft.
+- `process`: нейтральная reaction + personality deltas.
 - `synthesize_about`: нейтральный внутренний профиль.
-- `about_present`: озвучивание профиля персоной.
+- `about_present`: нейтральное представление профиля пользователю.
 
 Primary и fallback выбираются per task из env; специальных внешних скиллов нет.
 

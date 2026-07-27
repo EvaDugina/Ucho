@@ -2,7 +2,6 @@ from bot.validation import (
     safe_chat_html,
     safe_question_text,
     safe_user_text,
-    strip_comment_punctuation,
 )
 
 
@@ -14,10 +13,6 @@ def test_user_text_normalizes_controls_and_truncates():
 
 def test_question_is_one_line():
     assert safe_question_text("Что\n\nважно?") == "Что важно?"
-
-
-def test_comment_punctuation_is_restricted():
-    assert strip_comment_punctuation("Ну, вот! Да?") == "Ну вот Да?"
 
 
 def test_chat_html_is_escaped():

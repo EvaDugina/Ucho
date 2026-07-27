@@ -73,6 +73,8 @@ def test_dedup_and_epub_traversal_protection(as_user):
     with pytest.raises(books.BookError, match="небезопасный путь"):
         books.ingest(_epub(traversal=True), "evil.epub", uploader_uid=as_user)
     assert books.get_book("../../outside") is None
+    with pytest.raises(books.BookError, match="идентификатор"):
+        books.choose_excerpt("../../outside")
 
 
 def test_size_and_empty_limits(as_user, monkeypatch):
@@ -82,6 +84,19 @@ def test_size_and_empty_limits(as_user, monkeypatch):
     monkeypatch.setattr(books, "BOOK_UPLOAD_MAX_BYTES", 20 * 1024 * 1024)
     with pytest.raises(books.BookError):
         books.ingest(b"short", "empty.txt", uploader_uid=as_user)
+
+
+def test_existing_book_id_with_other_sha_is_not_overwritten(as_user):
+    payload = (TEXT + " unique collision").encode()
+    suffix, _, _, normalized = books._extract(payload, "collision.txt")
+    digest = books.hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    directory = books.vault.books_dir() / digest[:16]
+    directory.mkdir(parents=True, exist_ok=True)
+    metadata = directory / "metadata.json"
+    metadata.write_text('{"sha256":"other"}', encoding="utf-8")
+    with pytest.raises(books.BookError, match="конфликт"):
+        books.ingest(payload, f"collision{suffix}", uploader_uid=as_user)
+    assert metadata.read_text(encoding="utf-8") == '{"sha256":"other"}'
 
 
 def test_library_global_but_toggles_and_scores_personal(as_user):
@@ -126,12 +141,25 @@ def test_leta_keeps_global_books(as_user):
     assert books.reminder_enabled(book["id"]) is True
 
 
+def test_corrupt_metadata_and_unusable_text_are_not_reminder_candidates(as_user):
+    book = books.ingest((TEXT + " corrupt").encode(), "corrupt.txt", uploader_uid=as_user)
+    for item in books.list_books():
+        books.set_reminder_enabled(str(item["id"]), item["id"] == book["id"])
+    directory = books.vault.books_dir() / book["id"]
+    (directory / "text.txt").unlink()
+    assert books.choose_for_reminder() is None
+
+    bad_dir = books.vault.books_dir() / "aaaaaaaaaaaaaaaa"
+    bad_dir.mkdir()
+    (bad_dir / "metadata.json").write_text('{"id":"../../outside"}', encoding="utf-8")
+    assert all(item["id"] != "../../outside" for item in books.list_books())
+
+
 @pytest.mark.asyncio
 async def test_sea_callback_uses_question_string_from_llm_dict(as_user, monkeypatch):
     book = books.ingest((TEXT + " callback").encode(), "callback.txt", uploader_uid=as_user)
     monkeypatch.setattr(handlers.books, "get_book", lambda _: book)
     monkeypatch.setattr(handlers.books, "choose_excerpt", lambda _: "Фрагмент книги")
-    monkeypatch.setattr(handlers.moods, "random_bot_mood", lambda: "сомнение")
     monkeypatch.setattr(handlers.ratelimit, "try_acquire", lambda _: True)
     monkeypatch.setattr(handlers.ratelimit, "release", lambda _: None)
 

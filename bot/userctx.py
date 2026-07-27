@@ -11,11 +11,10 @@ asyncio-задачей, и значение contextvar изолировано pe
 Кто обязан выставить контекст (через `set_user`):
 - aiogram-middleware на каждый входящий update;
 - daily-тикер (по каждому пользователю в цикле);
-- startup self-check и session-restore (по каждому пользователю);
+- session-restore и recovery (по каждому пользователю);
 - pending-recovery.
 
-`.psycho/` (manifest, log, startup-check, users.json) и git-репо — ГЛОБАЛЬНЫЕ
-на корне вольта, не зависят от текущего пользователя.
+`.psycho/` (log и users.json) и git-репо — ГЛОБАЛЬНЫЕ на корне вольта.
 """
 from __future__ import annotations
 
@@ -33,15 +32,6 @@ def set_user(uid: int) -> Path:
     """Выставить текущего пользователя. Возвращает его vault-root."""
     _current_uid.set(int(uid))
     return user_root()
-
-
-def clear_user() -> None:
-    """Сбросить request-scoped user context.
-
-    Используется тестами и системными путями, где отсутствие пользователя должно
-    быть явным, а не неявным fallback на корень vault.
-    """
-    _current_uid.set(None)
 
 
 def current_uid() -> int | None:

@@ -29,15 +29,6 @@ NOTE_RE = re.compile(
     r"^##\s+(?P<time>\d{2}:\d{2})\s*\n(?P<text>.*?)(?=^##\s+\d{2}:\d{2}\s*$|\Z)",
     re.DOTALL | re.MULTILINE,
 )
-FACE_FILES = {
-    "face_actions.json",
-    "feedback.jsonl",
-    "liked_replies.json",
-    "liked_replies_log.jsonl",
-    "mask_frequencies.json",
-    "mask_frequencies_draft.json",
-    "mask_preferences.json",
-}
 LEGACY_DIRS = {
     "02_concepts",
     "02_profile",
@@ -377,7 +368,7 @@ def _import_deltas(user_root: Path) -> int:
 
 
 def _migrate_derived(user_root: Path) -> dict[str, int]:
-    copied = {"mood": 0, "about": 0, "face": 0, "deltas": 0}
+    copied = {"mood": 0, "about": 0, "deltas": 0}
     mood_target = user_root / "01_mood" / "current.md"
     copied["mood"] = int(
         _copy_first(
@@ -400,14 +391,6 @@ def _migrate_derived(user_root: Path) -> dict[str, int]:
             about_target,
         )
     )
-    face_target = user_root / "01_personality" / "face"
-    for root in (user_root / "03_personality", user_root / "05_Общее"):
-        for filename in FACE_FILES:
-            source = root / filename
-            destination = face_target / filename
-            if source.exists() and not destination.exists():
-                _atomic_text(destination, source.read_text(encoding="utf-8"))
-                copied["face"] += 1
     copied["deltas"] = _import_deltas(user_root)
     return copied
 
@@ -425,6 +408,7 @@ def _legacy_sources(user_root: Path) -> list[Path]:
     result.extend(user_root.glob("02_*"))
     mood = user_root / "01_mood"
     result.extend(mood / name for name in MOOD_JUNK)
+    result.append(user_root / "01_personality" / "face")
     return sorted({path for path in result if path.exists()}, key=lambda path: str(path))
 
 
@@ -536,7 +520,6 @@ def _apply_user(vault: Path, user_root: Path) -> dict:
             user_root / "00_raw" / "sessions",
             user_root / "01_mood" / "events",
             user_root / "01_personality" / "about" / "versions",
-            user_root / "01_personality" / "face",
         ):
             directory.mkdir(parents=True, exist_ok=True)
     return {

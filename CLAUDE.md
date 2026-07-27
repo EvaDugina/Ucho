@@ -2,7 +2,7 @@
 
 ## Что это
 
-Telegram-бот «Ухо» с персоной «Иуда из Кариота». Стадия — **POC B**. Бот хранит
+Telegram-бот «Ухо» без ролевой персоны. Стадия — **POC B**. Бот хранит
 raw-разговор, производные mood/personality и общую библиотеку книг. Рабочий язык
 кода, документации и промптов — русский.
 
@@ -24,7 +24,8 @@ docker compose run --rm bot ruff check bot scripts tests
 - `00_raw/sessions` — единственный источник истины.
 - Pipeline: raw commit → mood → process_answer → personality deltas → реакция.
 - Evidence personality-дельты дословно присутствует в raw.
-- `/about` синтезирует pending-дельты, версионирует профиль и отдельно озвучивает.
+- `/about` синтезирует pending-дельты, версионирует профиль и отдельно формулирует
+  нейтральный ответ.
 - Per-user данные: `users/<uid>/{00_raw,01_mood,01_personality,_session,_state}`.
 - Общая библиотека: `books/<book-id>`.
 - `.psycho/`: whitelist и технический лог.
@@ -50,5 +51,5 @@ docker compose run --rm bot ruff check bot scripts tests
 
 - Комментарии — про намерение и ограничения.
 - Значимые решения обновляют `.docs/*` Vibe++.
-- Persona живёт в `prompts/iuda.md`, контракт данных — в runtime-коде и
-  `prompts/process.md`.
+- Промпты не задают боту персону, лицо, маску или гендер; контракт данных живёт
+  в runtime-коде и `prompts/process.md`.

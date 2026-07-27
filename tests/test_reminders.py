@@ -4,16 +4,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import books, session, session_log
-from bot.services import reminder_service
+from bot import books, session, session_log, users
+from bot.services import daily_service, reminder_service
 
 TEXT = "Содержательная книжная строка о совести и выборе. " * 30
 
 
 @pytest.mark.asyncio
 async def test_book_reminder_logs_source_and_sets_pending(as_user, monkeypatch):
+    monkeypatch.setattr(users, "is_allowed", lambda _: True)
     book = books.ingest(TEXT.encode(), "quote.txt", uploader_uid=as_user)
-    current = session.start(mode="probe", domain="ethics")
+    current = session.start(domain="ethics")
     session.set_question("Дневной вопрос", "ethics", q_num=1)
     session_log.append_required(
         session_id=current.id,
@@ -46,6 +47,7 @@ async def test_book_reminder_logs_source_and_sets_pending(as_user, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_books_skips_without_fallback(as_user, monkeypatch):
+    monkeypatch.setattr(users, "is_allowed", lambda _: True)
     monkeypatch.setattr(books, "choose_for_reminder", lambda: None)
 
     class Bot:
@@ -53,6 +55,44 @@ async def test_no_books_skips_without_fallback(as_user, monkeypatch):
             raise AssertionError("message must not be sent")
 
     candidate = reminder_service.ReminderCandidate(as_user, "2026-07-27", 1, "missing")
+    assert await reminder_service.send_daily_reminder(Bot(), candidate) is False
+
+
+@pytest.mark.asyncio
+async def test_unusable_selected_book_skips_without_retry_error(as_user, monkeypatch):
+    monkeypatch.setattr(users, "is_allowed", lambda _: True)
+    book = books.ingest((TEXT + " broken").encode(), "broken.txt", uploader_uid=as_user)
+    monkeypatch.setattr(books, "choose_for_reminder", lambda: book)
+
+    def fail(_):
+        raise books.BookError("broken")
+
+    monkeypatch.setattr(books, "choose_excerpt", fail)
+
+    class Bot:
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("message must not be sent")
+
+    candidate = reminder_service.ReminderCandidate(as_user, "2026-07-27", 1, "missing")
+    assert await reminder_service.send_daily_reminder(Bot(), candidate) is False
+
+
+def test_daily_targets_only_include_whitelist(as_user, monkeypatch):
+    data_only_uid = as_user + 500_000
+    (users.PSYCHO_META_DIR.parent / "users" / str(data_only_uid)).mkdir(parents=True)
+    monkeypatch.setattr(users, "allowed_ids", lambda: {1, as_user})
+    assert daily_service.daily_targets() == [1, as_user]
+
+
+@pytest.mark.asyncio
+async def test_direct_reminder_rechecks_whitelist(as_user, monkeypatch):
+    monkeypatch.setattr(users, "is_allowed", lambda _: False)
+
+    class Bot:
+        async def send_message(self, *args, **kwargs):
+            raise AssertionError("message must not be sent")
+
+    candidate = reminder_service.ReminderCandidate(as_user, "2026-07-27", 1, "session")
     assert await reminder_service.send_daily_reminder(Bot(), candidate) is False
 
 
@@ -88,8 +128,7 @@ async def test_pending_opens_book_conversation_and_scores_once(as_user):
         message_id=500,
         raw_event_id="old-session:000002",
     )
-    pending = books.pending_reminder()
-    await _open_book_reminder(SimpleNamespace(), pending)
+    await _open_book_reminder()
     current = session.get()
     assert current.last_domain == "knowledge"
     event = session_log.session_events(current.id)[0]
@@ -97,5 +136,32 @@ async def test_pending_opens_book_conversation_and_scores_once(as_user):
     assert event["metadata"]["reminder_event_id"] == "old-session:000002"
     assert books.pending_reminder() is None
     assert books.score(book["id"]) == 1
-    await _open_book_reminder(SimpleNamespace(), pending)
+    await _open_book_reminder()
     assert books.score(book["id"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_busy_pipeline_does_not_consume_pending_reminder(as_user, monkeypatch):
+    from bot import handlers
+
+    book = books.ingest((TEXT + " busy").encode(), "busy.txt", uploader_uid=as_user)
+    books.set_pending_reminder(book, "Цитата", message_id=500)
+    monkeypatch.setattr(handlers.ratelimit, "is_inflight", lambda _: True)
+    replies = []
+
+    message = SimpleNamespace(
+        answer=lambda text: replies.append(text),
+    )
+
+    async def answer(text):
+        replies.append(text)
+
+    message.answer = answer
+    await handlers._process_current_text(
+        message,
+        "Ответ",
+        pending_reminder=books.pending_reminder(),
+    )
+    assert books.pending_reminder() is not None
+    assert books.score(book["id"]) == 0
+    assert replies

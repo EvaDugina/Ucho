@@ -18,6 +18,9 @@ log = logging.getLogger(__name__)
 
 async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     """Дожать текст, который уже попал в session-log до сбоя LLM."""
+    if not users.is_allowed(uid):
+        log.info("pending recovery skipped: uid=%s is not allowed", uid)
+        return
     userctx.set_user(uid)
     current = session.get()
     if current is None or not session.has_pending(current):
@@ -37,7 +40,6 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     domain = conversation_service.real_domain(current.last_domain) or "everyday"
     q_num = int(event.get("q_num") or current.current_q_num or vault.next_q_num())
     transcript = current.render_transcript()
-    bot_mood = moods.random_bot_mood()
     mood_vector = None
     try:
         classified = await classify_mood(
@@ -47,21 +49,21 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         )
         current.record_mood(classified)
         mood_vector = moods.session_mood(current.mood_trajectory, mood_file.baseline())
-        bot_mood = moods.pick_bot_mood(mood_vector)
-        mood_file.set_current(mood_vector, bot_mood)
+        mood_file.set_current(mood_vector)
+        moods.log_turn(
+            mood_vector,
+            raw_event_id=raw_event_id,
+            session_id=current.id,
+            q_num=q_num,
+            at=event.get("ts"),
+        )
+        vault.commit_all("mood recovery")
         result = await process_answer(
             question=question,
             answer=text,
             domain_hint=domain,
-            bot_mood=bot_mood,
             session_context=transcript,
-            mode="probe",
             metadata=event.get("metadata") if isinstance(event.get("metadata"), dict) else None,
-        )
-        moods.record_mask_frequency_draft(
-            result.get("mask_frequency_draft"),
-            bot_mood=bot_mood,
-            at=event.get("ts"),
         )
         apply_processed(
             result,
@@ -75,15 +77,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     current.pending_answer = None
     current.pending_answer_event_id = None
-    if mood_vector:
-        moods.log_turn(
-            mood_vector,
-            bot_mood,
-            raw_event_id=raw_event_id,
-            session_id=current.id,
-            q_num=q_num,
-        )
-    reaction = str(result.get("reaction") or "").strip() or "Складно. Слишком складно."
+    reaction = str(result.get("reaction") or "").strip() or "Сообщение принято."
     reaction_q_num = vault.next_q_num()
     session.set_question(reaction, domain, q_num=reaction_q_num)
     session.persist()
@@ -92,21 +86,10 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             bot,
             uid,
             q_num=reaction_q_num,
-            mode="probe",
             domain=domain,
             text=reaction,
             plain=True,
-            bot_mood=bot_mood,
-            admin_controls=bool(bot_mood),
-            action_context={
-                "session_id": current.id,
-                "answered_q_num": q_num,
-                "kind": "reaction",
-                "user_text": text,
-                "question": question,
-                "session_context": transcript,
-                "reply_to_user_message_id": event.get("telegram_message_id"),
-            },
+            reply_to_message_id=event.get("telegram_message_id"),
         )
         vault.commit_all("recovered answer")
     except Exception:
@@ -115,6 +98,9 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
 async def process_queued_on_startup(bot: Bot, uid: int) -> None:
     """Дожать durable merge-slot после pending recovery."""
+    if not users.is_allowed(uid):
+        log.info("queued recovery skipped: uid=%s is not allowed", uid)
+        return
     userctx.set_user(uid)
     current = session.get()
     if current is None:
@@ -134,12 +120,10 @@ async def process_queued_on_startup(bot: Bot, uid: int) -> None:
                 message_id=last.get("message_id"),
                 at=last.get("at"),
                 reply_to_message_id=last.get("reply_to_message_id"),
-                is_owner=users.is_owner(uid),
                 question=str(item.get("question") or ""),
                 domain_hint=item.get("domain"),
                 q_num=item.get("origin_q_num") or vault.next_q_num(),
                 session_context_snapshot=str(item.get("session_context") or ""),
-                mode="probe",
                 event_kind=str(item.get("source") or "answer"),
             )
         except LLMError:
@@ -155,27 +139,14 @@ async def _send_payload(
     uid: int,
     payload: conversation_service.ReactionPayload,
 ) -> None:
-    if payload.mood_message:
-        await bot.send_message(uid, payload.mood_message)
     await session_messages.send_question(
         bot,
         uid,
         q_num=payload.q_num,
-        mode=payload.mode,
         domain=payload.domain,
         text=payload.text,
         plain=True,
-        bot_mood=payload.bot_mood,
-        admin_controls=bool(payload.bot_mood),
-        action_context={
-            "session_id": payload.session_id,
-            "answered_q_num": payload.answered_q_num,
-            "kind": "reaction",
-            "user_text": payload.user_text,
-            "question": payload.answered_question,
-            "session_context": payload.session_context,
-            "reply_to_user_message_id": payload.reply_to_user_message_id,
-        },
+        reply_to_message_id=payload.reply_to_user_message_id,
     )
 
 
@@ -219,6 +190,8 @@ async def process_offline_backlog(bot: Bot, dispatcher: Dispatcher) -> None:
 
 
 async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> None:
+    if not users.is_allowed(uid):
+        return
     userctx.set_user(uid)
     vault.ensure_layout()
     combined = "\n\n".join(
@@ -246,10 +219,9 @@ async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> 
                 reply_to_message_id=(
                     carrier.reply_to_message.message_id if carrier.reply_to_message else None
                 ),
-                is_owner=users.is_owner(uid),
             )
         else:
-            session.start(mode="probe", domain="everyday")
+            session.start(domain="everyday")
             payload = await note_service.ingest_note(
                 clean,
                 at=carrier.date,

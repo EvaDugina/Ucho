@@ -5,7 +5,7 @@ from bot import books, session, session_log, userctx, vault
 
 def test_clean_vault_smoke(as_user):
     vault.ensure_layout()
-    current = session.start(mode="probe", domain="identity")
+    current = session.start(domain="identity")
     session.set_question("Кто ты?", "identity", q_num=1)
     event = session_log.append_required(
         session_id=current.id,

@@ -10,9 +10,6 @@ def test_exact_command_list_and_removed_handlers_absent():
         "ucho",
         "ask",
         "about",
-        "regen",
-        "like",
-        "remask",
         "leta",
         "help",
         "start",
@@ -22,7 +19,17 @@ def test_exact_command_list_and_removed_handlers_absent():
         "removeuser",
         "users",
     ]
-    for name in ("cmd_echo", "cmd_requestion", "cmd_history", "cmd_cancel", "cmd_dailyall"):
+    for name in (
+        "cmd_echo",
+        "cmd_requestion",
+        "cmd_history",
+        "cmd_cancel",
+        "cmd_dailyall",
+        "cmd_like",
+        "cmd_regen",
+        "cmd_remask",
+        "cb_face_action",
+    ):
         assert not hasattr(handlers, name)
 
 
@@ -34,7 +41,7 @@ def test_layout_contains_only_current_public_directories(as_user):
     assert (root / "00_raw" / "sessions").is_dir()
     assert (root / "01_mood" / "events").is_dir()
     assert (root / "01_personality" / "about" / "versions").is_dir()
-    assert (root / "01_personality" / "face").is_dir()
+    assert not (root / "01_personality" / "face").exists()
     for name in ("qna", "notes", "02_concepts", "02_profile", "03_personality"):
         assert not (root / name).exists()
 

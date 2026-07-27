@@ -9,6 +9,7 @@ import asyncio
 import html
 import io
 import logging
+from contextlib import suppress
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -21,9 +22,6 @@ from aiogram.types import (
 
 from . import (
     books,
-    face_actions,
-    mood_file,
-    moods,
     ratelimit,
     session,
     session_log,
@@ -33,7 +31,7 @@ from . import (
 )
 from .config import BOOK_UPLOAD_MAX_BYTES, DOMAINS, UPLOAD_PENDING_SECONDS
 from .errors import LLMError, VaultError
-from .llm import ask_book_question, ask_next, regenerate_reaction
+from .llm import ask_book_question, ask_next
 from .services import (
     about_service,
     conversation_service,
@@ -49,6 +47,10 @@ admin_router = Router()
 
 LETA_CHAT_PURGE_DELAY_SECONDS = 0.08
 SEA_PAGE_SIZE = 8
+PENDING_ANALYSIS_MESSAGE = (
+    "Не удалось завершить анализ. Сообщение сохранено и будет обработано после "
+    "восстановления связи с LLM."
+)
 
 _DOMAIN_LABELS = session_messages.DOMAIN_LABELS
 
@@ -67,80 +69,15 @@ def _ask_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _remask_keyboard(token: str) -> InlineKeyboardMarkup:
-    buttons = [
-        InlineKeyboardButton(text=face, callback_data=f"face:rm:{token}:{index}")
-        for index, face in enumerate(moods.BOT_MOODS)
-    ]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[buttons[index : index + 2] for index in range(0, len(buttons), 2)]
-    )
-
-
-def _action_for_message(message_id: int | None) -> dict | None:
-    action = face_actions.find_by_message_id(message_id)
-    if action is not None:
-        return action
-    event = session_log.find_event_by_message_id(message_id, role="assistant")
-    if not event or event.get("kind") not in {"reaction", "regen"}:
-        return None
-    token = face_actions.create_action(
-        session_id=event.get("session_id"),
-        q_num=event.get("q_num"),
-        kind=str(event.get("kind")),
-        bot_mood=event.get("bot_mood"),
-        assistant_text=str(event.get("text") or ""),
-        user_text="",
-        question="",
-        session_context="",
-        reply_to_user_message_id=event.get("reply_to_message_id"),
-        at=event.get("ts"),
-    )
-    face_actions.set_message(token, message_id, at=event.get("ts"))
-    return face_actions.get_action(token)
-
-
-def _record_command(message: Message) -> None:
-    current = session.get()
-    if current is None:
-        return
-    session_log.append(
-        session_id=current.id,
-        role="user",
-        kind="command",
-        text=message.text or message.caption or "",
-        at=message.date,
-        message_id=message.message_id,
-        reply_to_message_id=(
-            message.reply_to_message.message_id if message.reply_to_message else None
-        ),
-        q_num=current.current_q_num,
-        domain=current.last_domain,
-    )
-
-
 async def _send_payload(bot: Bot, chat_id: int, payload: conversation_service.ReactionPayload) -> None:
-    if payload.mood_message:
-        await bot.send_message(chat_id, payload.mood_message)
     await session_messages.send_question(
         bot,
         chat_id,
         q_num=payload.q_num,
-        mode=payload.mode,
         domain=payload.domain,
         text=payload.text,
         plain=True,
-        bot_mood=payload.bot_mood,
-        admin_controls=bool(payload.bot_mood),
-        action_context={
-            "session_id": payload.session_id,
-            "answered_q_num": payload.answered_q_num,
-            "kind": "reaction",
-            "user_text": payload.user_text,
-            "question": payload.answered_question,
-            "session_context": payload.session_context,
-            "reply_to_user_message_id": payload.reply_to_user_message_id,
-        },
+        reply_to_message_id=payload.reply_to_user_message_id,
     )
 
 
@@ -161,9 +98,13 @@ async def _process_current_text(
     *,
     event_kind: str = "answer",
     metadata: dict | None = None,
+    pending_reminder: dict | None = None,
 ) -> None:
     uid = userctx.current_uid()
     if ratelimit.is_inflight(uid):
+        if pending_reminder is not None or not session.has_pending(session.get()):
+            await message.answer(ratelimit.BUSY_MESSAGE)
+            return
         session.enqueue_answer(
             clean,
             message_id=message.message_id,
@@ -180,6 +121,11 @@ async def _process_current_text(
         return
     try:
         async with session.lock_for(uid):
+            effective_pending = pending_reminder
+            if effective_pending is None and message.reply_to_message is None:
+                effective_pending = books.pending_reminder()
+            if effective_pending is not None:
+                await _open_book_reminder()
             payload = await conversation_service.process_probe_answer(
                 clean,
                 message_id=message.message_id,
@@ -187,7 +133,6 @@ async def _process_current_text(
                 reply_to_message_id=(
                     message.reply_to_message.message_id if message.reply_to_message else None
                 ),
-                is_owner=_is_owner(message),
                 event_kind=event_kind,
                 metadata=metadata,
             )
@@ -197,10 +142,7 @@ async def _process_current_text(
             await _drain_queued(message)
     except LLMError:
         log.warning("process_answer unavailable; pending raw answer kept")
-        await message.answer(
-            safe_chat_html(moods.llm_error_fallback_reply()),
-            parse_mode="HTML",
-        )
+        await message.answer(PENDING_ANALYSIS_MESSAGE)
     finally:
         ratelimit.release(uid)
 
@@ -218,12 +160,10 @@ async def _drain_queued(message: Message) -> None:
             message_id=last.get("message_id"),
             at=last.get("at"),
             reply_to_message_id=last.get("reply_to_message_id"),
-            is_owner=_is_owner(message),
             question=str(item.get("question") or ""),
             domain_hint=item.get("domain"),
             q_num=item.get("origin_q_num"),
             session_context_snapshot=str(item.get("session_context") or ""),
-            mode="probe",
             event_kind=str(last.get("source") or "answer"),
             metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else None,
         )
@@ -233,7 +173,6 @@ async def _drain_queued(message: Message) -> None:
 
 
 async def _ingest_note(message: Message, clean: str, *, source: str = "ucho") -> None:
-    session.start(mode="probe", domain="everyday")
     payload = None
     uid = userctx.current_uid()
     if not ratelimit.try_acquire(uid):
@@ -252,10 +191,7 @@ async def _ingest_note(message: Message, clean: str, *, source: str = "ucho") ->
                 vault.commit_all("note")
     except LLMError:
         log.warning("note analysis unavailable; pending raw note kept")
-        await message.answer(
-            safe_chat_html(moods.llm_error_fallback_reply()),
-            parse_mode="HTML",
-        )
+        await message.answer(PENDING_ANALYSIS_MESSAGE)
     finally:
         ratelimit.release(uid)
 
@@ -267,45 +203,37 @@ async def _generate_question(
     domain: str | None,
     hint: str | None = None,
 ) -> None:
-    current = session.start(mode="probe", domain=domain)
-    try:
-        await bot.send_chat_action(chat_id, "typing")
-    except Exception:
-        pass
-    mood_vector = moods.session_mood(current.mood_trajectory, mood_file.baseline())
-    bot_mood = moods.pick_bot_mood(mood_vector)
-    result = await ask_next(
-        domain=domain,
-        hint=hint,
-        recent_raw="",
-        bot_mood=bot_mood,
-        mode="probe",
-    )
-    selected_domain = str(result.get("domain") or domain or "everyday")
-    if selected_domain not in DOMAINS:
-        selected_domain = "everyday"
-    question = str(result["question"]).strip()
-    q_num = vault.next_q_num()
-    session.set_question(
-        question,
-        selected_domain,
-        q_num=q_num,
-        metadata={"source": "ask", "topic": selected_domain},
-    )
-    current.main_question = question
-    current.main_q_num = q_num
-    session.persist()
-    await session_messages.send_question(
-        bot,
-        chat_id,
-        q_num=q_num,
-        mode="probe",
-        domain=selected_domain,
-        text=question,
-        bot_mood=bot_mood,
-        metadata={"source": "ask", "topic": selected_domain},
-    )
-    vault.commit_all("question")
+    uid = userctx.current_uid()
+    async with session.lock_for(uid):
+        with suppress(Exception):
+            await bot.send_chat_action(chat_id, "typing")
+        result = await ask_next(
+            domain=domain,
+            hint=hint,
+        )
+        selected_domain = str(result.get("domain") or domain or "everyday")
+        if selected_domain not in DOMAINS:
+            selected_domain = "everyday"
+        question = str(result["question"]).strip()
+        current = session.start(domain=selected_domain)
+        q_num = vault.next_q_num()
+        session.set_question(
+            question,
+            selected_domain,
+            q_num=q_num,
+            metadata={"source": "ask", "topic": selected_domain},
+        )
+        current.main_question = question
+        session.persist()
+        await session_messages.send_question(
+            bot,
+            chat_id,
+            q_num=q_num,
+            domain=selected_domain,
+            text=question,
+            metadata={"source": "ask", "topic": selected_domain},
+        )
+        vault.commit_all("question")
 
 
 def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, InlineKeyboardMarkup]:
@@ -375,8 +303,6 @@ async def cmd_help(message: Message) -> None:
         "<b>Книги</b>\n"
         "/upload — загрузить TXT, MD, EPUB или FB2 до 20 МБ\n"
         "/sea — библиотека, разговоры и настройки цитат\n\n"
-        "<b>Реплики</b>\n"
-        "/like, /regen, /remask — reply-команды для реплики Иуды\n\n"
         "<b>Данные</b>\n"
         "/leta — удалить личный raw, mood, personality и книжные настройки\n"
         "/start, /help — начало и эта справка"
@@ -388,7 +314,7 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
-    await message.answer("Больно.")
+    await message.answer("Бот работает.")
 
 
 @router.message(Command("ask"))
@@ -412,8 +338,9 @@ async def cmd_ask(message: Message, command: CommandObject) -> None:
         return
     try:
         await _generate_question(message.bot, message.chat.id, domain=domain, hint=hint)
-    except LLMError:
+    except LLMError as exc:
         log.warning("ask unavailable")
+        await message.answer(exc.user_message)
     finally:
         ratelimit.release(uid)
 
@@ -435,8 +362,9 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
             callback.message.chat.id if callback.message else callback.from_user.id,
             domain=None if value == "any" else value,
         )
-    except LLMError:
+    except LLMError as exc:
         log.warning("ask callback unavailable")
+        await callback.answer(exc.user_message, show_alert=True)
     finally:
         ratelimit.release(uid)
 
@@ -461,13 +389,14 @@ async def cmd_about(message: Message) -> None:
                 log.info("about synthesized uid=%s version=%s", uid, version)
             if not spoken:
                 await message.answer(
-                    "Я тебя ещё толком не распробовал — поговори со мной через /ask или /ucho."
+                    "Пока недостаточно данных. Поговори с ботом через /ask или /ucho."
                 )
                 return
             for chunk in session_messages.split_for_telegram(safe_chat_html(spoken)):
                 await message.answer(chunk, parse_mode="HTML")
-    except LLMError:
+    except LLMError as exc:
         log.warning("about unavailable; pending deltas unchanged")
+        await message.answer(exc.user_message)
     finally:
         ratelimit.release(uid)
 
@@ -568,206 +497,45 @@ async def cb_sea(callback: CallbackQuery) -> None:
         await callback.answer(ratelimit.BUSY_MESSAGE, show_alert=True)
         return
     try:
-        excerpt = books.choose_excerpt(str(selected["id"]))
-        bot_mood = moods.random_bot_mood()
-        generated = await ask_book_question(
-            title=str(selected.get("title") or selected["id"]),
-            author=str(selected.get("author") or ""),
-            excerpt=excerpt,
-            bot_mood=bot_mood,
-        )
-        question = str(generated["question"])
-        current = session.start(mode="probe", domain="knowledge")
-        q_num = vault.next_q_num()
-        metadata = {
-            "source": "book",
-            "book_id": selected["id"],
-            "title": selected.get("title"),
-            "author": selected.get("author"),
-            "excerpt": excerpt,
-        }
-        session.set_question(question, "knowledge", q_num=q_num, metadata=metadata)
-        current.main_question = question
-        current.main_q_num = q_num
-        session.persist()
-        await session_messages.send_question(
-            callback.bot,
-            callback.message.chat.id if callback.message else callback.from_user.id,
-            q_num=q_num,
-            mode="probe",
-            domain="knowledge",
-            text=question,
-            bot_mood=bot_mood,
-            event_kind="book_question",
-            metadata=metadata,
-        )
-        vault.commit_all("book question")
+        async with session.lock_for(uid):
+            excerpt = books.choose_excerpt(str(selected["id"]))
+            generated = await ask_book_question(
+                title=str(selected.get("title") or selected["id"]),
+                author=str(selected.get("author") or ""),
+                excerpt=excerpt,
+            )
+            question = str(generated["question"])
+            current = session.start(domain="knowledge")
+            q_num = vault.next_q_num()
+            metadata = {
+                "source": "book",
+                "book_id": selected["id"],
+                "title": selected.get("title"),
+                "author": selected.get("author"),
+                "excerpt": excerpt,
+            }
+            session.set_question(question, "knowledge", q_num=q_num, metadata=metadata)
+            current.main_question = question
+            session.persist()
+            await session_messages.send_question(
+                callback.bot,
+                callback.message.chat.id if callback.message else callback.from_user.id,
+                q_num=q_num,
+                domain="knowledge",
+                text=question,
+                event_kind="book_question",
+                metadata=metadata,
+            )
+            vault.commit_all("book question")
         await callback.answer()
-    except (books.BookError, LLMError):
+    except books.BookError as exc:
         log.warning("book question unavailable")
-        await callback.answer("Не удалось начать разговор", show_alert=True)
+        await callback.answer(str(exc), show_alert=True)
+    except LLMError as exc:
+        log.warning("book question unavailable")
+        await callback.answer(exc.user_message, show_alert=True)
     finally:
         ratelimit.release(uid)
-
-
-@router.message(Command("like"))
-async def cmd_like(message: Message) -> None:
-    _record_command(message)
-    if message.reply_to_message is None:
-        await message.answer("Ответь командой /like на реплику Иуды.")
-        return
-    action = _action_for_message(message.reply_to_message.message_id)
-    if action is None or not face_actions.is_rateable(action):
-        await message.answer("Не нашёл подходящую реплику Иуды.")
-        return
-    token = str(action["token"])
-    was_liked = face_actions.is_liked(token)
-    face_actions.set_liked(token, liked=True, at=message.date)
-    face_actions.record_user_score(token, 1.0, "favorite", at=message.date)
-    if not was_liked:
-        moods.record_mask_like(action.get("bot_mood"), at=message.date)
-    vault.commit_all("liked reply")
-    await message.answer("В избранном.")
-
-
-@router.message(Command("regen"))
-async def cmd_regen(message: Message, command: CommandObject) -> None:
-    _record_command(message)
-    if message.reply_to_message is None:
-        await message.answer("Ответь командой /regen на реплику Иуды.")
-        return
-    action = _action_for_message(message.reply_to_message.message_id)
-    if action is None or not face_actions.is_rateable(action):
-        await message.answer("Не нашёл комментарий Иуды для перегенерации.")
-        return
-    requested = (command.args or "").strip().lower().replace(" ", "_")
-    if requested and requested not in moods.BOT_MOODS:
-        await message.answer("Не знаю такую маску. Доступные: " + ", ".join(moods.BOT_MOODS))
-        return
-    used = face_actions.used_bot_moods(str(action["token"]))
-    face = requested or moods.opposite_bot_mood(action.get("bot_mood"), exclude=used)
-    if not face or face in used:
-        await message.answer("Все подходящие маски уже использованы.")
-        return
-    hydrated = face_actions.hydrate_action(action)
-    if not hydrated["user_text"]:
-        await message.answer("Не нашёл исходный ответ человека.")
-        return
-    uid = userctx.current_uid()
-    if not ratelimit.try_acquire(uid):
-        await message.answer(ratelimit.BUSY_MESSAGE)
-        return
-    try:
-        new_text = await regenerate_reaction(
-            hydrated["question"],
-            hydrated["user_text"],
-            bot_mood=face,
-        )
-    except LLMError:
-        new_text = moods.llm_error_fallback_reply()
-    finally:
-        ratelimit.release(uid)
-    session_id = action.get("session_id")
-    if not session_id:
-        await message.answer("Не нашёл session-log этой реплики.")
-        return
-    token = face_actions.create_action(
-        session_id=str(session_id),
-        q_num=action.get("q_num"),
-        answered_q_num=action.get("answered_q_num"),
-        kind="regen",
-        bot_mood=face,
-        assistant_text=new_text,
-        user_text=hydrated["user_text"],
-        question=hydrated["question"],
-        session_context="",
-        reply_to_user_message_id=action.get("reply_to_user_message_id"),
-        parent_token=str(action["token"]),
-        at=message.date,
-    )
-    sent = await message.answer(
-        session_messages.with_face_signature(new_text, face),
-        parse_mode="HTML",
-        reply_to_message_id=message.reply_to_message.message_id,
-    )
-    event = session_log.append_required(
-        session_id=str(session_id),
-        role="assistant",
-        kind="regen",
-        text=new_text,
-        at=sent.date,
-        message_id=sent.message_id,
-        reply_to_message_id=message.reply_to_message.message_id,
-        q_num=action.get("q_num"),
-        domain=action.get("domain"),
-        bot_mood=face,
-    )
-    face_actions.set_message(token, sent.message_id, at=sent.date)
-    vault.commit_all(f"regen {event['event_id']}")
-
-
-@router.message(Command("remask"))
-async def cmd_remask(message: Message) -> None:
-    _record_command(message)
-    if message.reply_to_message is None:
-        await message.answer("Ответь командой /remask на вопрос или реплику Иуды.")
-        return
-    event = session_log.find_assistant_event_by_message_id(message.reply_to_message.message_id)
-    if event is None:
-        await message.answer("Не нашёл сообщение Иуды.")
-        return
-    existing = face_actions.find_by_message_id(message.reply_to_message.message_id)
-    token = face_actions.create_remask_action(
-        event,
-        parent_token=existing.get("token") if existing else None,
-        at=message.date,
-    )
-    await message.answer(
-        "Выбери новое лицо Иуды.",
-        reply_to_message_id=message.reply_to_message.message_id,
-        reply_markup=_remask_keyboard(token),
-    )
-    vault.commit_all("remask menu")
-
-
-@router.callback_query(F.data.startswith("face:"))
-async def cb_face_action(callback: CallbackQuery) -> None:
-    parts = (callback.data or "").split(":")
-    if len(parts) != 4 or parts[1] != "rm":
-        await callback.answer("Неизвестное действие", show_alert=True)
-        return
-    action = face_actions.get_action(parts[2])
-    try:
-        face = moods.BOT_MOODS[int(parts[3])]
-    except (ValueError, IndexError):
-        face = None
-    if action is None or face is None:
-        await callback.answer("Эта кнопка устарела", show_alert=True)
-        return
-    event = session_log.find_event(action.get("assistant_event_id"))
-    if event is None:
-        await callback.answer("Сообщение не найдено", show_alert=True)
-        return
-    try:
-        await callback.bot.edit_message_text(
-            chat_id=callback.message.chat.id if callback.message else callback.from_user.id,
-            message_id=int(action["message_id"]),
-            text=session_messages.event_with_face(event, face),
-            parse_mode="HTML",
-        )
-    except Exception:
-        log.exception("failed to edit remasked message")
-    session_log.set_event_bot_mood(str(event["event_id"]), face)
-    face_actions.set_bot_mood(parts[2], face)
-    if action.get("parent_token"):
-        face_actions.set_bot_mood(str(action["parent_token"]), face)
-    if callback.message:
-        try:
-            await callback.message.edit_text(f"Маска выбрана: {face}")
-        except Exception:
-            pass
-    vault.commit_all("remask")
-    await callback.answer("Маску сменил.")
 
 
 @router.message(Command("leta"))
@@ -787,12 +555,13 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         fill_until_message_id=message.message_id,
     )
     try:
-        deletion_service.delete_current_user_data()
+        async with session.lock_for(uid):
+            deletion_service.delete_current_user_data()
     except VaultError:
         await message.answer("Не удалил: проверка безопасности не прошла.")
         return
     await _delete_chat_messages_after_leta(message, message_ids)
-    await message.answer("Кончил.")
+    await message.answer("Личные данные удалены.")
 
 
 async def _delete_chat_messages_after_leta(
@@ -868,11 +637,11 @@ def _reply_targets_pending(message: Message, pending: dict) -> bool:
         return False
 
 
-async def _open_book_reminder(message: Message, pending: dict) -> None:
+async def _open_book_reminder() -> None:
     consumed = books.consume_pending_reminder()
     if consumed is None:
         return
-    current = session.start(mode="probe", domain="knowledge")
+    current = session.start(domain="knowledge")
     q_num = vault.next_q_num()
     excerpt = str(consumed.get("excerpt") or "")
     metadata = {
@@ -885,7 +654,6 @@ async def _open_book_reminder(message: Message, pending: dict) -> None:
     }
     session.set_question(excerpt, "knowledge", q_num=q_num, metadata=metadata)
     current.main_question = excerpt
-    current.main_q_num = q_num
     session_log.append_required(
         session_id=current.id,
         role="assistant",
@@ -916,17 +684,13 @@ async def on_text(message: Message) -> None:
             session.resume(session_id)
 
     pending = books.pending_reminder()
-    if pending and _reply_targets_pending(message, pending):
-        await _open_book_reminder(message, pending)
+    targets_pending = bool(pending and _reply_targets_pending(message, pending))
 
-    if session.get() is None or not session.get().last_question:
+    if not targets_pending and (session.get() is None or not session.get().last_question):
         await _ingest_note(message, clean, source="plain_text")
         return
-    await _process_current_text(message, clean)
-
-
-async def send_daily_question(bot: Bot, uid: int) -> bool:
-    """Совместимый публичный вход для scheduler и старых интеграций."""
-    from .services.daily_service import send_daily_question as send
-
-    return await send(bot, uid)
+    await _process_current_text(
+        message,
+        clean,
+        pending_reminder=pending if targets_pending else None,
+    )

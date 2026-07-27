@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,10 +72,8 @@ def collect_chat_message_ids(
                 for key in ("telegram_message_id", "message_id", "reply_to_message_id"):
                     value = row.get(key)
                     if value is not None:
-                        try:
+                        with suppress(TypeError, ValueError):
                             ids.add(int(value))
-                        except (TypeError, ValueError):
-                            pass
 
     if extra_ids:
         for value in extra_ids:

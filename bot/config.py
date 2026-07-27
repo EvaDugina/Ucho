@@ -18,12 +18,10 @@ TELEGRAM_PROXY_URL = (os.getenv("TELEGRAM_PROXY_URL") or "").strip()
 
 _AITUNNEL_BASE_URL = "https://api.aitunnel.ru/v1"
 _AITUNNEL_PRIMARY_MODEL = "qwen3-235b-a22b-2507"
-_AITUNNEL_FAST_MODEL = "deepseek-v4-flash"
 _AITUNNEL_FALLBACK_MODELS = ("deepseek-v4-flash",)
 
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _OPENROUTER_PRIMARY_MODEL = "qwen/qwen3-235b-a22b-2507"
-_OPENROUTER_FAST_MODEL = "deepseek/deepseek-v4-flash"
 _OPENROUTER_FALLBACK_MODELS = ("deepseek/deepseek-v4-flash",)
 
 
@@ -106,7 +104,6 @@ LLM_BASE_URL = OPENROUTER_BASE_URL if _USE_OPENROUTER else AITUNNEL_BASE_URL
 LLM_API_KEY = OPENROUTER_API_KEY if _USE_OPENROUTER else AITUNNEL_API_KEY
 _MODEL_PROVIDER = "openrouter" if _USE_OPENROUTER else "aitunnel"
 _MODEL_DEFAULT = _OPENROUTER_PRIMARY_MODEL if _USE_OPENROUTER else _AITUNNEL_PRIMARY_MODEL
-_MODEL_FAST = _OPENROUTER_FAST_MODEL if _USE_OPENROUTER else _AITUNNEL_FAST_MODEL
 _MODEL_FALLBACKS = _OPENROUTER_FALLBACK_MODELS if _USE_OPENROUTER else _AITUNNEL_FALLBACK_MODELS
 
 
@@ -151,15 +148,11 @@ LLM_MODEL_PROCESS = _model_from_env(_model_env("PROCESS"), LLM_MODEL_DEFAULT, pr
 LLM_MODEL_MOOD = _model_from_env(_model_env("MOOD"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_ASK = _model_from_env(_model_env("ASK"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
 LLM_MODEL_ABOUT = _model_from_env(_model_env("ABOUT"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
-LLM_MODEL_REACTION = _model_from_env(_model_env("REACTION"), LLM_MODEL_DEFAULT, provider=_MODEL_PROVIDER)
-LLM_MODEL_FAST = _model_from_env(_model_env("FAST"), _MODEL_FAST, provider=_MODEL_PROVIDER)
 
 LLM_FALLBACK_PROCESS = _parse_model_list(_fallback_env("PROCESS"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_MOOD = _parse_model_list(_fallback_env("MOOD"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_ASK = _parse_model_list(_fallback_env("ASK"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
 LLM_FALLBACK_ABOUT = _parse_model_list(_fallback_env("ABOUT"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
-LLM_FALLBACK_REACTION = _parse_model_list(_fallback_env("REACTION"), LLM_MODEL_FALLBACKS, provider=_MODEL_PROVIDER)
-LLM_FALLBACK_FAST = _parse_model_list(_fallback_env("FAST"), (), provider=_MODEL_PROVIDER)
 
 # Таймаут одного LLM-вызова (сек). Без него openai-sdk ждёт ~600 c — при
 # зависшем/недоступном provider бот висел бы минутами. По истечении —

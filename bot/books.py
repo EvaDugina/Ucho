@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".epub", ".fb2"}
 MIN_BOOK_CHARS = 200
+BOOK_ID_RE = re.compile(r"[0-9a-f]{16}")
 
 
 class BookError(ValueError):
@@ -194,9 +195,18 @@ def ingest(data: bytes, filename: str, *, uploader_uid: int, at: datetime | None
     book_id = digest[:16]
     directory = vault.books_dir() / book_id
     metadata_path = directory / "metadata.json"
+    if directory.is_symlink() or metadata_path.is_symlink():
+        raise BookError("Каталог книги небезопасен.")
     if metadata_path.exists():
-        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        try:
+            existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BookError("Существующие metadata книги повреждены.") from exc
+        if not isinstance(existing, dict) or existing.get("sha256") != digest:
+            raise BookError("Обнаружен конфликт идентификатора книги.")
         return {**existing, "duplicate": True}
+    if directory.exists() and not directory.is_dir():
+        raise BookError("Путь книги занят небезопасным объектом.")
     metadata = {
         "id": book_id,
         "sha256": digest,
@@ -223,9 +233,19 @@ def list_books() -> list[dict]:
         return result
     for path in sorted(root.glob("*/metadata.json")):
         try:
+            if path.is_symlink() or path.parent.is_symlink():
+                log.warning("symlinked book metadata rejected: %s", path)
+                continue
             data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data.get("id"):
+            book_id = str(data.get("id") or "") if isinstance(data, dict) else ""
+            if (
+                isinstance(data, dict)
+                and BOOK_ID_RE.fullmatch(book_id)
+                and path.parent.name == book_id
+            ):
                 result.append(data)
+            else:
+                log.warning("book metadata rejected: %s", path)
         except Exception:
             log.exception("book metadata unreadable: %s", path)
     return sorted(result, key=lambda item: str(item.get("title") or "").casefold())
@@ -233,21 +253,24 @@ def list_books() -> list[dict]:
 
 def get_book(book_id: str) -> dict | None:
     safe_id = str(book_id)
-    if not re.fullmatch(r"[0-9a-f]{16}", safe_id):
+    if not BOOK_ID_RE.fullmatch(safe_id):
         return None
     path = vault.books_dir() / safe_id / "metadata.json"
-    if not path.exists():
+    if path.parent.is_symlink() or path.is_symlink() or not path.exists():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else None
+        return data if isinstance(data, dict) and data.get("id") == safe_id else None
     except Exception:
         return None
 
 
-def choose_excerpt(book_id: str, *, rng: random.Random | None = None) -> str:
-    path = vault.books_dir() / str(book_id) / "text.txt"
-    if not path.exists():
+def _excerpt_candidates(book_id: str) -> list[str]:
+    safe_id = str(book_id)
+    if not BOOK_ID_RE.fullmatch(safe_id):
+        raise BookError("Некорректный идентификатор книги.")
+    path = vault.books_dir() / safe_id / "text.txt"
+    if path.parent.is_symlink() or path.is_symlink() or not path.exists():
         raise BookError("Текст книги не найден.")
     text = path.read_text(encoding="utf-8")
     paragraphs = [
@@ -264,7 +287,11 @@ def choose_excerpt(book_id: str, *, rng: random.Random | None = None) -> str:
         ]
     if not paragraphs:
         raise BookError("Не удалось выбрать содержательную цитату.")
-    return (rng or random).choice(paragraphs)
+    return paragraphs
+
+
+def choose_excerpt(book_id: str, *, rng: random.Random | None = None) -> str:
+    return (rng or random).choice(_excerpt_candidates(book_id))
 
 
 def _book_state(state: dict) -> dict:
@@ -336,7 +363,17 @@ def score(book_id: str) -> int:
 
 
 def choose_for_reminder(*, rng: random.Random | None = None) -> dict | None:
-    enabled = [book for book in list_books() if reminder_enabled(str(book["id"]))]
+    enabled: list[dict] = []
+    for book in list_books():
+        book_id = str(book["id"])
+        if not reminder_enabled(book_id):
+            continue
+        try:
+            _excerpt_candidates(book_id)
+        except BookError:
+            log.warning("book excluded from reminders: unusable text id=%s", book_id)
+            continue
+        enabled.append(book)
     if not enabled:
         return None
     scores = [score(str(book["id"])) for book in enabled]

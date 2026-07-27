@@ -17,7 +17,7 @@ async def ingest_note(
     metadata: dict | None = None,
 ) -> NoteReactionPayload | None:
     if session.get() is None:
-        session.start(mode="probe", domain="everyday")
+        session.start(domain="everyday")
     current = session.get()
     if current is None:
         return None
@@ -30,8 +30,6 @@ async def ingest_note(
         question=question,
         domain_hint="everyday",
         q_num=q_num,
-        asked_at=at,
-        mode="probe",
         event_kind="note",
         message_id=message_id,
         metadata={"source": "ucho", **(metadata or {})},

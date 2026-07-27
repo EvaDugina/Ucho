@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -31,19 +32,13 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
     tmp = path.with_suffix(path.suffix + ".tmp")
     # Если предыдущий запуск упал между write и replace — снесём огрызок.
     if tmp.exists():
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
     with open(tmp, "w", encoding=encoding, newline="\n") as f:
         f.write(content)
         f.flush()
-        try:
+        with suppress(OSError):
             os.fsync(f.fileno())
-        except OSError:
-            # На Windows fsync для текстовых файлов может вернуть ошибку —
-            # сам replace всё равно атомарен, продолжаем.
-            pass
     os.replace(tmp, path)
 
 
@@ -59,15 +54,11 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     if tmp.exists():
-        try:
+        with suppress(OSError):
             tmp.unlink()
-        except OSError:
-            pass
     with open(tmp, "wb") as handle:
         handle.write(content)
         handle.flush()
-        try:
+        with suppress(OSError):
             os.fsync(handle.fileno())
-        except OSError:
-            pass
     os.replace(tmp, path)

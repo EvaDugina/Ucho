@@ -21,6 +21,8 @@ from .log import append_log
 def git_wrap(op_name: str) -> Iterator[None]:
     """pre-commit -> write block -> post-commit with rollback on exceptions."""
     scope, label = _scope()
+    if scope is None:
+        raise VaultError(f"{op_name}: user-scoped transaction requires current uid")
     with _git_wrap_scope(op_name, scope=scope, label=label):
         yield
 

@@ -32,10 +32,6 @@ def personality_dir() -> Path:
     return userctx.user_root() / "01_personality"
 
 
-def face_dir() -> Path:
-    return personality_dir() / "face"
-
-
 def books_dir() -> Path:
     return BOOKS_PATH
 
@@ -49,7 +45,6 @@ def ensure_layout() -> None:
     sessions_dir().mkdir(parents=True, exist_ok=True)
     (mood_dir() / "events").mkdir(parents=True, exist_ok=True)
     (personality_dir() / "about" / "versions").mkdir(parents=True, exist_ok=True)
-    face_dir().mkdir(parents=True, exist_ok=True)
     books_dir().mkdir(parents=True, exist_ok=True)
     PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
     if not LOG_PATH.exists():

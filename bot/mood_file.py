@@ -19,7 +19,7 @@ def ensure() -> None:
     vault.mood_dir().mkdir(parents=True, exist_ok=True)
 
 
-def set_current(mv: dict, bot_mood: str | None) -> None:
+def set_current(mv: dict) -> None:
     ensure()
     try:
         content = (
@@ -32,7 +32,6 @@ def set_current(mv: dict, bot_mood: str | None) -> None:
             f"quality: {mv.get('quality', 'спокойствие')}\n"
             f"direction: {mv.get('direction', 'neutral')}\n"
             f"stability: {mv.get('stability', 'adequate')}\n"
-            f"bot_mood: {bot_mood or 'раскачивание'}\n"
             f"n: {int(mv.get('n', 0))}\n"
             "---\n\n"
             "# Текущее настроение\n\n"

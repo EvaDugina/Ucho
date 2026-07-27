@@ -6,7 +6,6 @@ import re
 
 MAX_USER_TEXT = 10_000
 MAX_QUESTION_TEXT = 2_000
-_COMMENT_KEEP_PUNCT = {".", "?"}
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -37,22 +36,6 @@ def safe_question_text(raw: str) -> str:
     """Свести LLM-вопрос к одной строке ограниченной длины."""
     value, _ = safe_user_text(raw, limit=MAX_QUESTION_TEXT)
     return re.sub(r"\s+", " ", value).strip()
-
-
-def strip_comment_punctuation(text: str) -> str:
-    """Оставить в реакции буквы, цифры, пробелы и `. ?`."""
-    if not text:
-        return ""
-    value = str(text).replace("…", ".")
-    value = "".join(
-        char
-        if char.isalnum() or char.isspace() or char in _COMMENT_KEEP_PUNCT
-        else " "
-        for char in value
-    )
-    value = re.sub(r"[^\S\n]+", " ", value)
-    value = re.sub(r"\s+([.?])", r"\1", value)
-    return "\n".join(line.strip() for line in value.splitlines()).strip()
 
 
 def safe_chat_html(text: str) -> str:

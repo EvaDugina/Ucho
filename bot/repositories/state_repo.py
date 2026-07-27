@@ -14,9 +14,15 @@ log = logging.getLogger(__name__)
 
 def _load_state() -> dict:
     sf = layout.state_file()
+    if sf.is_symlink():
+        log.error("refusing symlinked _state.json")
+        return {"last_q_num": 0}
     if sf.exists():
         try:
-            return json.loads(sf.read_text(encoding="utf-8"))
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+            raise ValueError("_state.json root must be an object")
         except Exception:
             log.exception("failed to load state, resetting")
             append_log("warn", "state_corrupted", "_state.json unreadable, resetting to 0")
@@ -30,7 +36,11 @@ def _save_state(state: dict) -> None:
 
 def next_q_num() -> int:
     state = _load_state()
-    state["last_q_num"] = int(state.get("last_q_num", 0)) + 1
+    try:
+        current = max(0, int(state.get("last_q_num", 0)))
+    except (TypeError, ValueError):
+        current = 0
+    state["last_q_num"] = current + 1
     _save_state(state)
     return state["last_q_num"]
 
@@ -45,12 +55,6 @@ def _today_str(tz_name: str) -> str:
 
 def daily_already_sent(tz_name: str) -> bool:
     return _load_state().get("last_daily_date") == _today_str(tz_name)
-
-
-def mark_daily_sent(tz_name: str) -> None:
-    state = _load_state()
-    state["last_daily_date"] = _today_str(tz_name)
-    _save_state(state)
 
 
 def _day_or_today(tz_name: str, day: str | None = None) -> str:
