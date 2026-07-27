@@ -228,13 +228,13 @@ async def send_daily_reminder(bot: Bot, candidate: ReminderCandidate) -> bool:
         except books.BookError:
             log.warning("book reminder skipped: unusable book id=%s", selected["id"])
             return False
-        if not excerpt:
+        if not excerpt.text:
             log.warning("book reminder skipped: empty book id=%s", selected["id"])
             return False
         title = str(selected.get("title") or selected["id"])
         author = str(selected.get("author") or "Автор не указан")
         text = (
-            f"<blockquote>{html.escape(excerpt)}</blockquote>\n"
+            f"<blockquote>{html.escape(excerpt.text)}</blockquote>\n"
             f"<i>{html.escape(title)} — {html.escape(author)}</i>"
         )
         sent = await bot.send_message(candidate.uid, text, parse_mode="HTML")
@@ -242,7 +242,7 @@ async def send_daily_reminder(bot: Bot, candidate: ReminderCandidate) -> bool:
             session_id=candidate.session_id,
             role="assistant",
             kind="book_reminder",
-            text=excerpt,
+            text=excerpt.text,
             q_num=candidate.q_num,
             message_id=sent.message_id,
             metadata={
@@ -250,6 +250,7 @@ async def send_daily_reminder(bot: Bot, candidate: ReminderCandidate) -> bool:
                 "title": title,
                 "author": author,
                 "source": "daily_reminder",
+                **excerpt.metadata(),
             },
         )
         books.set_pending_reminder(

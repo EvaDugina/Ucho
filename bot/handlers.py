@@ -301,7 +301,7 @@ async def cmd_help(message: Message) -> None:
         "/about — каким я тебя вижу\n"
         "/pebble — проверить, что я жив\n\n"
         "<b>Книги</b>\n"
-        "/upload — загрузить TXT, MD, EPUB или FB2 до 20 МБ\n"
+        "/upload — загрузить EPUB, FB2 или Markdown до 20 МБ\n"
         "/sea — библиотека, разговоры и настройки цитат\n\n"
         "<b>Данные</b>\n"
         "/leta — удалить личный raw, mood, personality и книжные настройки\n"
@@ -408,7 +408,7 @@ async def cmd_upload(message: Message) -> None:
         return
     books.begin_upload_wait(seconds=UPLOAD_PENDING_SECONDS)
     await message.answer(
-        "Пришли один TXT, MD, EPUB или FB2 до 20 МБ в течение 10 минут."
+        "Пришли один EPUB, FB2 или Markdown до 20 МБ в течение 10 минут."
     )
 
 
@@ -429,7 +429,7 @@ async def _handle_upload_document(message: Message) -> None:
         books.clear_upload_wait()
         await message.answer("Книга больше 20 МБ.")
         return
-    filename = document.file_name or "book.txt"
+    filename = document.file_name or "book.md"
     buffer = io.BytesIO()
     try:
         await message.bot.download(document, destination=buffer)
@@ -502,7 +502,9 @@ async def cb_sea(callback: CallbackQuery) -> None:
             generated = await ask_book_question(
                 title=str(selected.get("title") or selected["id"]),
                 author=str(selected.get("author") or ""),
-                excerpt=excerpt,
+                chapter_title=excerpt.chapter_title,
+                section_path=list(excerpt.section_path),
+                excerpt=excerpt.text,
             )
             question = str(generated["question"])
             current = session.start(domain="knowledge")
@@ -512,7 +514,7 @@ async def cb_sea(callback: CallbackQuery) -> None:
                 "book_id": selected["id"],
                 "title": selected.get("title"),
                 "author": selected.get("author"),
-                "excerpt": excerpt,
+                **excerpt.metadata(),
             }
             session.set_question(question, "knowledge", q_num=q_num, metadata=metadata)
             current.main_question = question
@@ -650,6 +652,10 @@ async def _open_book_reminder() -> None:
         "title": consumed.get("title"),
         "author": consumed.get("author"),
         "excerpt": excerpt,
+        "chapter_id": consumed.get("chapter_id"),
+        "chapter_title": consumed.get("chapter_title"),
+        "section_path": consumed.get("section_path") or [],
+        "source_locator": consumed.get("source_locator"),
         "reminder_event_id": consumed.get("raw_event_id"),
     }
     session.set_question(excerpt, "knowledge", q_num=q_num, metadata=metadata)

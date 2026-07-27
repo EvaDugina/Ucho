@@ -56,6 +56,8 @@ async def test_book_metadata_and_excerpt_are_fenced_user_data(monkeypatch):
     result = await llm.ask_book_question(
         title=malicious,
         author=malicious,
+        chapter_title=malicious,
+        section_path=[malicious],
         excerpt=malicious,
     )
 

@@ -1,3 +1,4 @@
 # Proxy connector для Telegram polling через aiogram AiohttpSession(proxy=...).
 aiohttp-socks==0.9.0
 python-socks[asyncio]==2.5.3
+markdown-it-py==4.2.0

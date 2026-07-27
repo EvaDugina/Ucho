@@ -3,11 +3,11 @@
 ## brunelleschi_stage
 
 - Стадия: POC B
-- Последнее обновление: 2026-07-27
+- Последнее обновление: 2026-07-28
 
 ## technology
 
-- Python 3.12, aiogram 3.13, APScheduler 3.10.
+- Python 3.12, aiogram 3.13, APScheduler 3.10, markdown-it-py 4.2.
 - OpenAI-compatible LLM: OpenRouter при непустом `OPENROUTER_API_KEY`, иначе
   AITunnel. Primary/fallback задаются env.
 - Файловый vault вместо БД; Git CLI как scoped safety-net и push.
@@ -50,8 +50,14 @@
 version/current, после чего захваченные pending-дельты получают status
 `synthesized`.
 
-`books.py` разбирает TXT/MD/FB2/EPUB в памяти. Оригинал и metadata сохраняются под
-`books/<sha-prefix>`. EPUB ZIP не извлекается. Общие записи идут через
+`books.py` без LLM разбирает EPUB/FB2/Markdown и строит версионированный
+`structure.json`. EPUB использует nav/NCX, при их отсутствии — linear spine;
+FB2 — верхние section основного body; Markdown — CommonMark headings. Цитата
+120–1200 символов никогда не пересекает верхнюю главу. Только после выбора
+`BookExcerpt` диалоговый слой вызывает `ask_book_question`.
+
+Оригинал, нормализованный текст, metadata и структура сохраняются под стабильным
+`books/<book-id>`. EPUB ZIP не извлекается. Общие записи идут через
 `books_git_wrap`; персональные — через `git_wrap`.
 
 Ключевые модули:
@@ -87,7 +93,7 @@ users/<uid>/
   01_personality/about/versions/*.md
   _session.json
   _state.json
-books/<book-id>/{source.*,text.txt,metadata.json}
+books/<book-id>/{source.*,text.txt,structure.json,metadata.json}
 .psycho/{users.json,log.md}
 ```
 
@@ -135,6 +141,16 @@ docker compose run --rm bot python scripts/migrate_simplified_storage.py --apply
 
 Первый вызов только preview. Автоматически при старте миграция не запускается.
 
+Книжный индекс обновляется отдельно при остановленном боте:
+
+```powershell
+docker compose run --rm bot python scripts/reindex_books.py
+docker compose run --rm bot python scripts/reindex_books.py --apply
+```
+
+Скрипт читает сохранённые EPUB/FB2/Markdown, сохраняет book ID и raw-ссылки.
+`--apply` удаляет старые TXT и очищает только их активные personal settings.
+
 ### Бэкапы
 
 Для POC B отдельная backup-система отложена. Git-репозиторий vault даёт
@@ -159,6 +175,8 @@ Python logging пишет stderr/docker logs и ротируемый `.logs/bot.
 - Whitelist применяется к message и callback.
 - Секреты только в `.env`.
 - XML DTD/entity запрещены; ZIP paths/объём/число членов проверяются.
+- EPUB/FB2/Markdown разбираются локально; LLM не участвует в индексации,
+  извлечении metadata или выборе фрагмента.
 - Книжные ID и metadata проверяются до построения пути; symlink-книги отклоняются.
 - Session ID ограничен безопасным набором символов до построения пути JSONL.
 - Telegram/LLM dynamic output экранируется перед HTML.
@@ -201,12 +219,14 @@ Intentionally deferred:
 ### Active plans
 
 - Реализовано: упрощённое storage/analysis ядро, общая библиотека, migration.
+- Реализовано: структурный книжный индекс и переиндексация сохранённых исходников.
 - Отложено: управление жизненным циклом общих книг.
 
 ### Manual verification scenarios
 
 1. Новый пользователь: `/ask` → ответ → `/about`; проверить raw/mood/deltas/version.
-2. `/upload` EPUB → `/sea` → выбрать книгу → ответить на вопрос.
+2. `/upload` EPUB → проверить главы в `structure.json` → `/sea` → выбрать книгу →
+   ответить на вопрос.
 3. Дождаться книжной цитаты → ответить обычным текстом → убедиться, что score вырос
    один раз и pending очищен.
 4. Preview миграции старого fixture-vault → apply → повторный apply.
@@ -219,6 +239,8 @@ Intentionally deferred:
 - 2026-07-27: EPUB разбирается только in-memory stdlib-парсером.
 - 2026-07-27: персона, голос, лицо и пользовательские настройки тона удалены.
 - 2026-07-27: все фоновые пути повторно применяют актуальный whitelist.
+- 2026-07-28: EPUB/FB2/Markdown индексируются обычными парсерами; LLM видит только
+  выбранную цитату, а верхняя глава служит её жёсткой границей.
 
 ### Технический долг
 
@@ -231,11 +253,14 @@ Intentionally deferred:
 
 - 2026-07-27: удалены персона и face-подсистема; документация приведена к
   нейтральной упрощённой архитектуре.
+- 2026-07-28: TXT/PDF исключены из загрузки; добавлены structure.json и ручная
+  переиндексация общей библиотеки.
 
 ## ai_pipeline
 
 - `ask`: один вопрос по теме или затравке.
-- `ask_book_question`: вопрос только по переданному фрагменту.
+- `ask_book_question`: вопрос только по уже выбранному фрагменту и его chapter
+  metadata; полная книга модели не передаётся.
 - `classify_mood`: categorical sign/energy/direction/quality/dominance.
 - `process`: нейтральная reaction + personality deltas.
 - `synthesize_about`: нейтральный внутренний профиль.

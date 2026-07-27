@@ -244,6 +244,8 @@ async def ask_book_question(
     *,
     title: str,
     author: str,
+    chapter_title: str,
+    section_path: list[str],
     excerpt: str,
 ) -> dict:
     system = (
@@ -254,7 +256,12 @@ async def ask_book_question(
     )
     profile_context = _profile_context_block()
     book_metadata = json.dumps(
-        {"title": title, "author": author or "не указан"},
+        {
+            "title": title,
+            "author": author or "не указан",
+            "chapter": chapter_title or "не указана",
+            "section_path": section_path,
+        },
         ensure_ascii=False,
     )
     user = "\n\n".join(
