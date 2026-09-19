@@ -7,11 +7,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from .. import userctx
-from ..config import BOOKS_PATH, LOG_PATH, META_DIR, VAULT_PATH
+from ..config import BOOKS_PATH, LOG_PATH, META_DIR
 
 log = logging.getLogger(__name__)
 
@@ -42,9 +41,6 @@ def state_file() -> Path:
 
 def ensure_layout() -> None:
     """Создать только действующую схему текущего пользователя."""
-    legacy_meta = VAULT_PATH / ".psycho"
-    if legacy_meta.is_dir() and not legacy_meta.is_symlink() and not META_DIR.exists():
-        os.rename(legacy_meta, META_DIR)
     sessions_dir().mkdir(parents=True, exist_ok=True)
     (mood_dir() / "events").mkdir(parents=True, exist_ok=True)
     (personality_dir() / "about" / "versions").mkdir(parents=True, exist_ok=True)

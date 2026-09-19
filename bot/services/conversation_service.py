@@ -73,7 +73,7 @@ async def process_probe_answer(
         )
         current.record_mood(per_message)
         mood_vec = moods.session_mood(current.mood_trajectory, mood_file.baseline())
-        mood_file.set_current(mood_vec)
+        mood_file.set_current(mood_vec, source_at=event.get("ts"))
         moods.log_turn(
             mood_vec,
             raw_event_id=str(event["event_id"]),

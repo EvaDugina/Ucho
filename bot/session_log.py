@@ -60,16 +60,13 @@ def timestamped_filename(session_id: str, first_at: object | None = None) -> str
 
 
 def _session_file(directory: Path, session_id: str, first_at: object | None) -> Path:
-    """Найти существующий raw по UUID, сохранив совместимость до ручной миграции."""
+    """Найти канонический timestamp_UUID файл существующей сессии."""
     suffix = f"_{filename_uuid(session_id)}.jsonl"
     matches = [
         path
         for path in directory.glob(f"*{suffix}")
         if SESSION_FILE_RE.fullmatch(path.stem)
     ]
-    legacy = directory / f"{session_id}.jsonl"
-    if legacy.exists() or legacy.is_symlink():
-        matches.append(legacy)
     if len(matches) > 1:
         raise ValueError(f"multiple raw files for session_id={session_id!r}")
     path = matches[0] if matches else directory / timestamped_filename(session_id, first_at)
@@ -212,11 +209,6 @@ def iter_events() -> list[dict]:
                     continue
                 if not isinstance(row, dict):
                     continue
-                file_match = SESSION_FILE_RE.fullmatch(path.stem)
-                row.setdefault("session_id", file_match.group(1) if file_match else path.stem)
-                row.setdefault("event_id", f"{row['session_id']}:{idx:06d}")
-                if "telegram_message_id" not in row:
-                    row["telegram_message_id"] = row.get("message_id")
                 out.append(row)
         except OSError:
             log.exception("failed to read session log %s", path)
@@ -270,7 +262,7 @@ def message_ids(session_id: str | None = None) -> list[int]:
     ids: list[int] = []
     events = session_events(session_id) if session_id else iter_events()
     for e in events:
-        mid = e.get("telegram_message_id", e.get("message_id"))
+        mid = e.get("telegram_message_id")
         if mid is None:
             continue
         try:
@@ -283,7 +275,7 @@ def message_ids(session_id: str | None = None) -> list[int]:
 def find_session_by_message_id(message_id: int) -> str | None:
     mid = int(message_id)
     for e in reversed(iter_events()):
-        if e.get("telegram_message_id", e.get("message_id")) == mid:
+        if e.get("telegram_message_id") == mid:
             sid = e.get("session_id")
             return str(sid) if sid else None
     return None
@@ -303,7 +295,7 @@ def find_question_by_q_num(q_num: int) -> dict | None:
         if e.get("kind") != "question":
             continue
         return {
-            "message_id": e.get("telegram_message_id", e.get("message_id")),
+            "message_id": e.get("telegram_message_id"),
             "q_num": target,
             "text": question_field_text(e),
             "domain": e.get("domain") or "",
@@ -313,7 +305,7 @@ def find_question_by_q_num(q_num: int) -> dict | None:
         }
     if fallback is not None:
         return {
-            "message_id": fallback.get("telegram_message_id", fallback.get("message_id")),
+            "message_id": fallback.get("telegram_message_id"),
             "q_num": target,
             "text": question_field_text(fallback),
             "domain": fallback.get("domain") or "",

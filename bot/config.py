@@ -114,7 +114,7 @@ def _model_env(name: str) -> str | None:
 
 def _fallback_env(name: str) -> str | None:
     if _USE_OPENROUTER:
-        return os.getenv(f"OPENROUTER_FALLBACK_{name}") or os.getenv(f"OPENROUTER_MODEL_FALLBACK_{name}")
+        return os.getenv(f"OPENROUTER_FALLBACK_{name}")
     return os.getenv(f"LLM_FALLBACK_{name}")
 
 

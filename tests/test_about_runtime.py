@@ -41,9 +41,6 @@ def test_delta_validation_and_ids(as_user):
 @pytest.mark.parametrize("counter", ["messages_seen: 1", 'Учтено сообщений: "недостаточно данных"'])
 def test_removed_message_counter_is_not_saved(as_user, counter):
     item = _record()[0]
-    store = about._load_store()
-    store["items"][0]["raw_event_id"] = "legacy-import"
-    about.atomic_write_json(about.deltas_path(), store)
     about.save_synthesis(f"---\n{counter}\n---\n\n### Манера речи\nОписание.", [item["id"]])
     profile = about.current_profile()
     assert "Учтено сообщений:" not in profile
@@ -109,7 +106,7 @@ async def test_existing_fenced_profile_is_presented_without_new_version(as_user,
 
 
 @pytest.mark.asyncio
-async def test_missing_metadata_is_repaired_once_preserving_body_and_evidence(as_user, monkeypatch):
+async def test_no_pending_does_not_rewrite_profile_or_evidence(as_user, monkeypatch):
     _record()
     _record()  # Две дельты одного raw-сообщения — всё ещё одно сообщение.
     store = about._load_store()
@@ -133,17 +130,15 @@ async def test_missing_metadata_is_repaired_once_preserving_body_and_evidence(as
     monkeypatch.setattr(about_service.llm, "about_present", present)
     at = datetime(2026, 9, 19, 22, 30, tzinfo=timezone.utc)
     _, profile, version = await about_service.refresh_and_present(at=at)
-    assert version == "2026-09-20_01-30-00"
+    assert version is None
     assert about.profile_body(profile) == "### Манера речи\nПрежний подробный текст."
     assert "updated:" not in profile
     assert "Учтено сообщений:" not in profile
-    assert 'Открытость: "4/5"\n' in profile
-    assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
     assert about.deltas_path().read_bytes() == before_deltas
     _, repeated, second_version = await about_service.refresh_and_present(at=at)
     assert repeated == profile
     assert second_version is None
-    assert calls == ["about"]
+    assert calls == []
 
 
 @pytest.mark.asyncio

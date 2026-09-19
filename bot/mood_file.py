@@ -5,7 +5,7 @@ import logging
 import re
 from pathlib import Path
 
-from . import vault
+from . import moods, vault
 from .atomic import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -19,11 +19,17 @@ def ensure() -> None:
     vault.mood_dir().mkdir(parents=True, exist_ok=True)
 
 
-def set_current(mv: dict) -> None:
+def set_current(
+    mv: dict, *, source_at: object | None = None, analyzed_at: object | None = None,
+    trigger: str = "message",
+) -> None:
     ensure()
     try:
         content = (
             "---\n"
+            f"analyzed_at: {moods._event_datetime(analyzed_at).isoformat(timespec='seconds')}\n"
+            f"source_at: {moods._event_datetime(source_at).isoformat(timespec='seconds')}\n"
+            f"trigger: {trigger}\n"
             f"valence: {float(mv.get('valence', 0.0)):.3f}\n"
             f"arousal: {float(mv.get('arousal', 0.0)):.3f}\n"
             f"dominance: {float(mv.get('dominance', 0.0)):.3f}\n"
@@ -35,11 +41,13 @@ def set_current(mv: dict) -> None:
             f"n: {int(mv.get('n', 0))}\n"
             "---\n\n"
             "# Текущее настроение\n\n"
-            "Автоматический live-снимок последней активной сессии.\n"
+            "Оценка по последнему проанализированному сообщению. Дата исходного текста — "
+            "`source_at`, дата анализа — `analyzed_at`; это не диагноз.\n"
         )
         atomic_write_text(path(), content)
     except Exception:
         log.exception("mood current update failed (non-fatal)")
+        raise
 
 
 def baseline() -> tuple[float, float, float]:

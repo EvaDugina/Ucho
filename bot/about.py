@@ -67,11 +67,8 @@ def localize_profile_metadata(profile: str) -> str:
     for line in header.splitlines():
         key, separator, raw = line.partition(":")
         key = key.strip()
-        if key in {"updated", "messages_seen", "Учтено сообщений"}:
-            continue
         label = PROFILE_LABELS.get(key, key)
         if not separator or label not in PROFILE_FIELDS:
-            rows.append(line)
             continue
         raw = raw.strip()
         try:

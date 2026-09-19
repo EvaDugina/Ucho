@@ -3,8 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from bot import session_log, userctx, vault
-from scripts import rename_session_files
+from bot import session_log, vault
 
 
 def test_markdown_view_rebuilds_from_jsonl(as_user):
@@ -30,9 +29,9 @@ def test_markdown_view_rebuilds_from_jsonl(as_user):
     assert "ручная правка" not in rebuilt
 
 
-def test_renamed_sessions_keep_raw_ids_and_accept_new_events(as_user):
+def test_timestamped_sessions_keep_raw_ids_and_accept_new_events(as_user):
     at = datetime(2026, 9, 19, 12, 34, 56, tzinfo=timezone.utc)
-    session_ids = [uuid.uuid4().hex, "legacy-import"]
+    session_ids = [uuid.uuid4().hex, "telegram-import"]
     original_events = []
     for message_id, session_id in enumerate(session_ids, 10):
         event = session_log.append_required(
@@ -44,16 +43,6 @@ def test_renamed_sessions_keep_raw_ids_and_accept_new_events(as_user):
             message_id=message_id,
         )
         original_events.append(event)
-        named = vault.sessions_dir() / session_log.timestamped_filename(session_id, at)
-        named.rename(vault.sessions_dir() / f"{session_id}.jsonl")
-        named.with_suffix(".md").rename(vault.sessions_dir() / f"{session_id}.md")
-
-    root = userctx.user_root().parents[1]
-    changes, already_named = rename_session_files.plan(root, uid=as_user)
-    assert len(changes) == 2
-    assert already_named == 0
-    rename_session_files.apply(changes)
-    assert rename_session_files.plan(root, uid=as_user) == ([], 2)
 
     for message_id, (session_id, first) in enumerate(zip(session_ids, original_events), 10):
         named = vault.sessions_dir() / session_log.timestamped_filename(session_id, at)

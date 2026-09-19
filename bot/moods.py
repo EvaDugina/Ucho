@@ -4,9 +4,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from . import vault
 from .atomic import atomic_write_text
+from .config import DAILY_TZ
 
 log = logging.getLogger(__name__)
 
@@ -32,20 +35,12 @@ _RECENCY_DECAY = 0.6
 
 
 def normalize_per_msg(value: object) -> dict:
-    data = value if isinstance(value, dict) else {}
-    return {
-        "sign": data.get("sign") if data.get("sign") in SIGNS else "0",
-        "energy": data.get("energy") if data.get("energy") in ENERGY else "normal",
-        "direction": (
-            data.get("direction") if data.get("direction") in DIRECTION else "neutral"
-        ),
-        "quality": (
-            data.get("quality") if data.get("quality") in QUALITIES else "спокойствие"
-        ),
-        "dominance": (
-            data.get("dominance") if data.get("dominance") in DOMINANCE else "normal"
-        ),
-    }
+    """Принять только полный результат; отсутствие оценки не означает спокойствие."""
+    allowed = {"sign": SIGNS, "energy": ENERGY, "direction": DIRECTION,
+               "quality": QUALITIES, "dominance": DOMINANCE}
+    if not isinstance(value, dict) or any(value.get(k) not in v for k, v in allowed.items()):
+        raise ValueError("incomplete or invalid mood classification")
+    return {key: value[key] for key in allowed}
 
 
 def _to_numeric(per_msg: dict) -> tuple[int, int, int]:
@@ -65,21 +60,9 @@ def session_mood(
     trajectory: list[dict],
     prior: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> dict:
-    items = [normalize_per_msg(item) for item in trajectory if isinstance(item, dict)]
+    items = [normalize_per_msg(item) for item in trajectory]
     if not items:
-        valence, arousal, dominance = prior
-        return {
-            "valence": valence,
-            "arousal": arousal,
-            "dominance": dominance,
-            "sign": _axis_label(valence, "+", "0", "-"),
-            "energy": _axis_label(arousal, "high", "normal", "low"),
-            "dominance_label": _axis_label(dominance, "high", "normal", "low"),
-            "quality": "спокойствие",
-            "direction": "neutral",
-            "stability": "adequate",
-            "n": 0,
-        }
+        raise ValueError("mood requires at least one observation")
 
     weights = [_RECENCY_DECAY ** (len(items) - 1 - index) for index in range(len(items))]
     numeric = [_to_numeric(item) for item in items]
@@ -122,6 +105,7 @@ def session_mood(
         "quality": quality,
         "direction": items[-1]["direction"],
         "stability": (
+            "insufficient_data" if len(items) < 3 else
             "rigid" if variance < 0.15 else "labile" if variance > 0.75 else "adequate"
         ),
         "n": len(items),
@@ -129,26 +113,30 @@ def session_mood(
 
 
 def _event_datetime(value: object | None) -> datetime:
+    tz = ZoneInfo(DAILY_TZ)
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str) and value:
+        dt = value
+    elif isinstance(value, str) and value:
         try:
-            return datetime.fromisoformat(value)
+            dt = datetime.fromisoformat(value)
         except ValueError:
-            pass
-    return datetime.now()
+            dt = datetime.now(tz)
+    else:
+        dt = datetime.now(tz)
+    return dt.astimezone(tz) if dt.tzinfo else dt.replace(tzinfo=tz)
 
 
-def _event_already_logged(raw_event_id: str) -> bool:
+def event_already_logged(raw_event_id: str) -> bool:
     events_dir = vault.mood_dir() / "events"
     if not events_dir.exists():
         return False
-    marker = f'"raw_event_id": "{raw_event_id}"'
     for path in events_dir.glob("*.jsonl"):
         try:
-            if marker in path.read_text(encoding="utf-8"):
-                return True
-        except OSError:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                item = json.loads(line)
+                if item.get("raw_event_id") == raw_event_id and item.get("trigger") == "message":
+                    return True
+        except (OSError, ValueError):
             log.exception("mood event scan failed: %s", path)
     return False
 
@@ -160,14 +148,19 @@ def log_turn(
     session_id: str | None = None,
     q_num: int | None = None,
     at: object | None = None,
+    trigger: str = "message",
+    analyzed_at: object | None = None,
 ) -> bool:
-    """Записать ровно одно mood-событие для raw event."""
-    if not raw_event_id or _event_already_logged(raw_event_id):
+    """Один анализ на сообщение; явные /about фиксируются каждый раз отдельно."""
+    if not raw_event_id or (trigger == "message" and event_already_logged(raw_event_id)):
         return False
     try:
-        occurred_at = _event_datetime(at)
+        occurred_at = _event_datetime(analyzed_at)
         entry = {
             "ts": occurred_at.isoformat(timespec="seconds"),
+            "source_at": _event_datetime(at).isoformat(timespec="seconds"),
+            "analysis_id": uuid4().hex,
+            "trigger": trigger,
             "raw_event_id": raw_event_id,
             "session_id": session_id,
             "q_num": q_num,

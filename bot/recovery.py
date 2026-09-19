@@ -48,23 +48,26 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         event.get("q_num") or current.current_q_num or vault.next_q_num()
     )
     transcript = current.render_transcript()
-    mood_vector = None
     try:
-        classified = await classify_mood(
-            text,
-            about.render_for_prompt(),
-            session_context=transcript,
-        )
-        current.record_mood(classified)
-        mood_vector = moods.session_mood(current.mood_trajectory, mood_file.baseline())
-        mood_file.set_current(mood_vector)
-        moods.log_turn(
-            mood_vector,
-            raw_event_id=raw_event_id,
-            session_id=current.id,
-            q_num=q_num,
-            at=event.get("ts"),
-        )
+        if not moods.event_already_logged(raw_event_id):
+            classified = await classify_mood(
+                text,
+                about.render_for_prompt(),
+                session_context=transcript,
+            )
+            current.record_mood(classified)
+            mood_vector = moods.session_mood(current.mood_trajectory, mood_file.baseline())
+            mood_file.set_current(mood_vector, source_at=event.get("ts"))
+            moods.log_turn(
+                mood_vector,
+                raw_event_id=raw_event_id,
+                session_id=current.id,
+                q_num=q_num,
+                at=event.get("ts"),
+            )
+    except Exception:
+        log.warning("mood recovery unavailable uid=%s; previous mood retained", uid)
+    try:
         result = await process_answer(
             question=question,
             answer=text,
