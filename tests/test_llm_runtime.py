@@ -80,21 +80,22 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
     async def chat(task, messages, temperature):
         return {"register": "книжный: образный", "tone": "спокойный", "openness": 4,
                 "provocation_tolerance": None,
-                "preferred_response_detail": "brief", "direct_questions_attitude": "needs_context",
-                "preferred_dialogue_pace": "reflective",
+                "thought_flow": "Сопоставляет примеры и формулирует общий вывод.",
+                "direct_questions_attitude": "needs_context",
                 "metadata_updates": [],
                 "profile": "```markdown\n### Манера речи\nОписание.\n```"}
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     profile = await llm.synthesize_about("", [{"quote": "Мой ответ"}])
     assert profile.startswith(
-        '---\nПредпочтительная подробность ответов: "кратко"\n'
-        'Отношение к прямым вопросам: "нужен предварительный контекст"\n'
-        'Предпочтительный темп диалога: "вдумчивый"\n'
+        '---\nРегистр речи: "книжный: образный"\nТон речи: "спокойный"\n'
+        'Открытость: "4/5"\nПереносимость провокаций: "..."\n'
+        'Ход мысли: "Сопоставляет примеры и формулирует общий вывод."\n'
+        'Отношение к прямым вопросам: "нужен предварительный контекст"\n---\n'
     )
     assert 'Регистр речи: "книжный: образный"\n' in profile
     assert 'Открытость: "4/5"\n' in profile
-    assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
+    assert 'Переносимость провокаций: "..."\n' in profile
     assert profile.endswith("### Манера речи\nОписание.")
     assert "```" not in profile
 
@@ -103,14 +104,12 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
 @pytest.mark.parametrize("changes", [
     {"openness": 6}, {"openness": True}, {"provocation_tolerance": "unknown"},
     {"profile": ""}, {"register": ["книжный"]},
-    {"preferred_response_detail": "very_long"}, {"direct_questions_attitude": 3},
-    {"preferred_dialogue_pace": "fast_reply"},
+    {"thought_flow": ["последовательный"]}, {"direct_questions_attitude": 3},
 ])
 async def test_about_rejects_invalid_metadata_or_empty_body(monkeypatch, changes):
     async def chat(task, messages, temperature):
         return {"register": None, "tone": None, "openness": None,
-                "preferred_response_detail": None, "direct_questions_attitude": None,
-                "preferred_dialogue_pace": None,
+                "thought_flow": None, "direct_questions_attitude": None,
                 "metadata_updates": [],
                 "provocation_tolerance": None, "profile": "Описание.", **changes}
 
@@ -122,8 +121,8 @@ async def test_about_rejects_invalid_metadata_or_empty_body(monkeypatch, changes
 @pytest.mark.asyncio
 async def test_unknown_preferences_remain_unknown_and_all_fields_are_required(monkeypatch):
     response = {"register": None, "tone": None, "openness": None,
-                "preferred_response_detail": None, "direct_questions_attitude": None,
-                "preferred_dialogue_pace": None, "provocation_tolerance": None,
+                "thought_flow": None, "direct_questions_attitude": None,
+                "provocation_tolerance": None,
                 "metadata_updates": [],
                 "profile": "### Манера речи\nМало наблюдений."}
 
@@ -132,16 +131,16 @@ async def test_unknown_preferences_remain_unknown_and_all_fields_are_required(mo
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     profile = await llm.synthesize_about("", [{"quote": "Привет"}])
-    assert profile.count('"недостаточно данных"') == 7
-    del response["preferred_dialogue_pace"]
+    assert profile.count('"..."') == 6
+    del response["thought_flow"]
     with pytest.raises(LLMError):
         await llm.synthesize_about("", [{"quote": "Привет"}])
 
 
 def _about_candidate(**changes):
     return {"register": "книжный", "tone": "сдержанный", "openness": 2,
-            "preferred_response_detail": None, "direct_questions_attitude": None,
-            "preferred_dialogue_pace": None, "provocation_tolerance": None,
+            "thought_flow": None, "direct_questions_attitude": None,
+            "provocation_tolerance": None,
             "metadata_updates": [], "profile": "### Манера речи\nУточнённый текст.", **changes}
 
 
@@ -160,14 +159,15 @@ async def test_existing_metadata_is_preserved_despite_model_simplification(monke
     async def chat(task, messages, temperature):
         assert BASELINE in messages[-1]["content"]
         assert "new-value" in messages[-1]["content"]
-        return _about_candidate(preferred_response_detail="brief")
+        return _about_candidate(thought_flow="Линейный", direct_questions_attitude="welcomes")
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     result = await llm.synthesize_about(BASELINE, [{"id": "new-value", "quote": "Ценю дружбу"}])
     fields = about.profile_metadata(result)
     assert all(fields[key] == value for key, value in about.profile_metadata(BASELINE).items())
     # Нельзя даже заполнить новое поле предположением без ссылки на свидетельство.
-    assert fields["Предпочтительная подробность ответов"] == about.UNKNOWN_VALUE
+    assert fields["Ход мысли"] == about.UNKNOWN_VALUE
+    assert fields["Отношение к прямым вопросам"] == about.UNKNOWN_VALUE
     assert about.profile_body(result) == "### Манера речи\nУточнённый текст."
 
 
@@ -176,17 +176,18 @@ async def test_only_evidenced_metadata_fields_can_change(monkeypatch):
     from bot import about
 
     async def chat(*args, **kwargs):
-        return _about_candidate(preferred_response_detail="detailed", metadata_updates=[
-            {"field": "preferred_response_detail", "delta_ids": ["preference-1"],
-             "reason": "Явное общее пожелание развёрнутых ответов."},
+        return _about_candidate(thought_flow="В этом фрагменте сравнивает альтернативы перед выводом.",
+                                metadata_updates=[
+            {"field": "thought_flow", "delta_ids": ["reasoning-1"],
+             "reason": "Сопоставляет свойства двух вариантов и явно формулирует выбор."},
         ])
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     result = await llm.synthesize_about(BASELINE, [
-        {"id": "preference-1", "quote": "В целом отвечай подробно с примерами"},
+        {"id": "reasoning-1", "quote": "А дешевле, Б надёжнее. Мне важнее надёжность, выбираю Б."},
     ])
     fields = about.profile_metadata(result)
-    assert fields["Предпочтительная подробность ответов"] == "подробно"
+    assert fields["Ход мысли"] == "В этом фрагменте сравнивает альтернативы перед выводом."
     assert all(fields[key] == value for key, value in about.profile_metadata(BASELINE).items())
 
 

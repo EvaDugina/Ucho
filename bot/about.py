@@ -33,33 +33,24 @@ ASPECTS = {
 }
 
 PROFILE_LABELS = {
-    "preferred_response_detail": "Предпочтительная подробность ответов",
-    "direct_questions_attitude": "Отношение к прямым вопросам",
-    "preferred_dialogue_pace": "Предпочтительный темп диалога",
     "register": "Регистр речи",
     "tone": "Тон речи",
     "openness": "Открытость",
     "provocation_tolerance": "Переносимость провокаций",
+    "thought_flow": "Ход мысли",
+    "direct_questions_attitude": "Отношение к прямым вопросам",
 }
 PROFILE_VALUE_LABELS = {
-    "preferred_response_detail": {
-        "brief": "кратко", "balanced": "умеренно подробно", "detailed": "подробно",
-        "context_dependent": "зависит от ситуации",
-    },
     "direct_questions_attitude": {
         "welcomes": "принимает прямые вопросы",
         "needs_context": "нужен предварительный контекст",
         "avoids": "предпочитает непрямой заход",
         "context_dependent": "зависит от темы",
     },
-    "preferred_dialogue_pace": {
-        "reflective": "вдумчивый", "balanced": "умеренный", "dynamic": "динамичный",
-        "context_dependent": "зависит от ситуации",
-    },
     "provocation_tolerance": {"low": "низкая", "medium": "средняя", "high": "высокая"},
 }
 PROFILE_FIELDS = tuple(PROFILE_LABELS.values())
-UNKNOWN_VALUE = "недостаточно данных"
+UNKNOWN_VALUE = "..."
 
 
 def _split_profile(profile: str) -> tuple[str, str]:
@@ -98,6 +89,8 @@ def localize_profile_metadata(profile: str) -> str:
         if value is None or raw.lower() in {"", "null", "~"}:
             value = UNKNOWN_VALUE
         if isinstance(value, str):
+            if value.strip().casefold() in {"", "недостаточно данных", "...", "…"}:
+                value = UNKNOWN_VALUE
             field = next(name for name, title in PROFILE_LABELS.items() if title == label)
             value = PROFILE_VALUE_LABELS.get(field, {}).get(value, value)
         values[label] = value

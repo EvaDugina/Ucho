@@ -41,19 +41,34 @@ def test_delta_validation_and_ids(as_user):
 def test_new_metadata_fields_do_not_rewrite_body_or_evidence(as_user):
     item = _record()[0]
     before = about.deltas_path().read_bytes()
-    current = '---\nРегистр речи: "разговорный"\n---\n\n### Манера речи\nПрежний текст.'
+    current = (
+        '---\nРегистр речи: "разговорный"\n'
+        'Предпочтительная подробность ответов: "подробно"\n'
+        'Предпочтительный темп диалога: "вдумчивый"\n'
+        'Отношение к прямым вопросам: "недостаточно данных"\n'
+        '---\n\n### Манера речи\nПрежний текст.'
+    )
     about.save_synthesis(current, [])
     updated = about.current_profile()
     assert updated.startswith(
-        '---\nПредпочтительная подробность ответов: "недостаточно данных"\n'
-        'Отношение к прямым вопросам: "недостаточно данных"\n'
-        'Предпочтительный темп диалога: "недостаточно данных"\n'
+        '---\nРегистр речи: "разговорный"\nТон речи: "..."\n'
+        'Открытость: "..."\nПереносимость провокаций: "..."\n'
+        'Ход мысли: "..."\nОтношение к прямым вопросам: "..."\n---\n'
     )
+    assert "Предпочтительная подробность ответов" not in updated
+    assert "Предпочтительный темп диалога" not in updated
+    assert "недостаточно данных" not in updated
     assert 'Регистр речи: "разговорный"' in updated
     assert about.profile_body(updated) == about.profile_body(current)
     assert about.has_profile_metadata(updated)
     assert about.deltas_path().read_bytes() == before
     assert about.pending_deltas()[0]["id"] == item["id"]
+
+
+@pytest.mark.parametrize("raw", ['null', '"недостаточно данных"', '"..."', '"…"', '""'])
+def test_unknown_metadata_uses_three_dots(raw):
+    profile = about.localize_profile_metadata(f'---\nthought_flow: {raw}\n---\n\nОписание.')
+    assert profile == '---\nХод мысли: "..."\n---\n\nОписание.'
 
 
 @pytest.mark.parametrize("counter", ["messages_seen: 1", 'Учтено сообщений: "недостаточно данных"'])
