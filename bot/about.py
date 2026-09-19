@@ -32,9 +32,15 @@ ASPECTS = {
     "triggers",
 }
 
-PROFILE_FIELDS = (
-    "updated", "messages_seen", "register", "tone", "openness", "provocation_tolerance",
-)
+PROFILE_LABELS = {
+    "messages_seen": "Учтено сообщений",
+    "register": "Регистр речи",
+    "tone": "Тон речи",
+    "openness": "Открытость",
+    "provocation_tolerance": "Переносимость провокаций",
+}
+PROFILE_FIELDS = tuple(PROFILE_LABELS.values())
+UNKNOWN_VALUE = "недостаточно данных"
 
 
 def _split_profile(profile: str) -> tuple[str, str]:
@@ -44,8 +50,8 @@ def _split_profile(profile: str) -> tuple[str, str]:
 
 
 def has_profile_metadata(profile: str) -> bool:
-    header, _ = _split_profile(profile)
-    keys = set(re.findall(r"^([a-z_]+):", header, flags=re.MULTILINE))
+    header, _ = _split_profile(localize_profile_metadata(profile))
+    keys = set(re.findall(r"^([^:\n]+):", header, flags=re.MULTILINE))
     return set(PROFILE_FIELDS) <= keys
 
 
@@ -53,14 +59,42 @@ def profile_body(profile: str) -> str:
     return _split_profile(profile)[1]
 
 
-def _with_system_metadata(profile: str, *, now: datetime, messages_seen: int) -> str:
+def localize_profile_metadata(profile: str) -> str:
+    """Перевести плоские метаданные без повторного анализа и изменения разделов."""
     header, body = _split_profile(profile)
+    if not header:
+        return normalize_profile(profile)
+    rows = []
+    for line in header.splitlines():
+        key, separator, raw = line.partition(":")
+        key = key.strip()
+        if key == "updated":
+            continue
+        label = PROFILE_LABELS.get(key, key)
+        if not separator or label not in PROFILE_FIELDS:
+            rows.append(line)
+            continue
+        raw = raw.strip()
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            value = raw[1:-1].replace("''", "'") if raw.startswith("'") and raw.endswith("'") else raw
+        if value is None or raw.lower() in {"", "null", "~"}:
+            value = UNKNOWN_VALUE
+        if label == PROFILE_LABELS["provocation_tolerance"] and isinstance(value, str):
+            value = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(value, value)
+        rows.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+    translated = "\n".join(rows)
+    return f"---\n{translated}\n---\n\n{body}" if rows else body
+
+
+def _with_system_metadata(profile: str, *, messages_seen: int) -> str:
+    header, body = _split_profile(localize_profile_metadata(profile))
     rows = [line for line in header.splitlines()
-            if not re.match(r"^(updated|messages_seen):", line)]
-    keys = set(re.findall(r"^([a-z_]+):", "\n".join(rows), flags=re.MULTILINE))
-    rows.extend(f"{key}: null" for key in PROFILE_FIELDS[2:] if key not in keys)
-    header = "\n".join([f"updated: '{now.date().isoformat()}'",
-                        f"messages_seen: {messages_seen}", *rows])
+            if not line.startswith(f"{PROFILE_FIELDS[0]}:")]
+    keys = set(re.findall(r"^([^:\n]+):", "\n".join(rows), flags=re.MULTILINE))
+    rows.extend(f'{key}: "{UNKNOWN_VALUE}"' for key in PROFILE_FIELDS[1:] if key not in keys)
+    header = "\n".join([f"{PROFILE_FIELDS[0]}: {messages_seen}", *rows])
     return f"---\n{header}\n---\n\n{body}"
 
 
@@ -175,7 +209,7 @@ def normalize_profile(profile: str) -> str:
 
 def current_profile() -> str:
     try:
-        return normalize_profile(path().read_text(encoding="utf-8")) if path().exists() else ""
+        return localize_profile_metadata(path().read_text(encoding="utf-8")) if path().exists() else ""
     except OSError:
         log.exception("failed to read current personality profile")
         return ""
@@ -204,7 +238,7 @@ def save_synthesis(
         if item.get("raw_event_id")
         and (item.get("status") == "synthesized" or item.get("id") in captured)
     }
-    body = _with_system_metadata(body, now=now, messages_seen=len(source_ids))
+    body = _with_system_metadata(body, messages_seen=len(source_ids))
     content = body.rstrip() + "\n"
     for item in store["items"]:
         if item.get("id") in captured and item.get("status") == "pending":

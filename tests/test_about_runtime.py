@@ -59,8 +59,8 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
     assert spoken.startswith("Я вижу")
     assert about.profile_body(profile) == "# Внутренний профиль\n\nПоследователен."
     assert about.has_profile_metadata(profile)
-    assert "messages_seen: 1\n" in profile
-    assert "updated: '2026-07-27'\n" in profile
+    assert "Учтено сообщений: 1\n" in profile
+    assert "updated:" not in profile
     assert version == "2026-07-27_12-30-00"
     assert [call[0] for call in calls] == ["synthesize", "present"]
     assert not about.pending_deltas()
@@ -84,13 +84,13 @@ async def test_existing_fenced_profile_is_presented_without_new_version(as_user,
     about.path().write_text(original, encoding="utf-8")
 
     async def present(value):
-        assert value == profile
+        assert value == about.localize_profile_metadata(profile)
         return "Я вижу твой стиль."
 
     monkeypatch.setattr(about_service.llm, "about_present", present)
     spoken, returned, version = await about_service.refresh_and_present()
     assert spoken == "Я вижу твой стиль."
-    assert returned == profile
+    assert returned == about.localize_profile_metadata(profile)
     assert version is None
     assert about.path().read_text(encoding="utf-8") == original
 
@@ -122,10 +122,10 @@ async def test_missing_metadata_is_repaired_once_preserving_body_and_evidence(as
     _, profile, version = await about_service.refresh_and_present(at=at)
     assert version == "2026-09-20_01-30-00"
     assert about.profile_body(profile) == "### Манера речи\nПрежний подробный текст."
-    assert "updated: '2026-09-20'\n" in profile
-    assert "messages_seen: 1\n" in profile
-    assert 'openness: "4/5"\n' in profile
-    assert "provocation_tolerance: null\n" in profile
+    assert "updated:" not in profile
+    assert "Учтено сообщений: 1\n" in profile
+    assert 'Открытость: "4/5"\n' in profile
+    assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
     assert about.deltas_path().read_bytes() == before_deltas
     _, repeated, second_version = await about_service.refresh_and_present(at=at)
     assert repeated == profile

@@ -79,9 +79,9 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     profile = await llm.synthesize_about("", [{"quote": "Мой ответ"}])
-    assert profile.startswith('---\nregister: "книжный: образный"\n')
-    assert 'openness: "4/5"\n' in profile
-    assert "provocation_tolerance: null\n" in profile
+    assert profile.startswith('---\nРегистр речи: "книжный: образный"\n')
+    assert 'Открытость: "4/5"\n' in profile
+    assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
     assert profile.endswith("### Манера речи\nОписание.")
     assert "```" not in profile
 
