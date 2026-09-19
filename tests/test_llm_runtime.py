@@ -66,6 +66,7 @@ async def test_reaction_receives_only_supported_current_analysis(monkeypatch):
     result = await llm.process_answer("Что важно?", "Для меня честность важна.",
                                       "ethics", mood=mood)
     assert [task for task, _ in calls] == ["process", "reaction"]
+    assert "<<<CURRENT_MOOD" in calls[0][1]
     assert '"current_mood": {"sign": "+"' in calls[1][1]
     assert '"quote": "честность"' in calls[1][1]
     assert "несуществующая цитата" not in calls[1][1]
