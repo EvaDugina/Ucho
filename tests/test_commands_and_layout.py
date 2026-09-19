@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from bot import commands, handlers, userctx, vault
 from bot.config import OWNER_TELEGRAM_ID
@@ -10,8 +10,7 @@ from bot.errors import LLMError
 
 
 def test_exact_command_list_and_removed_handlers_absent():
-    command_names = [item.command for item in commands.BOT_COMMANDS + commands.ADMIN_COMMANDS]
-    assert command_names == [
+    assert [item.command for item in commands.BOT_COMMANDS] == [
         "pebble",
         "ucho",
         "ask",
@@ -19,6 +18,8 @@ def test_exact_command_list_and_removed_handlers_absent():
         "leta",
         "help",
         "start",
+    ]
+    assert [item.command for item in commands.ADMIN_COMMANDS] == [
         "upload",
         "sea",
         "adduser",
@@ -74,6 +75,94 @@ def test_start_registers_commands_after_chat_becomes_available():
     assert sent["scope"].chat_id == 1
     assert sent["commands"][-1].command == "users"
     message.answer.assert_awaited_once()
+
+
+def test_non_owner_start_and_help_hide_book_commands():
+    bot = SimpleNamespace(set_my_commands=AsyncMock())
+    message = SimpleNamespace(
+        bot=bot,
+        chat=SimpleNamespace(id=2),
+        from_user=SimpleNamespace(id=OWNER_TELEGRAM_ID + 1),
+        answer=AsyncMock(),
+    )
+
+    asyncio.run(handlers.cmd_start(message))
+    assert [item.command for item in bot.set_my_commands.await_args.kwargs["commands"]] == [
+        item.command for item in commands.BOT_COMMANDS
+    ]
+    assert "/sea" not in message.answer.await_args.args[0]
+
+    asyncio.run(handlers.cmd_help(message))
+    help_text = message.answer.await_args.args[0]
+    assert "/upload" not in help_text
+    assert "/sea" not in help_text
+
+
+def test_non_owner_cannot_upload_or_open_library(monkeypatch):
+    non_owner = OWNER_TELEGRAM_ID + 1
+    begin_upload_wait = Mock()
+    ingest = Mock()
+    list_books = Mock()
+    monkeypatch.setattr(handlers.books, "begin_upload_wait", begin_upload_wait)
+    monkeypatch.setattr(handlers.books, "ingest", ingest)
+    monkeypatch.setattr(handlers.books, "list_books", list_books)
+    bot = SimpleNamespace(download=AsyncMock())
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=non_owner),
+        document=SimpleNamespace(file_name="book.txt", file_size=100),
+        caption="/upload",
+        bot=bot,
+        answer=AsyncMock(),
+    )
+
+    asyncio.run(handlers.cmd_upload(message))
+    asyncio.run(handlers.on_document(message))
+    asyncio.run(handlers._handle_upload_document(message))
+    asyncio.run(handlers.cmd_sea(message))
+
+    begin_upload_wait.assert_not_called()
+    ingest.assert_not_called()
+    list_books.assert_not_called()
+    bot.download.assert_not_awaited()
+    assert message.answer.await_count == 4
+
+
+def test_owner_can_open_upload_and_library(monkeypatch):
+    begin_upload_wait = Mock()
+    monkeypatch.setattr(handlers.books, "begin_upload_wait", begin_upload_wait)
+    monkeypatch.setattr(handlers, "_sea_keyboard", lambda: ("Книги", None))
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=OWNER_TELEGRAM_ID),
+        document=None,
+        answer=AsyncMock(),
+    )
+
+    asyncio.run(handlers.cmd_upload(message))
+    asyncio.run(handlers.cmd_sea(message))
+
+    begin_upload_wait.assert_called_once()
+    assert message.answer.await_count == 2
+    assert message.answer.await_args.args[0] == "Книги"
+
+
+def test_non_owner_old_sea_button_does_not_change_books(monkeypatch):
+    set_reminder_enabled = Mock()
+    get_book = Mock()
+    monkeypatch.setattr(handlers.books, "set_reminder_enabled", set_reminder_enabled)
+    monkeypatch.setattr(handlers.books, "get_book", get_book)
+    callback = SimpleNamespace(
+        data="sea:t:book-id:0",
+        from_user=SimpleNamespace(id=OWNER_TELEGRAM_ID + 1),
+        answer=AsyncMock(),
+    )
+
+    asyncio.run(handlers.cb_sea(callback))
+
+    callback.answer.assert_awaited_once_with(
+        "Библиотека доступна только владельцу.", show_alert=True
+    )
+    set_reminder_enabled.assert_not_called()
+    get_book.assert_not_called()
 
 
 def test_ask_button_deletes_topic_menu_after_question(as_user, monkeypatch):

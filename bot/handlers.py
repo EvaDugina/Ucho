@@ -58,7 +58,7 @@ PENDING_ANALYSIS_MESSAGE = (
 _DOMAIN_LABELS = session_messages.DOMAIN_LABELS
 
 
-def _is_owner(message: Message) -> bool:
+def _is_owner(message: Message | CallbackQuery) -> bool:
     return bool(message.from_user and users.is_owner(message.from_user.id))
 
 
@@ -290,10 +290,10 @@ async def cmd_start(message: Message) -> None:
         await set_chat_commands(message.bot, message.chat.id, owner=_is_owner(message))
     except Exception:
         log.exception("failed to set commands after /start")
-    await message.answer(
-        "Я — Ухо. Задаю вопросы, храню raw-разговор, замечаю настроение и черты. "
-        "Общая библиотека открывается через /sea. Команды — /help."
-    )
+    text = "Я — Ухо. Задаю вопросы, храню raw-разговор, замечаю настроение и черты. "
+    if _is_owner(message):
+        text += "Общая библиотека открывается через /sea. "
+    await message.answer(text + "Команды — /help.")
 
 
 @router.message(Command("help"))
@@ -303,11 +303,16 @@ async def cmd_help(message: Message) -> None:
         "/ask — вопрос по одной из десяти тем\n"
         "/ucho &lt;текст&gt; — свободная заметка\n"
         "/about — каким я тебя вижу\n"
-        "/pebble — проверить, что я жив\n\n"
-        "<b>Книги</b>\n"
-        "/upload — загрузить EPUB, FB2 или Markdown до 20 МБ\n"
-        "/sea — библиотека, разговоры и настройки цитат\n\n"
-        "<b>Данные</b>\n"
+        "/pebble — проверить, что я жив"
+    )
+    if _is_owner(message):
+        text += (
+            "\n\n<b>Книги</b>\n"
+            "/upload — загрузить EPUB, FB2, Markdown или TXT до 20 МБ\n"
+            "/sea — библиотека, разговоры и настройки цитат"
+        )
+    text += (
+        "\n\n<b>Данные</b>\n"
         "/leta — удалить активные личные данные (копии хранятся до ротации)\n"
         "/start, /help — начало и эта справка"
     )
@@ -418,17 +423,23 @@ async def cmd_about(message: Message) -> None:
 
 @router.message(Command("upload"))
 async def cmd_upload(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Загрузка книг доступна только владельцу.")
+        return
     if message.document is not None:
         await _handle_upload_document(message)
         return
     books.begin_upload_wait(seconds=UPLOAD_PENDING_SECONDS)
     await message.answer(
-        "Пришли один EPUB, FB2 или Markdown до 20 МБ в течение 10 минут."
+        "Пришли один EPUB, FB2, Markdown или TXT до 20 МБ в течение 10 минут."
     )
 
 
 @router.message(F.document)
 async def on_document(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Загрузка книг доступна только владельцу.")
+        return
     caption_command = (message.caption or "").split(maxsplit=1)[0].split("@", 1)[0].lower()
     if caption_command != "/upload" and not books.upload_waiting():
         await message.answer("Чтобы добавить книгу, пришли документ с подписью /upload.")
@@ -437,6 +448,9 @@ async def on_document(message: Message) -> None:
 
 
 async def _handle_upload_document(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Загрузка книг доступна только владельцу.")
+        return
     document = message.document
     if document is None:
         return
@@ -472,12 +486,18 @@ async def _handle_upload_document(message: Message) -> None:
 
 @router.message(Command("sea"))
 async def cmd_sea(message: Message) -> None:
+    if not _is_owner(message):
+        await message.answer("Библиотека доступна только владельцу.")
+        return
     text, keyboard = _sea_keyboard()
     await message.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("sea:"))
 async def cb_sea(callback: CallbackQuery) -> None:
+    if not _is_owner(callback):
+        await callback.answer("Библиотека доступна только владельцу.", show_alert=True)
+        return
     parts = (callback.data or "").split(":")
     action = parts[1] if len(parts) > 1 else ""
     if action == "no":

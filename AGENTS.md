@@ -48,6 +48,7 @@ docker compose run --rm bot ruff check bot scripts tests
 - Raw обязательно записывается до LLM. При ошибке pending ref остаётся для recovery.
 - Вопросы отправляются через `services/session_messages.py`, чтобы Telegram ID попал
   в session-log.
+- `/upload` и `/sea` доступны только владельцу, включая документы и старые callback.
 - Новые публичные каталоги пользователя ограничены `00_raw`, `01_mood`,
   `02_personality`.
 - Не возвращать `qna`, `notes`, graph/concepts/MOC/profile/digest и psychometrics.

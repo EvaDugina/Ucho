@@ -73,9 +73,10 @@ version/current, после чего захваченные pending-дельты
 профиль через `about_messages`: YAML-метаданные становятся блоком кода,
 Markdown-заголовки — жирными, каждый HTML-фрагмент помещается в лимит Telegram.
 
-`books.py` без LLM разбирает EPUB/FB2/Markdown и строит версионированный
+`books.py` без LLM разбирает EPUB/FB2/Markdown/TXT и строит версионированный
 `structure.json`. EPUB использует nav/NCX, при их отсутствии — linear spine;
-FB2 — верхние section основного body; Markdown — CommonMark headings. Цитата
+FB2 — верхние section основного body; Markdown — CommonMark headings; TXT —
+абзацы в одном разделе с названием файла. Цитата
 120–1200 символов никогда не пересекает верхнюю главу. Только после выбора
 `BookExcerpt` диалоговый слой вызывает `ask_book_question`.
 
@@ -187,9 +188,11 @@ Python logging пишет stderr/docker logs и ротируемый `.logs/bot.
 ### Безопасность
 
 - Whitelist применяется к message и callback.
+- `/upload` и `/sea` дополнительно проверяют owner ID на командах, документах и
+  callback из старых сообщений; меню и `/help` скрывают их от остальных.
 - Секреты только в `.env`.
 - XML DTD/entity запрещены; ZIP paths/объём/число членов проверяются.
-- EPUB/FB2/Markdown разбираются локально; LLM не участвует в индексации,
+- EPUB/FB2/Markdown/TXT разбираются локально; LLM не участвует в индексации,
   извлечении metadata или выборе фрагмента.
 - Книжные ID и metadata проверяются до построения пути; symlink-книги отклоняются.
 - Session ID ограничен безопасным набором символов до построения пути JSONL.

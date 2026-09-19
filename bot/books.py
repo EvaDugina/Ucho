@@ -32,7 +32,7 @@ from .config import BOOK_EXTRACTED_MAX_BYTES, BOOK_UPLOAD_MAX_BYTES
 
 log = logging.getLogger(__name__)
 
-SUPPORTED_EXTENSIONS = {".md", ".markdown", ".epub", ".fb2"}
+SUPPORTED_EXTENSIONS = {".md", ".markdown", ".epub", ".fb2", ".txt"}
 SUPPORTED_FORMATS = {suffix.lstrip(".") for suffix in SUPPORTED_EXTENSIONS}
 STRUCTURE_VERSION = 1
 PARSER_VERSION = 1
@@ -765,6 +765,17 @@ def _markdown(data: bytes, fallback_title: str, suffix: str) -> ParsedBook:
     return ParsedBook(suffix, title[:300], "", chapters)
 
 
+def _txt(data: bytes, fallback_title: str) -> ParsedBook:
+    text = _decode_text(data).replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [
+        ParsedParagraph(cleaned, (), f"paragraph:{index}")
+        for index, block in enumerate(re.split(r"\n\s*\n", text), 1)
+        if (cleaned := _clean_text(block))
+    ]
+    title = fallback_title[:300]
+    return ParsedBook(".txt", title, "", [ParsedChapter(title, "document", paragraphs)])
+
+
 def parse_book(data: bytes, filename: str) -> ParsedBook:
     """Без LLM разобрать поддерживаемый исходник и сохранить верхние главы."""
 
@@ -772,12 +783,14 @@ def parse_book(data: bytes, filename: str) -> ParsedBook:
         raise BookError("Файл пуст или превышает 20 МБ.")
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
-        raise BookError("Поддерживаются только EPUB, FB2 и Markdown.")
+        raise BookError("Поддерживаются только EPUB, FB2, Markdown и TXT.")
     fallback = Path(filename).stem.strip() or "Без названия"
     if suffix == ".fb2":
         parsed = _fb2(data, fallback)
     elif suffix == ".epub":
         parsed = _epub(data, fallback)
+    elif suffix == ".txt":
+        parsed = _txt(data, fallback)
     else:
         parsed = _markdown(data, fallback, suffix)
     _normalized_book_text(parsed)

@@ -127,6 +127,7 @@ def _epub(
     [
         ("book.md", MARKDOWN.encode()),
         ("book.markdown", (MARKDOWN + "\n\nУникальное расширение markdown.").encode()),
+        ("book.txt", (TEXT + "\n\nУникальный текстовый файл.").encode()),
         ("book.fb2", _fb2()),
         ("book.epub", _epub()),
     ],
@@ -142,10 +143,27 @@ def test_supported_formats_create_structure(as_user, filename, payload):
     assert result["chapter_count"] == len(structure["chapters"])
 
 
-@pytest.mark.parametrize("filename", ["book.txt", "book.pdf", "book.docx"])
+@pytest.mark.parametrize("filename", ["book.pdf", "book.docx"])
 def test_unsupported_formats_are_rejected(as_user, filename):
-    with pytest.raises(books.BookError, match="EPUB, FB2 и Markdown"):
+    with pytest.raises(books.BookError, match="EPUB, FB2, Markdown и TXT"):
         books.ingest(TEXT.encode(), filename, uploader_uid=as_user)
+
+
+def test_txt_keeps_plain_text_and_cp1251_source(as_user):
+    payload = ("# Это строка текста\n\n" + TEXT).encode("cp1251")
+    book = books.ingest(payload, "Очерк.TXT", uploader_uid=as_user)
+    directory = books.vault.books_dir() / book["id"]
+    structure = books._load_structure(book["id"])
+
+    assert (directory / "source.txt").read_bytes() == payload
+    assert book["source_format"] == "txt"
+    assert [chapter["title"] for chapter in structure["chapters"]] == ["Очерк"]
+    assert structure["chapters"][0]["paragraphs"][0]["text"] == "# Это строка текста"
+    assert books.choose_excerpt(book["id"]).chapter_title == "Очерк"
+
+    (directory / "structure.json").unlink()
+    assert books.repair_saved_book(book["id"])["status"] == "repaired"
+    assert books.choose_excerpt(book["id"]).chapter_title == "Очерк"
 
 
 def test_dedup_and_epub_traversal_protection(as_user):
@@ -403,6 +421,7 @@ async def test_sea_callback_passes_only_selected_excerpt_to_llm(as_user, monkeyp
         "chapter.xhtml#one",
     )
     monkeypatch.setattr(handlers.books, "get_book", lambda _: book)
+    monkeypatch.setattr(handlers.users, "is_owner", lambda _: True)
     monkeypatch.setattr(handlers.books, "choose_excerpt", lambda _: excerpt)
     monkeypatch.setattr(handlers.ratelimit, "try_acquire", lambda _: True)
     monkeypatch.setattr(handlers.ratelimit, "release", lambda _: None)

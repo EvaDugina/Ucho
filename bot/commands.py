@@ -13,11 +13,11 @@ BOT_COMMANDS = [
     BotCommand(command="leta", description="Удалить личные данные"),
     BotCommand(command="help", description="Подсказка по командам"),
     BotCommand(command="start", description="Начать работу с ботом"),
-    BotCommand(command="upload", description="Добавить книгу в общую библиотеку"),
-    BotCommand(command="sea", description="Книжные разговоры и настройки"),
 ]
 
 ADMIN_COMMANDS = [
+    BotCommand(command="upload", description="Добавить книгу в общую библиотеку"),
+    BotCommand(command="sea", description="Книжные разговоры и настройки"),
     BotCommand(command="adduser", description="Добавить пользователя: /adduser <id>"),
     BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
     BotCommand(command="users", description="Список доверенных"),
