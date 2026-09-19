@@ -88,13 +88,14 @@ def localize_profile_metadata(profile: str) -> str:
     return f"---\n{translated}\n---\n\n{body}" if rows else body
 
 
-def _with_system_metadata(profile: str, *, messages_seen: int) -> str:
+def _with_system_metadata(profile: str, *, messages_seen: int | None) -> str:
     header, body = _split_profile(localize_profile_metadata(profile))
     rows = [line for line in header.splitlines()
             if not line.startswith(f"{PROFILE_FIELDS[0]}:")]
     keys = set(re.findall(r"^([^:\n]+):", "\n".join(rows), flags=re.MULTILINE))
     rows.extend(f'{key}: "{UNKNOWN_VALUE}"' for key in PROFILE_FIELDS[1:] if key not in keys)
-    header = "\n".join([f"{PROFILE_FIELDS[0]}: {messages_seen}", *rows])
+    count = str(messages_seen) if messages_seen is not None else json.dumps(UNKNOWN_VALUE, ensure_ascii=False)
+    header = "\n".join([f"{PROFILE_FIELDS[0]}: {count}", *rows])
     return f"---\n{header}\n---\n\n{body}"
 
 
@@ -234,11 +235,12 @@ def save_synthesis(
     store = _load_store()
     # Несколько дельт одного ответа не должны увеличивать счётчик сообщений.
     source_ids = {
-        item["raw_event_id"] for item in store["items"]
-        if item.get("raw_event_id")
-        and (item.get("status") == "synthesized" or item.get("id") in captured)
+        item.get("raw_event_id") for item in store["items"]
+        if item.get("status") == "synthesized" or item.get("id") in captured
     }
-    body = _with_system_metadata(body, messages_seen=len(source_ids))
+    # Общая ссылка старого импорта не даёт восстановить число исходных ответов.
+    count = None if source_ids & {None, "", "legacy-import"} else len(source_ids)
+    body = _with_system_metadata(body, messages_seen=count)
     content = body.rstrip() + "\n"
     for item in store["items"]:
         if item.get("id") in captured and item.get("status") == "pending":

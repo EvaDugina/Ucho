@@ -38,6 +38,17 @@ def test_delta_validation_and_ids(as_user):
     assert accepted[0]["status"] == "pending"
 
 
+def test_imported_aggregate_is_not_counted_as_one_message(as_user):
+    item = _record()[0]
+    store = about._load_store()
+    store["items"][0]["raw_event_id"] = "legacy-import"
+    about.atomic_write_json(about.deltas_path(), store)
+    about.save_synthesis("### Манера речи\nОписание.", [item["id"]])
+    profile = about.current_profile()
+    assert 'Учтено сообщений: "недостаточно данных"\n' in profile
+    assert about.profile_body(profile) == "### Манера речи\nОписание."
+
+
 @pytest.mark.asyncio
 async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, monkeypatch):
     item = _record()[0]
