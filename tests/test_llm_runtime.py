@@ -27,7 +27,8 @@ async def test_profile_question_and_answer_are_fenced_user_data(monkeypatch):
     system = captured["messages"][0]["content"]
     user = captured["messages"][-1]["content"]
     assert "Ты — Иуда Искариот" in system
-    assert "Учитель — текущий собеседник Иуды" in system
+    assert "В этом боте с Иудой разговаривает обычный человек" in system
+    assert "учител" not in system.lower()
     assert malicious not in system
     assert "<<<PROFILE_CONTEXT" in user
     assert "<<<QUESTION" in user
@@ -48,7 +49,7 @@ async def test_generated_question_is_single_line_and_limited(monkeypatch):
     monkeypatch.setattr(llm, "_chat_json", chat)
     result = await llm.ask_next(domain="ethics")
     assert "Ты — Иуда Искариот" in captured["system"]
-    assert "Задай Учителю один конкретный вопрос" in captured["system"]
+    assert "Задай собеседнику один конкретный вопрос" in captured["system"]
     assert "\n" not in result["question"]
     assert len(result["question"]) <= 2_001
 
@@ -116,16 +117,17 @@ async def test_about_presentation_uses_judas_voice_and_fences_profile(monkeypatc
 
     async def chat(task, messages, temperature=0.6):
         captured["messages"] = messages
-        return "Учитель, я вижу, как ты уточняешь свою мысль."
+        return "Я вижу, как ты уточняешь свою мысль."
 
     monkeypatch.setattr(llm, "_chat_text", chat)
     result = await llm.about_present("Наблюдение из профиля")
 
     assert "Ты — Иуда Искариот" in captured["messages"][0]["content"]
-    assert "Учитель — текущий собеседник Иуды" in captured["messages"][0]["content"]
+    assert "В этом боте с Иудой разговаривает обычный человек" in captured["messages"][0]["content"]
+    assert "учител" not in captured["messages"][0]["content"].lower()
     assert "Наблюдение из профиля" not in captured["messages"][0]["content"]
     assert "<<<INTERNAL_PROFILE" in captured["messages"][1]["content"]
-    assert result.startswith("Учитель")
+    assert result.startswith("Я вижу")
 
 
 @pytest.mark.asyncio
