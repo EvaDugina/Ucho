@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 from bot import commands, handlers, userctx, vault
 from bot.config import OWNER_TELEGRAM_ID
+from bot.errors import LLMError
 
 
 def test_exact_command_list_and_removed_handlers_absent():
@@ -73,3 +74,79 @@ def test_start_registers_commands_after_chat_becomes_available():
     assert sent["scope"].chat_id == 1
     assert sent["commands"][-1].command == "users"
     message.answer.assert_awaited_once()
+
+
+def test_ask_button_deletes_topic_menu_after_question(as_user, monkeypatch):
+    order = []
+
+    async def generate(_bot, chat_id, *, domain):
+        assert chat_id == as_user
+        assert domain == "work"
+        order.append("question")
+
+    async def delete_message(*, chat_id, message_id):
+        assert (chat_id, message_id) == (as_user, 42)
+        order.append("delete")
+
+    monkeypatch.setattr(handlers, "_generate_question", generate)
+    monkeypatch.setattr(handlers.ratelimit, "try_acquire", lambda _uid: True)
+    monkeypatch.setattr(handlers.ratelimit, "release", lambda _uid: None)
+    callback = SimpleNamespace(
+        data="ask:work",
+        answer=AsyncMock(),
+        from_user=SimpleNamespace(id=as_user),
+        message=SimpleNamespace(chat=SimpleNamespace(id=as_user), message_id=42),
+        bot=SimpleNamespace(delete_message=delete_message),
+    )
+
+    asyncio.run(handlers.cb_ask_domain(callback))
+
+    assert order == ["question", "delete"]
+    callback.answer.assert_awaited_once()
+
+
+def test_ask_button_keeps_topic_menu_when_question_fails(as_user, monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise LLMError("offline")
+
+    monkeypatch.setattr(handlers, "_generate_question", fail)
+    monkeypatch.setattr(handlers.ratelimit, "try_acquire", lambda _uid: True)
+    monkeypatch.setattr(handlers.ratelimit, "release", lambda _uid: None)
+    delete_message = AsyncMock()
+    callback = SimpleNamespace(
+        data="ask:work",
+        answer=AsyncMock(),
+        from_user=SimpleNamespace(id=as_user),
+        message=SimpleNamespace(chat=SimpleNamespace(id=as_user), message_id=42),
+        bot=SimpleNamespace(delete_message=delete_message),
+    )
+
+    asyncio.run(handlers.cb_ask_domain(callback))
+
+    delete_message.assert_not_awaited()
+
+
+def test_empty_library_has_no_inactive_controls(monkeypatch):
+    monkeypatch.setattr(handlers.books, "list_books", lambda: [])
+
+    text, keyboard = handlers._sea_keyboard()
+
+    assert text == "Библиотека пока пуста. Добавь книгу через /upload."
+    assert keyboard is None
+
+
+def test_library_navigation_only_appears_for_multiple_pages(monkeypatch):
+    library = [{"id": str(index), "title": f"Книга {index}"} for index in range(9)]
+    monkeypatch.setattr(handlers.books, "list_books", lambda: library[:1])
+
+    _, keyboard = handlers._sea_keyboard()
+    assert keyboard is not None
+    assert [button.text for row in keyboard.inline_keyboard for button in row] == [
+        "Книга 0",
+        "Настройки напоминаний",
+    ]
+
+    monkeypatch.setattr(handlers.books, "list_books", lambda: library)
+    _, keyboard = handlers._sea_keyboard()
+    assert keyboard is not None
+    assert any(button.text == "1/2" for row in keyboard.inline_keyboard for button in row)

@@ -12,6 +12,7 @@ import logging
 from contextlib import suppress
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -234,8 +235,10 @@ async def _generate_question(
         )
 
 
-def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
     library = books.list_books()
+    if not library:
+        return "Библиотека пока пуста. Добавь книгу через /upload.", None
     pages = max(1, (len(library) + SEA_PAGE_SIZE - 1) // SEA_PAGE_SIZE)
     page = min(max(0, page), pages - 1)
     selected = library[page * SEA_PAGE_SIZE : (page + 1) * SEA_PAGE_SIZE]
@@ -257,14 +260,15 @@ def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, Inline
             rows.append(
                 [InlineKeyboardButton(text=title, callback_data=f"sea:b:{book_id}")]
             )
-    navigation: list[InlineKeyboardButton] = []
-    prefix = "sea:s" if settings else "sea:p"
-    if page > 0:
-        navigation.append(InlineKeyboardButton(text="←", callback_data=f"{prefix}:{page - 1}"))
-    navigation.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="sea:no"))
-    if page + 1 < pages:
-        navigation.append(InlineKeyboardButton(text="→", callback_data=f"{prefix}:{page + 1}"))
-    rows.append(navigation)
+    if pages > 1:
+        navigation: list[InlineKeyboardButton] = []
+        prefix = "sea:s" if settings else "sea:p"
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="←", callback_data=f"{prefix}:{page - 1}"))
+        navigation.append(InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="sea:no"))
+        if page + 1 < pages:
+            navigation.append(InlineKeyboardButton(text="→", callback_data=f"{prefix}:{page + 1}"))
+        rows.append(navigation)
     rows.append(
         [
             InlineKeyboardButton(
@@ -273,9 +277,7 @@ def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, Inline
             )
         ]
     )
-    if not library:
-        text = "Библиотека пока пуста. Добавь книгу через /upload."
-    elif settings:
+    if settings:
         text = "Книжные напоминания. ✓ — книга участвует в выборе цитат."
     else:
         text = "Выбери книгу для разговора:"
@@ -359,11 +361,20 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
         await callback.bot.send_message(callback.from_user.id, ratelimit.BUSY_MESSAGE)
         return
     try:
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
         await _generate_question(
             callback.bot,
-            callback.message.chat.id if callback.message else callback.from_user.id,
+            chat_id,
             domain=None if value == "any" else value,
         )
+        if callback.message:
+            try:
+                await callback.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=callback.message.message_id,
+                )
+            except TelegramAPIError:
+                log.warning("failed to delete ask topic menu", exc_info=True)
     except LLMError as exc:
         log.warning("ask callback unavailable")
         await callback.answer(exc.user_message, show_alert=True)
