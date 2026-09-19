@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from ..about import normalize_profile
 from ..validation import safe_chat_html
 from .session_messages import TG_MSG_LIMIT
 
@@ -11,7 +12,7 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+(.+)$")
 
 
 def _blocks(profile: str) -> list[tuple[str, str]]:
-    lines = profile.replace("\r\n", "\n").replace("\r", "\n").strip().split("\n")
+    lines = normalize_profile(profile).split("\n")
     blocks: list[tuple[str, str]] = []
     start = 0
     if lines and lines[0].strip() == "---":

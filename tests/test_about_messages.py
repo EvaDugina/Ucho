@@ -38,6 +38,11 @@ def test_long_profile_splits_without_losing_text_or_breaking_html():
     assert all(chunk.count("<pre>") == chunk.count("</pre>") for chunk in chunks)
 
 
+def test_fenced_profile_still_formats_metadata_and_headings():
+    profile = "---\nupdated: '2026-09-19'\n---\n\n### Манера речи\nТекст."
+    assert format_full_profile(f"```markdown\n{profile}\n```") == format_full_profile(profile)
+
+
 @pytest.mark.asyncio
 async def test_about_sends_full_profile_after_spoken_summary(as_user, monkeypatch):
     sent = []

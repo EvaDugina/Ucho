@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -45,7 +45,7 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
 
     async def synthesize(current, pending):
         calls.append(("synthesize", current, pending[0]["id"]))
-        return "# Внутренний профиль\n\nПоследователен."
+        return "```markdown\n# Внутренний профиль\n\nПоследователен.\n```"
 
     async def present(profile):
         calls.append(("present", profile))
@@ -57,7 +57,10 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
         at=datetime(2026, 7, 27, 12, 30, 0)
     )
     assert spoken.startswith("Я вижу")
-    assert profile == "# Внутренний профиль\n\nПоследователен."
+    assert about.profile_body(profile) == "# Внутренний профиль\n\nПоследователен."
+    assert about.has_profile_metadata(profile)
+    assert "messages_seen: 1\n" in profile
+    assert "updated: '2026-07-27'\n" in profile
     assert version == "2026-07-27_12-30-00"
     assert [call[0] for call in calls] == ["synthesize", "present"]
     assert not about.pending_deltas()
@@ -66,6 +69,68 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
     assert saved["status"] == "synthesized"
     assert saved["synthesized_in"] == version
     assert (about.versions_dir() / f"{version}.md").exists()
+    assert about.path().read_text(encoding="utf-8").strip() == profile
+    assert (about.versions_dir() / f"{version}.md").read_text(encoding="utf-8").strip() == profile
+
+
+@pytest.mark.asyncio
+async def test_existing_fenced_profile_is_presented_without_new_version(as_user, monkeypatch):
+    profile = (
+        "---\nupdated: '2026-09-19'\nmessages_seen: 1\nregister: книжный\n"
+        "tone: спокойный\nopenness: 4/5\nprovocation_tolerance: null\n---\n\n"
+        "### Манера речи\nСтарый профиль."
+    )
+    original = f"```markdown\n{profile}\n```\n"
+    about.path().write_text(original, encoding="utf-8")
+
+    async def present(value):
+        assert value == profile
+        return "Я вижу твой стиль."
+
+    monkeypatch.setattr(about_service.llm, "about_present", present)
+    spoken, returned, version = await about_service.refresh_and_present()
+    assert spoken == "Я вижу твой стиль."
+    assert returned == profile
+    assert version is None
+    assert about.path().read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_missing_metadata_is_repaired_once_preserving_body_and_evidence(as_user, monkeypatch):
+    _record()
+    _record()  # Две дельты одного raw-сообщения — всё ещё одно сообщение.
+    store = about._load_store()
+    for item in store["items"]:
+        item["status"] = "synthesized"
+    about.atomic_write_json(about.deltas_path(), store)
+    before_deltas = about.deltas_path().read_bytes()
+    original = "```markdown\n### Манера речи\nПрежний подробный текст.\n```"
+    about.path().write_text(original, encoding="utf-8")
+    calls = []
+
+    async def chat(task, messages, temperature):
+        calls.append(task)
+        return {"register": "книжный", "tone": "спокойный", "openness": 4,
+                "provocation_tolerance": None, "profile": "Не подменять исходный текст."}
+
+    async def present(profile):
+        return "Я вижу твой стиль."
+
+    monkeypatch.setattr(about_service.llm, "_chat_json", chat)
+    monkeypatch.setattr(about_service.llm, "about_present", present)
+    at = datetime(2026, 9, 19, 22, 30, tzinfo=timezone.utc)
+    _, profile, version = await about_service.refresh_and_present(at=at)
+    assert version == "2026-09-20_01-30-00"
+    assert about.profile_body(profile) == "### Манера речи\nПрежний подробный текст."
+    assert "updated: '2026-09-20'\n" in profile
+    assert "messages_seen: 1\n" in profile
+    assert 'openness: "4/5"\n' in profile
+    assert "provocation_tolerance: null\n" in profile
+    assert about.deltas_path().read_bytes() == before_deltas
+    _, repeated, second_version = await about_service.refresh_and_present(at=at)
+    assert repeated == profile
+    assert second_version is None
+    assert calls == ["about"]
 
 
 @pytest.mark.asyncio

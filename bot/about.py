@@ -11,9 +11,11 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from . import vault
 from .atomic import atomic_write_bytes, atomic_write_json, atomic_write_text
+from .config import DAILY_TZ
 from .errors import VaultError
 
 log = logging.getLogger(__name__)
@@ -29,6 +31,37 @@ ASPECTS = {
     "self_image",
     "triggers",
 }
+
+PROFILE_FIELDS = (
+    "updated", "messages_seen", "register", "tone", "openness", "provocation_tolerance",
+)
+
+
+def _split_profile(profile: str) -> tuple[str, str]:
+    text = normalize_profile(profile)
+    header = re.match(r"^---\n(.*?)\n---(?:\n|$)", text, flags=re.DOTALL)
+    return (header.group(1), text[header.end():].strip()) if header else ("", text)
+
+
+def has_profile_metadata(profile: str) -> bool:
+    header, _ = _split_profile(profile)
+    keys = set(re.findall(r"^([a-z_]+):", header, flags=re.MULTILINE))
+    return set(PROFILE_FIELDS) <= keys
+
+
+def profile_body(profile: str) -> str:
+    return _split_profile(profile)[1]
+
+
+def _with_system_metadata(profile: str, *, now: datetime, messages_seen: int) -> str:
+    header, body = _split_profile(profile)
+    rows = [line for line in header.splitlines()
+            if not re.match(r"^(updated|messages_seen):", line)]
+    keys = set(re.findall(r"^([a-z_]+):", "\n".join(rows), flags=re.MULTILINE))
+    rows.extend(f"{key}: null" for key in PROFILE_FIELDS[2:] if key not in keys)
+    header = "\n".join([f"updated: '{now.date().isoformat()}'",
+                        f"messages_seen: {messages_seen}", *rows])
+    return f"---\n{header}\n---\n\n{body}"
 
 
 def _root() -> Path:
@@ -129,9 +162,20 @@ def pending_deltas() -> list[dict]:
     ]
 
 
+def normalize_profile(profile: str) -> str:
+    """Убрать только внешнюю Markdown-обёртку, не меняя содержимое профиля."""
+    text = (profile or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    wrapped = re.fullmatch(
+        r"(`{3,}|~{3,})[ \t]*(?:markdown|md)?[ \t]*\n(.*?)\n\1[ \t]*",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    return wrapped.group(2).strip() if wrapped else text
+
+
 def current_profile() -> str:
     try:
-        return path().read_text(encoding="utf-8").strip() if path().exists() else ""
+        return normalize_profile(path().read_text(encoding="utf-8")) if path().exists() else ""
     except OSError:
         log.exception("failed to read current personality profile")
         return ""
@@ -144,15 +188,24 @@ def save_synthesis(
     at: datetime | None = None,
 ) -> str:
     """Сохранить current+version и лишь затем отметить захваченные дельты."""
-    body = (profile or "").strip()
+    body = normalize_profile(profile)
     if not body:
         raise ValueError("empty synthesized profile")
-    now = at or datetime.now()
+    now = at or datetime.now(ZoneInfo(DAILY_TZ))
+    if now.tzinfo is not None:
+        now = now.astimezone(ZoneInfo(DAILY_TZ))
     version_id = now.strftime("%Y-%m-%d_%H-%M-%S")
     version_path = versions_dir() / f"{version_id}.md"
-    content = body.rstrip() + "\n"
     captured = set(delta_ids)
     store = _load_store()
+    # Несколько дельт одного ответа не должны увеличивать счётчик сообщений.
+    source_ids = {
+        item["raw_event_id"] for item in store["items"]
+        if item.get("raw_event_id")
+        and (item.get("status") == "synthesized" or item.get("id") in captured)
+    }
+    body = _with_system_metadata(body, now=now, messages_seen=len(source_ids))
+    content = body.rstrip() + "\n"
     for item in store["items"]:
         if item.get("id") in captured and item.get("status") == "pending":
             item["status"] = "synthesized"

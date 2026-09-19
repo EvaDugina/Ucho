@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from bot import llm
+from bot.errors import LLMError
 
 
 @pytest.mark.asyncio
@@ -67,3 +68,34 @@ async def test_book_metadata_and_excerpt_are_fenced_user_data(monkeypatch):
     assert "<<<BOOK_METADATA" in user
     assert "<<<BOOK_EXCERPT" in user
     assert result["domain"] == "knowledge"
+
+
+@pytest.mark.asyncio
+async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown(monkeypatch):
+    async def chat(task, messages, temperature):
+        return {"register": "книжный: образный", "tone": "спокойный", "openness": 4,
+                "provocation_tolerance": None,
+                "profile": "```markdown\n### Манера речи\nОписание.\n```"}
+
+    monkeypatch.setattr(llm, "_chat_json", chat)
+    profile = await llm.synthesize_about("", [{"quote": "Мой ответ"}])
+    assert profile.startswith('---\nregister: "книжный: образный"\n')
+    assert 'openness: "4/5"\n' in profile
+    assert "provocation_tolerance: null\n" in profile
+    assert profile.endswith("### Манера речи\nОписание.")
+    assert "```" not in profile
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changes", [
+    {"openness": 6}, {"openness": True}, {"provocation_tolerance": "unknown"},
+    {"profile": ""}, {"register": ["книжный"]},
+])
+async def test_about_rejects_invalid_metadata_or_empty_body(monkeypatch, changes):
+    async def chat(task, messages, temperature):
+        return {"register": None, "tone": None, "openness": None,
+                "provocation_tolerance": None, "profile": "Описание.", **changes}
+
+    monkeypatch.setattr(llm, "_chat_json", chat)
+    with pytest.raises(LLMError):
+        await llm.synthesize_about("", [{"quote": "Мой ответ"}])
