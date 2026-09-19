@@ -116,6 +116,27 @@ def _with_profile_metadata(profile: str) -> str:
     return localize_profile_metadata(f"---\n{header}\n---\n\n{body}")
 
 
+def profile_metadata(profile: str) -> dict:
+    """Прочитать только канонические поля нормализованной шапки."""
+    header, _ = _split_profile(localize_profile_metadata(profile))
+    return {key: json.loads(raw) for key, raw in
+            (line.split(":", 1) for line in header.splitlines() if ":" in line)}
+
+
+def merge_profile_metadata(current: str, proposed: str, changed_fields: set[str]) -> str:
+    """Переносить оценки дословно, пока новые свидетельства не обоснуют изменение."""
+    if not current.strip():
+        return _with_profile_metadata(proposed)
+    previous = profile_metadata(current)
+    values = profile_metadata(proposed)
+    for field, label in PROFILE_LABELS.items():
+        if field not in changed_fields:
+            values[label] = previous.get(label, UNKNOWN_VALUE)
+    header = "\n".join(f"{label}: {json.dumps(values.get(label, UNKNOWN_VALUE), ensure_ascii=False)}"
+                       for label in PROFILE_FIELDS)
+    return f"---\n{header}\n---\n\n{profile_body(proposed)}"
+
+
 def _root() -> Path:
     return vault.personality_dir()
 
