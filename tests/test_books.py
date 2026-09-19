@@ -160,6 +160,17 @@ def test_dedup_and_epub_traversal_protection(as_user):
         books.choose_excerpt("../../outside")
 
 
+def test_saved_book_index_can_be_repaired_without_reupload(as_user):
+    saved = books.ingest(MARKDOWN.encode(), "book.md", uploader_uid=as_user)
+    directory = books.vault.books_dir() / saved["id"]
+    (directory / "structure.json").unlink()
+    assert books.get_book(saved["id"]) is None
+    assert books.inspect_saved_book(saved["id"])["status"] == "repair"
+    assert books.repair_saved_book(saved["id"])["status"] == "repaired"
+    assert books.get_book(saved["id"]) is not None
+    assert (directory / "source.md").read_bytes() == MARKDOWN.encode()
+
+
 def test_epub_allows_html5_doctype_but_rejects_entity(as_user):
     accepted = books.ingest(
         _epub(html_doctype=True),
@@ -245,6 +256,26 @@ def test_fb2_nested_sections_do_not_duplicate_text_or_notes(as_user):
     assert all_text.count(PARAGRAPH_B.strip()) == 1
     assert "Служебное примечание" not in all_text
     assert any(section["title"] == "Подраздел" for section in structure["chapters"][0]["sections"])
+
+
+def test_upload_failure_does_not_publish_partial_book(as_user, monkeypatch):
+    before = {path.name for path in books.vault.books_dir().iterdir()}
+    original = books.atomic_write_json
+
+    def fail_metadata(path, value):
+        if path.name == "metadata.json":
+            raise OSError("metadata write failed")
+        return original(path, value)
+
+    monkeypatch.setattr(books, "atomic_write_json", fail_metadata)
+    with pytest.raises(OSError, match="metadata write failed"):
+        books.ingest(
+            ("# Книга\n\n## Глава\n\n" + TEXT + f"\n\nУникальный тест {as_user}.").encode(),
+            "book.md",
+            uploader_uid=as_user,
+        )
+    after = {path.name for path in books.vault.books_dir().iterdir()}
+    assert after == before
 
 
 def test_markdown_heading_tree_and_headingless_fallback(as_user):

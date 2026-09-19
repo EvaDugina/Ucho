@@ -40,8 +40,10 @@ async def process_probe_answer(
     current = session.get()
     if current is None:
         return None
-    active_q_num = q_num if q_num is not None else current.current_q_num
-    if active_q_num is None:
+    active_q_num = None if event_kind == "note" else (
+        q_num if q_num is not None else current.current_q_num
+    )
+    if active_q_num is None and event_kind != "note":
         active_q_num = vault.next_q_num()
     active_question = question if question is not None else current.last_question
     active_domain = real_domain(domain_hint) or real_domain(current.last_domain) or "everyday"
@@ -60,7 +62,6 @@ async def process_probe_answer(
     current.pending_answer_event_id = event["event_id"]
     current.pending_answer = text
     session.persist()
-    vault.commit_all(f"raw {event_kind}")
 
     session_context = session_context_snapshot or current.render_transcript()
     mood_vec: dict | None = None
@@ -80,7 +81,6 @@ async def process_probe_answer(
             q_num=active_q_num,
             at=event.get("ts"),
         )
-        vault.commit_all("mood")
     except Exception:
         log.exception("mood detection failed (non-fatal)")
 
@@ -102,7 +102,7 @@ async def process_probe_answer(
     current.pending_answer_event_id = None
     session.persist()
 
-    reaction = str(result.get("reaction") or "").strip() or "Сообщение принято."
+    reaction = str(result.get("reaction") or "").strip() or "Я вижу твоё сообщение."
     new_q_num = vault.next_q_num()
     session.set_question(reaction, active_domain, q_num=new_q_num)
     return ReactionPayload(

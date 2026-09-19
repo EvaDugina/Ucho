@@ -53,10 +53,11 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
 
     monkeypatch.setattr(about_service.llm, "synthesize_about", synthesize)
     monkeypatch.setattr(about_service.llm, "about_present", present)
-    spoken, version = await about_service.refresh_and_present(
+    spoken, profile, version = await about_service.refresh_and_present(
         at=datetime(2026, 7, 27, 12, 30, 0)
     )
     assert spoken.startswith("Я вижу")
+    assert profile == "# Внутренний профиль\n\nПоследователен."
     assert version == "2026-07-27_12-30-00"
     assert [call[0] for call in calls] == ["synthesize", "present"]
     assert not about.pending_deltas()
@@ -78,4 +79,23 @@ async def test_about_failure_does_not_mark_or_create_version(as_user, monkeypatc
     with pytest.raises(LLMError):
         await about_service.refresh_and_present()
     assert about.pending_deltas()[0]["id"] == item["id"]
+    assert list(about.versions_dir().glob("*.md")) == []
+
+
+def test_about_file_failure_restores_profile_and_pending_deltas(as_user, monkeypatch):
+    _record()
+    before = about.deltas_path().read_bytes()
+
+    def fail_json(*_args, **_kwargs):
+        raise OSError("disk error")
+
+    monkeypatch.setattr(about, "atomic_write_json", fail_json)
+    with pytest.raises(OSError, match="disk error"):
+        about.save_synthesis(
+            "# Профиль\n\nНовый текст.",
+            [item["id"] for item in about.pending_deltas()],
+            at=datetime(2026, 9, 19, 10, 0, 0),
+        )
+    assert about.deltas_path().read_bytes() == before
+    assert not about.path().exists()
     assert list(about.versions_dir().glob("*.md")) == []

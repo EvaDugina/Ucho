@@ -12,11 +12,12 @@ services:
         HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
         ALL_PROXY: ${ALL_PROXY:-}
-    container_name: psycho-bot
+    container_name: ucho-bot
     restart: unless-stopped
     env_file:
       - .env
     environment:
+      TZ: Europe/Moscow
       # Non-secret AITunnel fallback route. If OPENROUTER_API_KEY is set in .env,
       # bot/config.py prefers OpenRouter and ignores these AITunnel model defaults.
       AITUNNEL_BASE_URL: https://api.aitunnel.ru/v1
@@ -25,9 +26,12 @@ services:
       CONTAINER_LOG_DIR: ${CONTAINER_LOG_DIR:-/app/.logs}
       CONTAINER_LOG_MAX_BYTES: ${CONTAINER_LOG_MAX_BYTES:-10485760}
       CONTAINER_LOG_BACKUP_COUNT: ${CONTAINER_LOG_BACKUP_COUNT:-5}
+      BACKUP_PATH: /backups
     volumes:
       - ./.logs:/app/.logs
       # Путь к папке вольта на хосте берётся из VAULT_HOST_PATH в .env.
       # Без этой переменной compose упадёт с понятной ошибкой — это сознательно,
       # чтобы путь не дублировался в двух местах.
       - "${VAULT_HOST_PATH:?set VAULT_HOST_PATH in .env (see .env.example)}:/vault"
+      # Готовые снимки доступны на хосте и переживают пересоздание контейнера.
+      - "${BACKUP_HOST_PATH:-../UchoBackups}:/backups"

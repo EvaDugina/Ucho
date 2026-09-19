@@ -90,7 +90,7 @@ async def test_unusable_selected_book_skips_without_retry_error(as_user, monkeyp
 
 def test_daily_targets_only_include_whitelist(as_user, monkeypatch):
     data_only_uid = as_user + 500_000
-    (users.PSYCHO_META_DIR.parent / "users" / str(data_only_uid)).mkdir(parents=True)
+    (users.META_DIR.parent / "users" / str(data_only_uid)).mkdir(parents=True)
     monkeypatch.setattr(users, "allowed_ids", lambda: {1, as_user})
     assert daily_service.daily_targets() == [1, as_user]
 

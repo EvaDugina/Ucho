@@ -1,11 +1,11 @@
-"""Глобальный append-only operation log в `<vault>/.psycho/log.md`."""
+"""Глобальный append-only operation log в `<vault>/.ucho/log.md`."""
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
 from ..atomic import atomic_write_text
-from ..config import LOG_PATH, PSYCHO_META_DIR
+from ..config import LOG_PATH, META_DIR
 
 log = logging.getLogger(__name__)
 
@@ -24,9 +24,9 @@ def _rotate_log_if_large() -> None:
 
 
 def append_log(level: str, op: str, details: str = "") -> None:
-    """Append-only лог операций в ``<vault>/.psycho/log.md``."""
+    """Append-only лог операций в ``<vault>/.ucho/log.md``."""
     try:
-        PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
+        META_DIR.mkdir(parents=True, exist_ok=True)
         if not LOG_PATH.exists():
             LOG_PATH.write_text("# Operation log\n\n", encoding="utf-8")
         else:
@@ -39,4 +39,3 @@ def append_log(level: str, op: str, details: str = "") -> None:
             f.write(line + "\n")
     except Exception:
         log.exception("append_log failed")
-

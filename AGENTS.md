@@ -20,7 +20,7 @@ raw-разговор, производные mood/personality и общую би
 ```powershell
 docker compose up -d --build bot
 docker compose logs -f bot
-docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot pytest
+docker compose run --rm -e VAULT_PATH=/tmp/ucho-test bot pytest
 docker compose run --rm bot ruff check bot scripts tests
 ```
 
@@ -30,7 +30,7 @@ docker compose run --rm bot ruff check bot scripts tests
 ## Архитектура
 
 - `00_raw/sessions` — единственный источник истины переписки.
-- Обработка текста: raw commit → mood → process_answer → personality deltas →
+- Обработка текста: raw fsync → mood → process_answer → personality deltas →
   реакция.
 - Mood работает через один LLM-классификатор для всех доверенных.
 - Personality delta валидна только с дословной quote из raw.
@@ -39,7 +39,9 @@ docker compose run --rm bot ruff check bot scripts tests
 - Per-user маршрутизация — `userctx`/`contextvar`, данные в `users/<uid>`.
 - Общие книги — `books/`; toggles/scores/pending — в `_state.json` пользователя.
 - `_session.json` хранит только recovery/queue runtime.
-- `.psycho/` содержит whitelist и технический лог.
+- `.ucho/` содержит whitelist и технический лог.
+- Данные постоянно находятся в `VAULT_HOST_PATH`; проверяемые снимки —
+  в отдельном `BACKUP_HOST_PATH`, по умолчанию 14 последних.
 
 ## Критичные инварианты
 
@@ -47,20 +49,24 @@ docker compose run --rm bot ruff check bot scripts tests
 - Вопросы отправляются через `services/session_messages.py`, чтобы Telegram ID попал
   в session-log.
 - Новые публичные каталоги пользователя ограничены `00_raw`, `01_mood`,
-  `01_personality`.
+  `02_personality`.
 - Не возвращать `qna`, `notes`, graph/concepts/MOC/profile/digest и psychometrics.
 - Список команд изменяется только вместе с каноническим списком в требованиях.
 - Неизвестные slash-команды не анализировать.
-- Пользовательский Git scope — `users/<uid>`; книжный — `books/`.
-- `/leta` удаляет только `users/<uid>` и не трогает общую библиотеку.
+- Пользовательская запись требует текущий uid; новая книга появляется только
+  после полной записи исходника, текста, индекса и metadata.
+- `/leta` очищает активный `users/<uid>` и не трогает общую библиотеку;
+  предыдущие снимки остаются до ротации.
 - EPUB/FB2 — недоверенный ввод: без извлечения ZIP на диск, с лимитами и traversal
   проверками.
 - Ошибки не показывают stacktrace в Telegram.
 
-## Миграция
+## Резервные копии
 
-`scripts/migrate_simplified_storage.py` без аргументов — preview, `--apply` —
-пользовательские Git-транзакции. Автоматически при старте не запускать.
+Снимки создаются при старте без копии за текущую неделю и еженедельно по расписанию;
+хранятся не более четырёх готовых снимков всей папки.
+`python -m bot.backup verify <путь>` проверяет готовый снимок; restore пишет
+только в новый каталог. Git-репозиторий пользовательских данных не создаётся.
 
 ## Соглашения
 

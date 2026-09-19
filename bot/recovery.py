@@ -36,9 +36,17 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     if event is None:
         log.error("pending raw event missing uid=%s event=%s", uid, raw_event_id)
         return
-    question = current.last_question or current.main_question or ""
-    domain = conversation_service.real_domain(current.last_domain) or "everyday"
-    q_num = int(event.get("q_num") or current.current_q_num or vault.next_q_num())
+    is_note = event.get("kind") == "note"
+    question = (
+        "(свободная заметка)"
+        if is_note else current.last_question or current.main_question or ""
+    )
+    domain = conversation_service.real_domain(
+        str(event.get("domain") or current.last_domain)
+    ) or "everyday"
+    q_num = None if is_note else int(
+        event.get("q_num") or current.current_q_num or vault.next_q_num()
+    )
     transcript = current.render_transcript()
     mood_vector = None
     try:
@@ -57,7 +65,6 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             q_num=q_num,
             at=event.get("ts"),
         )
-        vault.commit_all("mood recovery")
         result = await process_answer(
             question=question,
             answer=text,
@@ -77,7 +84,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
 
     current.pending_answer = None
     current.pending_answer_event_id = None
-    reaction = str(result.get("reaction") or "").strip() or "Сообщение принято."
+    reaction = str(result.get("reaction") or "").strip() or "Я вижу твоё сообщение."
     reaction_q_num = vault.next_q_num()
     session.set_question(reaction, domain, q_num=reaction_q_num)
     session.persist()
@@ -91,7 +98,6 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             plain=True,
             reply_to_message_id=event.get("telegram_message_id"),
         )
-        vault.commit_all("recovered answer")
     except Exception:
         log.exception("failed to send recovered reaction uid=%s", uid)
 
@@ -131,7 +137,6 @@ async def process_queued_on_startup(bot: Bot, uid: int) -> None:
             return
         if payload is not None:
             await _send_payload(bot, uid, payload)
-            vault.commit_all("queued answer")
 
 
 async def _send_payload(
@@ -221,7 +226,6 @@ async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> 
                 ),
             )
         else:
-            session.start(domain="everyday")
             payload = await note_service.ingest_note(
                 clean,
                 at=carrier.date,
@@ -230,7 +234,6 @@ async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> 
             )
         if payload is not None:
             await _send_payload(bot, uid, payload)
-            vault.commit_all("offline batch")
     except LLMError:
         log.warning("offline analysis unavailable uid=%s", uid)
     finally:

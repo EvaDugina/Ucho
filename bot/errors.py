@@ -6,17 +6,17 @@
 глобальном error-handler по-прежнему допустим широкий перехват.
 
 * ``LLMError`` — обращение к модели не удалось или ответ не разобрать.
-* ``VaultError`` — сбой записи/git в файловом хранилище.
+* ``VaultError`` — сбой записи в файловом хранилище.
 * ``ValidationError`` — ввод или контракт данных не прошёл проверку.
 """
 from __future__ import annotations
 
 
-class PsychoError(Exception):
+class UchoError(Exception):
     """Базовый класс всех доменных ошибок бота."""
 
 
-class LLMError(PsychoError):
+class LLMError(UchoError):
     """Сбой обращения к LLM или некорректный/неразбираемый ответ модели."""
 
     def __init__(self, message: str, *, user_message: str | None = None):
@@ -24,9 +24,9 @@ class LLMError(PsychoError):
         self.user_message = user_message or "LLM-провайдер сейчас недоступен. Попробуй позже."
 
 
-class VaultError(PsychoError):
-    """Сбой записи или git-операции в vault."""
+class VaultError(UchoError):
+    """Сбой записи в файловом хранилище."""
 
 
-class ValidationError(PsychoError):
+class ValidationError(UchoError):
     """Ввод или контракт данных не прошёл валидацию."""

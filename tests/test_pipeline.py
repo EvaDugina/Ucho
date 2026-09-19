@@ -31,11 +31,11 @@ def test_session_log_rejects_unsafe_session_id(as_user):
     assert not (userctx.user_root() / "00_raw" / "escape.jsonl").exists()
 
 
-def test_user_git_transaction_requires_current_uid(as_user):
+def test_user_write_requires_current_uid(as_user):
     token = userctx._current_uid.set(None)
     entered = False
     try:
-        with pytest.raises(VaultError), vault.git_wrap("unsafe unscoped write"):
+        with pytest.raises(VaultError), vault.user_write("unsafe unscoped write"):
             entered = True
     finally:
         userctx._current_uid.reset(token)
@@ -173,6 +173,108 @@ async def test_note_service_uses_current_process_contract(as_user, monkeypatch):
     assert captured["text"] == "Свободная заметка"
     assert captured["event_kind"] == "note"
     assert "asked_at" not in captured
+
+
+@pytest.mark.asyncio
+async def test_ucho_starts_new_context_and_followup_stays_there(as_user, monkeypatch):
+    from bot.services import note_service
+
+    old = session.start(domain="ethics")
+    session.set_question("Старый вопрос", "ethics", q_num=7)
+    session_log.append_required(
+        session_id=old.id,
+        role="assistant",
+        kind="question",
+        text="Старый вопрос",
+        q_num=7,
+        domain="ethics",
+    )
+    prompts = []
+
+    async def classify(*args, **kwargs):
+        return _mood()
+
+    async def process(*, question, answer, session_context, **kwargs):
+        prompts.append((question, answer, session_context))
+        return {"reaction": "Расскажи подробнее.", "personality_delta": []}
+
+    monkeypatch.setattr(conversation_service, "classify_mood", classify)
+    monkeypatch.setattr(conversation_service, "process_answer", process)
+
+    await note_service.ingest_note("Новая тема", message_id=42)
+    new = session.get()
+    assert new is not None and new.id != old.id
+    old_events = session_log.session_events(old.id)
+    new_events = session_log.session_events(new.id)
+    assert len(old_events) == 1
+    assert len(new_events) == 1
+    assert new_events[0]["kind"] == "note"
+    assert new_events[0]["q_num"] is None
+    assert new_events[0]["metadata"]["source"] == "ucho"
+    assert prompts[0][0] == "(свободная заметка)"
+    assert "Новая тема" in prompts[0][2]
+    assert "Старый вопрос" not in prompts[0][2]
+
+    session_log.append_required(
+        session_id=new.id,
+        role="assistant",
+        kind="reaction",
+        text="Расскажи подробнее.",
+        q_num=new.current_q_num,
+        domain="everyday",
+    )
+    await conversation_service.process_probe_answer("Продолжение", message_id=43)
+    followup = session_log.session_events(new.id)[2]
+    assert followup["kind"] == "answer"
+    assert followup["q_num"] == new.current_q_num - 1
+    assert len(session_log.session_events(old.id)) == 1
+    assert prompts[1][0] == "Расскажи подробнее."
+    assert "Новая тема" in prompts[1][2]
+    assert "Продолжение" in prompts[1][2]
+    assert "Старый вопрос" not in prompts[1][2]
+
+
+@pytest.mark.asyncio
+async def test_pending_ucho_recovers_as_note_in_new_session(as_user, monkeypatch):
+    from bot.services import note_service
+
+    old = session.start(domain="ethics")
+    session.set_question("Старый вопрос", "ethics", q_num=7)
+
+    async def classify(*args, **kwargs):
+        return _mood()
+
+    async def fail(*args, **kwargs):
+        raise LLMError("offline")
+
+    monkeypatch.setattr(conversation_service, "classify_mood", classify)
+    monkeypatch.setattr(conversation_service, "process_answer", fail)
+    with pytest.raises(LLMError):
+        await note_service.ingest_note("Новая тема", message_id=42)
+    new = session.get()
+    assert new is not None and new.id != old.id
+    assert session.has_pending(new)
+    assert session_log.session_events(new.id)[0]["q_num"] is None
+
+    observed = {}
+
+    async def process(*, question, session_context, **kwargs):
+        observed.update(question=question, session_context=session_context)
+        return {"reaction": "Расскажи подробнее.", "personality_delta": []}
+
+    class BotStub:
+        async def send_message(self, *args, **kwargs):
+            return SimpleNamespace(message_id=77, date=None)
+
+    monkeypatch.setattr(recovery, "classify_mood", classify)
+    monkeypatch.setattr(recovery, "process_answer", process)
+    monkeypatch.setattr(recovery.users, "is_allowed", lambda _: True)
+    await recovery.process_pending_on_startup(BotStub(), as_user)
+    assert observed["question"] == "(свободная заметка)"
+    assert "Новая тема" in observed["session_context"]
+    assert "Старый вопрос" not in observed["session_context"]
+    assert session.has_pending(new) is False
+    assert [e["kind"] for e in session_log.session_events(new.id)] == ["note", "reaction"]
 
 
 @pytest.mark.asyncio

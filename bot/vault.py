@@ -18,10 +18,6 @@ from .repositories.state_repo import (
     next_q_num,
 )
 from .storage import log as _log
-from .storage.git import (
-    commit_all,
-    ensure_git_repo,
-)
 from .storage.layout import (
     books_dir,
     ensure_layout,
@@ -31,7 +27,7 @@ from .storage.layout import (
     sessions_dir,
     state_file,
 )
-from .storage.transaction import books_git_wrap, git_wrap
+from .storage.transaction import books_write, user_write
 
 _LOG_MAX_BYTES = _log._LOG_MAX_BYTES
 
@@ -53,14 +49,12 @@ __all__ = [
     "_save_state",
     "append_log",
     "books_dir",
-    "books_git_wrap",
-    "commit_all",
+    "books_write",
     "daily_already_sent",
     "daily_record",
     "daily_reminder_plan",
-    "ensure_git_repo",
     "ensure_layout",
-    "git_wrap",
+    "user_write",
     "mark_daily_reminder_done",
     "mark_daily_reminder_planned",
     "mark_daily_sent_details",

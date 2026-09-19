@@ -13,7 +13,8 @@ from datetime import datetime
 from pathlib import Path
 
 from . import vault
-from .atomic import atomic_write_json, atomic_write_text
+from .atomic import atomic_write_bytes, atomic_write_json, atomic_write_text
+from .errors import VaultError
 
 log = logging.getLogger(__name__)
 
@@ -150,9 +151,6 @@ def save_synthesis(
     version_id = now.strftime("%Y-%m-%d_%H-%M-%S")
     version_path = versions_dir() / f"{version_id}.md"
     content = body.rstrip() + "\n"
-    atomic_write_text(version_path, content)
-    atomic_write_text(path(), content)
-
     captured = set(delta_ids)
     store = _load_store()
     for item in store["items"]:
@@ -160,7 +158,27 @@ def save_synthesis(
             item["status"] = "synthesized"
             item["synthesized_in"] = version_id
             item["synthesized_at"] = now.isoformat(timespec="seconds")
-    atomic_write_json(deltas_path(), store)
+    targets = (version_path, path(), deltas_path())
+    previous = {target: target.read_bytes() if target.exists() else None for target in targets}
+    try:
+        atomic_write_text(version_path, content)
+        atomic_write_text(path(), content)
+        atomic_write_json(deltas_path(), store)
+    except Exception as exc:
+        rollback_errors = []
+        for target in reversed(targets):
+            try:
+                old = previous[target]
+                if old is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    atomic_write_bytes(target, old)
+            except Exception as rollback_exc:
+                rollback_errors.append(rollback_exc)
+                log.exception("about rollback failed for %s", target)
+        if rollback_errors:
+            raise VaultError("about synthesis failed and file rollback was incomplete") from exc
+        raise
     return version_id
 
 

@@ -23,5 +23,5 @@ def test_clean_vault_smoke(as_user):
     assert sorted(path.name for path in root.iterdir() if path.is_dir()) == [
         "00_raw",
         "01_mood",
-        "01_personality",
+        "02_personality",
     ]

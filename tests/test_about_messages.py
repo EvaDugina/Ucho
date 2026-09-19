@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+from datetime import datetime
+from types import SimpleNamespace
+
+import pytest
+
+from bot import handlers
+from bot.services.about_messages import format_full_profile
+from bot.services.session_messages import TG_MSG_LIMIT
+
+
+def test_full_profile_formats_frontmatter_and_headings_safely():
+    profile = (
+        "---\nupdated: '2026-09-19'\n---\n\n"
+        "### Манера <речи>\nЯ говорю & слушаю.\n\n"
+        "### Ценности\n- Бережно отношусь к словам."
+    )
+    chunks = format_full_profile(profile)
+    assert len(chunks) == 1
+    body = chunks[0]
+    assert body.startswith("<b>Полная версия описания</b>")
+    assert "<pre>---\nupdated: &#x27;2026-09-19&#x27;\n---</pre>" in body
+    assert "<b>Манера &lt;речи&gt;</b>" in body
+    assert "Я говорю &amp; слушаю." in body
+    assert "<b>Ценности</b>" in body
+    assert "• Бережно отношусь к словам." in body
+
+
+def test_long_profile_splits_without_losing_text_or_breaking_html():
+    profile = "### Манера речи\n" + "Слово & " * 1200
+    chunks = format_full_profile(profile)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= TG_MSG_LIMIT for chunk in chunks)
+    assert sum(chunk.count("Слово") for chunk in chunks) == 1200
+    assert sum(chunk.count("&amp;") for chunk in chunks) == 1200
+    assert all(chunk.count("<b>") == chunk.count("</b>") for chunk in chunks)
+    assert all(chunk.count("<pre>") == chunk.count("</pre>") for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_about_sends_full_profile_after_spoken_summary(as_user, monkeypatch):
+    sent = []
+
+    async def refresh(*, at):
+        return "Я вижу главное.", "### Манера речи\nПолное описание.", None
+
+    async def answer(text, **kwargs):
+        sent.append((text, kwargs))
+
+    monkeypatch.setattr(handlers.about_service, "refresh_and_present", refresh)
+    message = SimpleNamespace(date=datetime(2026, 9, 19), answer=answer)
+    await handlers.cmd_about(message)
+
+    assert len(sent) == 2
+    assert sent[0] == ("Я вижу главное.", {"parse_mode": "HTML"})
+    assert sent[1][0].startswith("<b>Полная версия описания</b>")
+    assert "<b>Манера речи</b>" in sent[1][0]
+    assert "Полное описание." in sent[1][0]
+    assert sent[1][1] == {"parse_mode": "HTML"}

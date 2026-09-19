@@ -3,12 +3,11 @@ set -Eeuo pipefail
 
 BOT_REPO_URL="${BOT_REPO_URL:-https://github.com/EvaDugina/Ucho.git}"
 BRANCH="${BRANCH:-main}"
-BASE_DIR="${BASE_DIR:-/srv/psycho}"
+BASE_DIR="${BASE_DIR:-/srv/ucho}"
 APP_DIR="${APP_DIR:-$BASE_DIR/app}"
 VAULT_DIR="${VAULT_DIR:-$BASE_DIR/vault}"
-VAULT_REPO_URL="${VAULT_REPO_URL:-}"
+BACKUP_DIR="${BACKUP_DIR:-$BASE_DIR/backups}"
 SKIP_TESTS="${SKIP_TESTS:-0}"
-SKIP_VAULT_PULL="${SKIP_VAULT_PULL:-0}"
 PYTHON_BASE_IMAGE="${PYTHON_BASE_IMAGE:-mirror.gcr.io/library/python:3.12-slim}"
 export PYTHON_BASE_IMAGE
 
@@ -52,7 +51,8 @@ install_docker() {
 
 prepare_dirs() {
   log "Preparing directories in $BASE_DIR"
-  $SUDO mkdir -p "$BASE_DIR" "$VAULT_DIR"
+  [ "$VAULT_DIR" != "$BACKUP_DIR" ] || die "Vault and backup directories must differ"
+  $SUDO mkdir -p "$BASE_DIR" "$VAULT_DIR" "$BACKUP_DIR"
   if [ -n "$SUDO" ]; then
     $SUDO chown -R "$(id -u):$(id -g)" "$BASE_DIR"
   fi
@@ -72,31 +72,6 @@ sync_app_repo() {
   fi
 
   git clone --branch "$BRANCH" "$BOT_REPO_URL" "$APP_DIR"
-}
-
-sync_vault_repo() {
-  if [ "$SKIP_VAULT_PULL" = "1" ]; then
-    log "Skipping knowledge vault sync because SKIP_VAULT_PULL=1"
-    return
-  fi
-
-  if [ -n "$VAULT_REPO_URL" ]; then
-    log "Syncing knowledge vault: $VAULT_REPO_URL"
-    if [ -d "$VAULT_DIR/.git" ]; then
-      vault_git pull --ff-only
-    else
-      rm -rf "$VAULT_DIR"
-      host_git clone "$VAULT_REPO_URL" "$VAULT_DIR"
-    fi
-    return
-  fi
-
-  if [ -d "$VAULT_DIR/.git" ]; then
-    log "Pulling existing knowledge vault"
-    vault_git pull --ff-only || true
-  else
-    log "Knowledge vault repo URL not set; leaving $VAULT_DIR as a local directory"
-  fi
 }
 
 set_env_default() {
@@ -122,19 +97,21 @@ prepare_env() {
   if [ ! -f "$APP_DIR/.env" ]; then
     cp "$APP_DIR/.env.example" "$APP_DIR/.env"
     set_env_default "VAULT_HOST_PATH" "$VAULT_DIR"
+    set_env_default "BACKUP_HOST_PATH" "$BACKUP_DIR"
     set_env_default "VAULT_PATH" "/vault"
     die "Created $APP_DIR/.env from example. Fill TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID and OPENROUTER_API_KEY (or AITUNNEL_API_KEY), then run again"
   fi
 
   chmod 600 "$APP_DIR/.env"
   set_env_default "VAULT_HOST_PATH" "$VAULT_DIR"
+  set_env_default "BACKUP_HOST_PATH" "$BACKUP_DIR"
   set_env_default "VAULT_PATH" "/vault"
   set_env_default "AITUNNEL_BASE_URL" "https://api.aitunnel.ru/v1"
-  set_env_default "VAULT_GIT_USER_NAME" "Psycho Bot"
-  set_env_default "VAULT_GIT_USER_EMAIL" "psycho-bot@local"
 
   preflight_env
   VAULT_DIR="$(env_value "VAULT_HOST_PATH")"
+  BACKUP_DIR="$(env_value "BACKUP_HOST_PATH")"
+  [ "$VAULT_DIR" != "$BACKUP_DIR" ] || die "Vault and backup directories must differ"
 }
 
 run_checks() {
@@ -145,7 +122,7 @@ run_checks() {
 
   log "Running smoke tests in Docker (base image: $PYTHON_BASE_IMAGE)"
   cd "$APP_DIR"
-  compose_cmd run --rm --build -e VAULT_PATH=/tmp/psycho-test bot pytest tests/smoke
+  compose_cmd run --rm --build -e VAULT_PATH=/tmp/ucho-test bot pytest tests/smoke
 }
 
 start_bot() {
@@ -161,8 +138,7 @@ install_docker
 prepare_dirs
 sync_app_repo
 prepare_env
-sync_vault_repo
 run_checks
 start_bot
 
-log "Done. Bot app: $APP_DIR; vault: $VAULT_DIR"
+log "Done. Bot app: $APP_DIR; data: $VAULT_DIR; backups: $BACKUP_DIR"

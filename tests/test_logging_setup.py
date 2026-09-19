@@ -18,7 +18,7 @@ def test_configure_logging_writes_stream_and_container_file(tmp_path, monkeypatc
 
     try:
         configure_logging("INFO", stream=stream)
-        logging.getLogger("psycho.test").info("file log marker")
+        logging.getLogger("ucho.test").info("file log marker")
         for handler in root.handlers:
             handler.flush()
 
@@ -44,7 +44,7 @@ def test_configure_logging_without_log_dir_keeps_file_logging_disabled(tmp_path,
 
     try:
         configure_logging("INFO", stream=stream)
-        logging.getLogger("psycho.test").info("stream only marker")
+        logging.getLogger("ucho.test").info("stream only marker")
         for handler in root.handlers:
             handler.flush()
 

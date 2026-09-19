@@ -29,10 +29,12 @@ from . import (
     users,
     vault,
 )
+from .commands import set_chat_commands
 from .config import BOOK_UPLOAD_MAX_BYTES, DOMAINS, UPLOAD_PENDING_SECONDS
 from .errors import LLMError, VaultError
 from .llm import ask_book_question, ask_next
 from .services import (
+    about_messages,
     about_service,
     conversation_service,
     deletion_service,
@@ -138,7 +140,6 @@ async def _process_current_text(
             )
             if payload is not None:
                 await _send_payload(message.bot, message.chat.id, payload)
-                vault.commit_all(event_kind)
             await _drain_queued(message)
     except LLMError:
         log.warning("process_answer unavailable; pending raw answer kept")
@@ -169,7 +170,6 @@ async def _drain_queued(message: Message) -> None:
         )
         if payload is not None:
             await _send_payload(message.bot, message.chat.id, payload)
-            vault.commit_all("queued answer")
 
 
 async def _ingest_note(message: Message, clean: str, *, source: str = "ucho") -> None:
@@ -188,7 +188,6 @@ async def _ingest_note(message: Message, clean: str, *, source: str = "ucho") ->
             )
             if payload is not None:
                 await _send_payload(message.bot, message.chat.id, payload)
-                vault.commit_all("note")
     except LLMError:
         log.warning("note analysis unavailable; pending raw note kept")
         await message.answer(PENDING_ANALYSIS_MESSAGE)
@@ -233,7 +232,6 @@ async def _generate_question(
             text=question,
             metadata={"source": "ask", "topic": selected_domain},
         )
-        vault.commit_all("question")
 
 
 def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, InlineKeyboardMarkup]:
@@ -286,6 +284,10 @@ def _sea_keyboard(page: int = 0, *, settings: bool = False) -> tuple[str, Inline
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
+    try:
+        await set_chat_commands(message.bot, message.chat.id, owner=_is_owner(message))
+    except Exception:
+        log.exception("failed to set commands after /start")
     await message.answer(
         "Я — Ухо. Задаю вопросы, храню raw-разговор, замечаю настроение и черты. "
         "Общая библиотека открывается через /sea. Команды — /help."
@@ -304,7 +306,7 @@ async def cmd_help(message: Message) -> None:
         "/upload — загрузить EPUB, FB2 или Markdown до 20 МБ\n"
         "/sea — библиотека, разговоры и настройки цитат\n\n"
         "<b>Данные</b>\n"
-        "/leta — удалить личный raw, mood, personality и книжные настройки\n"
+        "/leta — удалить активные личные данные (копии хранятся до ротации)\n"
         "/start, /help — начало и эта справка"
     )
     if _is_owner(message):
@@ -314,7 +316,7 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("pebble"))
 async def cmd_pebble(message: Message) -> None:
-    await message.answer("Бот работает.")
+    await message.answer("Больно.")
 
 
 @router.message(Command("ask"))
@@ -384,7 +386,7 @@ async def cmd_about(message: Message) -> None:
         return
     try:
         async with session.lock_for(uid):
-            spoken, version = await about_service.refresh_and_present(at=message.date)
+            spoken, profile, version = await about_service.refresh_and_present(at=message.date)
             if version:
                 log.info("about synthesized uid=%s version=%s", uid, version)
             if not spoken:
@@ -393,6 +395,8 @@ async def cmd_about(message: Message) -> None:
                 )
                 return
             for chunk in session_messages.split_for_telegram(safe_chat_html(spoken)):
+                await message.answer(chunk, parse_mode="HTML")
+            for chunk in about_messages.format_full_profile(profile):
                 await message.answer(chunk, parse_mode="HTML")
     except LLMError as exc:
         log.warning("about unavailable; pending deltas unchanged")
@@ -482,7 +486,6 @@ async def cb_sea(callback: CallbackQuery) -> None:
         text, keyboard = _sea_keyboard(page, settings=True)
         if callback.message:
             await callback.message.edit_text(text, reply_markup=keyboard)
-        vault.commit_all("book reminder settings")
         await callback.answer("Настройка сохранена")
         return
     if action != "b" or len(parts) < 3:
@@ -528,7 +531,6 @@ async def cb_sea(callback: CallbackQuery) -> None:
                 event_kind="book_question",
                 metadata=metadata,
             )
-            vault.commit_all("book question")
         await callback.answer()
     except books.BookError as exc:
         log.warning("book question unavailable")
@@ -546,8 +548,9 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
     expected = deletion_service.confirmation_args(uid)
     if (command.args or "").strip() != expected:
         await message.answer(
-            "Это удалит только твою базу raw/mood/personality и книжные настройки. "
-            "Общие книги и данные других людей останутся.\n\n"
+            "Это удалит активные raw/mood/personality и книжные настройки. "
+            "Общие книги и данные других людей останутся. "
+            "Резервные снимки удаляются по расписанию ротации.\n\n"
             f"Для подтверждения отправь:\n<code>{html.escape(deletion_service.confirmation_command(uid))}</code>",
             parse_mode="HTML",
         )
@@ -563,7 +566,7 @@ async def cmd_leta(message: Message, command: CommandObject) -> None:
         await message.answer("Не удалил: проверка безопасности не прошла.")
         return
     await _delete_chat_messages_after_leta(message, message_ids)
-    await message.answer("Личные данные удалены.")
+    await message.answer("Активные личные данные удалены. Старые снимки остаются до ротации.")
 
 
 async def _delete_chat_messages_after_leta(
@@ -670,7 +673,6 @@ async def _open_book_reminder() -> None:
         metadata=metadata,
     )
     session.persist()
-    vault.commit_all("book reminder consumed")
 
 
 @router.message(F.text.startswith("/"))

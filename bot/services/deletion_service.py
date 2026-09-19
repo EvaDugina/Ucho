@@ -4,8 +4,8 @@
 - только request-scoped пользователь из ``userctx``;
 - только ровный корень ``<VAULT_PATH>/users/<uid>`` после resolve-проверки.
 
-Корень пользователя, whitelist и git history остаются на месте: это reset базы,
-а не privacy purge.
+Корень пользователя и whitelist остаются на месте. Резервные снимки
+хранятся до ротации: это reset активных данных, а не мгновенная очистка копий.
 """
 from __future__ import annotations
 
@@ -123,7 +123,7 @@ def delete_current_user_data() -> DeleteUserDataResult:
     """Очистить содержимое ``users/<uid>``, сохранить корень и забыть runtime-сессию."""
     uid, target = _current_user_root()
     if not target.exists():
-        with vault.git_wrap("reset user data"):
+        with vault.user_write("reset user data"):
             vault.ensure_layout()
         session.clear()
         vault.append_log("warn", "user_data_reset", f"uid={uid} data_absent")
@@ -133,7 +133,7 @@ def delete_current_user_data() -> DeleteUserDataResult:
         raise VaultError("delete_user_data target is not a regular directory")
 
     had_contents = any(target.iterdir())
-    with vault.git_wrap("reset user data"):
+    with vault.user_write("reset user data"):
         _clear_directory_contents(target)
         vault.ensure_layout()
 

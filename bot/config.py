@@ -167,15 +167,14 @@ OWNER_TELEGRAM_ID = int(os.environ["OWNER_TELEGRAM_ID"])
 
 # Дополнительные доверенные пользователи (multi-user). Через запятую, например
 # "111,222". Владелец добавляется автоматически. Рантайм-добавления — в
-# <vault>/.psycho/users.json (см. bot/users.py), env — лишь начальный список.
+# <vault>/.ucho/users.json (см. bot/users.py), env — лишь начальный список.
 ALLOWED_TELEGRAM_IDS = tuple(
     int(x) for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").replace(" ", "").split(",") if x
 )
 
 # Dev/prod режим. DEBUG=true оставляет ручной Telegram-путь рабочим, но по
-# умолчанию выключает тяжёлую/фонующую обвязку: git-vault и startup jobs.
+# умолчанию выключает фоновые задачи и startup recovery.
 DEBUG = _env_bool("DEBUG", False)
-VAULT_GIT_ENABLED = _env_bool("VAULT_GIT_ENABLED", not DEBUG)
 BACKGROUND_JOBS_ENABLED = _env_bool("BACKGROUND_JOBS_ENABLED", not DEBUG)
 STARTUP_RECOVERY_ENABLED = _env_bool("STARTUP_RECOVERY_ENABLED", not DEBUG)
 
@@ -194,6 +193,11 @@ DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
 DAILY_REMINDER_START = os.getenv("DAILY_REMINDER_START", "23:00")
 DAILY_REMINDER_END = os.getenv("DAILY_REMINDER_END", "01:00")
 VAULT_PATH = Path(os.getenv("VAULT_PATH", "/vault"))
+BACKUP_PATH = Path(os.getenv("BACKUP_PATH", "/backups"))
+BACKUP_ENABLED = _env_bool("BACKUP_ENABLED", not DEBUG)
+BACKUP_WEEKDAY = os.getenv("BACKUP_WEEKDAY", "mon")
+BACKUP_HOUR = int(os.getenv("BACKUP_HOUR", "3"))
+BACKUP_KEEP = min(4, int(os.getenv("BACKUP_KEEP", "4")))
 BOOKS_PATH = VAULT_PATH / "books"
 BOOK_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 BOOK_EXTRACTED_MAX_BYTES = 60 * 1024 * 1024
@@ -216,5 +220,5 @@ DOMAINS = (
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 # Служебная папка внутри vault: whitelist и нейтральный технический лог.
-PSYCHO_META_DIR = VAULT_PATH / ".psycho"
-LOG_PATH = PSYCHO_META_DIR / "log.md"
+META_DIR = VAULT_PATH / ".ucho"
+LOG_PATH = META_DIR / "log.md"

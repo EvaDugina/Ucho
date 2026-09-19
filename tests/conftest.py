@@ -6,8 +6,7 @@
 импорте. Поэтому conftest подменяет окружение на уровне модуля, до любого
 ``from bot import ...`` (conftest импортируется pytest-ом раньше тест-модулей).
 
-Тесты гоняются ТОЛЬКО в Docker (правило репозитория) — git в образе есть,
-поэтому транзакционные тесты ``git_wrap`` работоспособны.
+Тесты гоняются только в Docker (правило репозитория).
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ os.environ["LLM_MODEL_DEFAULT"] = "qwen3-235b-a22b-2507"
 os.environ["LLM_MODEL_FALLBACKS"] = "deepseek-v4-flash"
 os.environ.pop("OPENROUTER_API_KEY", None)
 # Общий на сессию временный вольт; изоляция между тестами — через уникальный uid.
-os.environ["VAULT_PATH"] = tempfile.mkdtemp(prefix="psycho-test-vault-")
+os.environ["VAULT_PATH"] = tempfile.mkdtemp(prefix="ucho-test-vault-")
 
 import pytest  # noqa: E402
 
@@ -35,12 +34,12 @@ _uid_counter = itertools.count(1000)
 
 @pytest.fixture
 def as_user() -> int:
-    """Выставить уникального пользователя и создать его layout + git-репо вольта.
+    """Выставить уникального пользователя и создать его файловый layout.
 
     Возвращает uid. Каждый тест получает чистое поддерево ``users/<uid>/`` —
     данные тестов не пересекаются.
     """
     uid = next(_uid_counter)
     userctx.set_user(uid)
-    vault.ensure_layout()  # создаёт users/<uid>/ и (идемпотентно) git-репо на корне
+    vault.ensure_layout()
     return uid

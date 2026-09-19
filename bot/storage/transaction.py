@@ -1,67 +1,22 @@
-"""Git-backed transaction helper for vault writes."""
+"""Проверка области записи без Git-транзакций."""
 from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Iterator
 
+from .. import userctx
 from ..errors import VaultError
-from .git import (
-    _git_available,
-    _git_commit,
-    _git_head,
-    _is_git_repo,
-    _restore_scope,
-    _scope,
-    git_enabled,
-)
-from .log import append_log
 
 
 @contextmanager
-def git_wrap(op_name: str) -> Iterator[None]:
-    """pre-commit -> write block -> post-commit with rollback on exceptions."""
-    scope, label = _scope()
-    if scope is None:
-        raise VaultError(f"{op_name}: user-scoped transaction requires current uid")
-    with _git_wrap_scope(op_name, scope=scope, label=label):
-        yield
+def user_write(op_name: str) -> Iterator[None]:
+    """Не разрешать пользовательскую запись без явного uid в контексте."""
+    if userctx.current_uid() is None:
+        raise VaultError(f"{op_name}: user-scoped write requires current uid")
+    yield
 
 
 @contextmanager
-def books_git_wrap(op_name: str) -> Iterator[None]:
-    """Транзакция, ограниченная общей директорией `books/`."""
-    with _git_wrap_scope(op_name, scope="books", label="books"):
-        yield
-
-
-@contextmanager
-def _git_wrap_scope(
-    op_name: str,
-    *,
-    scope: str | None,
-    label: str,
-) -> Iterator[None]:
-    if not git_enabled():
-        yield
-        return
-    if not _git_available() or not _is_git_repo():
-        append_log("warn", "git_unavailable", f"op={op_name} ran without safety net")
-        yield
-        return
-
-    pre_sha = _git_commit(f"psycho({label}): before {op_name}", scope=scope) or _git_head()
-    try:
-        yield
-    except Exception as exc:
-        append_log("error", op_name, f"failed: {exc!r} — attempting rollback")
-        if pre_sha:
-            ok = _restore_scope(pre_sha, scope)
-            append_log("error", op_name, f"rollback {'ok' if ok else 'FAILED'} to {pre_sha[:8]}")
-            if not ok:
-                raise VaultError(
-                    f"{op_name}: операция упала и git-откат не удался — "
-                    "данные могут быть неконсистентны"
-                ) from exc
-        raise
-    else:
-        _git_commit(f"psycho({label}): {op_name}", scope=scope)
+def books_write(_op_name: str) -> Iterator[None]:
+    """Общая библиотека не зависит от пользовательского контекста."""
+    yield

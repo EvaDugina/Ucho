@@ -281,7 +281,6 @@ async def send_due_daily_reminders(
             else:
                 skipped += 1
             vault.mark_daily_reminder_done(DAILY_TZ, day=reminder_day)
-            vault.commit_all("book reminder")
         except Exception:
             errors += 1
             log.exception("book reminder failed for uid=%s", uid)

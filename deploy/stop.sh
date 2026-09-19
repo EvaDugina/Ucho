@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BASE_DIR="${BASE_DIR:-/srv/psycho}"
+BASE_DIR="${BASE_DIR:-/srv/ucho}"
 APP_DIR="${APP_DIR:-$BASE_DIR/app}"
 
 log() {

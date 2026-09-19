@@ -6,7 +6,18 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from .config import DAILY_HOUR, DAILY_TZ
+from . import backup
+from .config import (
+    BACKGROUND_JOBS_ENABLED,
+    BACKUP_ENABLED,
+    BACKUP_HOUR,
+    BACKUP_KEEP,
+    BACKUP_PATH,
+    BACKUP_WEEKDAY,
+    DAILY_HOUR,
+    DAILY_TZ,
+    VAULT_PATH,
+)
 from .services import reminder_service
 from .services.daily_service import daily_targets, send_daily_question
 
@@ -111,31 +122,52 @@ async def catch_up_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> Non
 
 def start_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=DAILY_TZ)
-    reminder_start = reminder_service.reminder_start_time()
-    scheduler.add_job(
-        _daily_for_all,
-        trigger=CronTrigger(hour=DAILY_HOUR, minute=0, timezone=DAILY_TZ),
-        args=[bot],
-        id="daily_question",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _plan_daily_reminders,
-        trigger=CronTrigger(
-            hour=reminder_start.hour,
-            minute=reminder_start.minute,
-            timezone=DAILY_TZ,
-        ),
-        args=[bot, scheduler],
-        id="daily_reminder_plan",
-        replace_existing=True,
-    )
+    if BACKGROUND_JOBS_ENABLED:
+        reminder_start = reminder_service.reminder_start_time()
+        scheduler.add_job(
+            _daily_for_all,
+            trigger=CronTrigger(hour=DAILY_HOUR, minute=0, timezone=DAILY_TZ),
+            args=[bot],
+            id="daily_question",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _plan_daily_reminders,
+            trigger=CronTrigger(
+                hour=reminder_start.hour,
+                minute=reminder_start.minute,
+                timezone=DAILY_TZ,
+            ),
+            args=[bot, scheduler],
+            id="daily_reminder_plan",
+            replace_existing=True,
+        )
+        log.info(
+            "daily question at %02d:00, reminder plan at %02d:%02d %s",
+            DAILY_HOUR,
+            reminder_start.hour,
+            reminder_start.minute,
+            DAILY_TZ,
+        )
+    if BACKUP_ENABLED:
+        scheduler.add_job(
+            _make_backup,
+            trigger=CronTrigger(
+                day_of_week=BACKUP_WEEKDAY, hour=BACKUP_HOUR, minute=0, timezone=DAILY_TZ
+            ),
+            id="weekly_backup",
+            replace_existing=True,
+        )
+        log.info("weekly backup at %s %02d:00 %s", BACKUP_WEEKDAY, BACKUP_HOUR, DAILY_TZ)
     scheduler.start()
-    log.info(
-        "scheduler started: daily_question at %02d:00, reminder_plan at %02d:%02d %s",
-        DAILY_HOUR,
-        reminder_start.hour,
-        reminder_start.minute,
-        DAILY_TZ,
-    )
     return scheduler
+
+
+async def _make_backup() -> None:
+    try:
+        if backup.has_backup_this_week(BACKUP_PATH, tz_name=DAILY_TZ):
+            return
+        result = backup.create_backup(VAULT_PATH, BACKUP_PATH, keep=BACKUP_KEEP)
+        log.info("backup complete path=%s files=%s bytes=%s", result.path, result.files, result.bytes)
+    except Exception:
+        log.exception("weekly backup failed")

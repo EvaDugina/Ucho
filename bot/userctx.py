@@ -14,7 +14,7 @@ asyncio-задачей, и значение contextvar изолировано pe
 - session-restore и recovery (по каждому пользователю);
 - pending-recovery.
 
-`.psycho/` (log и users.json) и git-репо — ГЛОБАЛЬНЫЕ на корне вольта.
+`.ucho/` (log и users.json) — общие служебные файлы на корне хранилища.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pathlib import Path
 from .config import VAULT_PATH
 
 _current_uid: contextvars.ContextVar[int | None] = contextvars.ContextVar(
-    "psycho_current_uid", default=None
+    "ucho_current_uid", default=None
 )
 
 

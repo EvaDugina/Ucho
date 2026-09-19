@@ -14,7 +14,7 @@ def apply_processed(
     at: object | None = None,
 ) -> int:
     """Сохранить только валидные personality-дельты; raw уже на диске."""
-    with vault.git_wrap("apply personality deltas"):
+    with vault.user_write("apply personality deltas"):
         accepted = about.record_deltas(
             result.get("personality_delta"),
             raw_event_id=raw_event_id,

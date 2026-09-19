@@ -3,16 +3,22 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
+from aiogram.types import ErrorEvent
 
-from . import recovery, session, userctx, users, vault
+from . import backup, recovery, session, session_log, userctx, users, vault
+from .commands import set_chat_commands
 from .config import (
     BACKGROUND_JOBS_ENABLED,
+    BACKUP_ENABLED,
+    BACKUP_KEEP,
+    BACKUP_PATH,
+    DAILY_TZ,
     LOG_LEVEL,
     OWNER_TELEGRAM_ID,
     STARTUP_RECOVERY_ENABLED,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_PROXY_URL,
+    VAULT_PATH,
 )
 from .handlers import admin_router, router
 from .logging_setup import configure_logging
@@ -20,28 +26,7 @@ from .middleware import AccessMiddleware
 from .scheduler import start_scheduler
 
 configure_logging(LOG_LEVEL)
-log = logging.getLogger("psycho.main")
-
-
-# Команды, видимые при наборе «/». Базовый набор — для всех доверенных.
-BOT_COMMANDS = [
-    BotCommand(command="pebble", description="Бросить камень"),
-    BotCommand(command="ucho", description="Свободная заметка: /ucho <текст>"),
-    BotCommand(command="ask", description="Задать вопрос: /ask [тема]"),
-    BotCommand(command="about", description="Показать внутренний профиль"),
-    BotCommand(command="leta", description="Удалить личные данные"),
-    BotCommand(command="help", description="Подсказка по командам"),
-    BotCommand(command="start", description="Начать работу с ботом"),
-    BotCommand(command="upload", description="Добавить книгу в общую библиотеку"),
-    BotCommand(command="sea", description="Книжные разговоры и настройки"),
-]
-
-# Админ-команды — только владельцу, добавляются к базовому набору в его меню.
-ADMIN_COMMANDS = [
-    BotCommand(command="adduser", description="Добавить пользователя: /adduser <id>"),
-    BotCommand(command="removeuser", description="Убрать пользователя: /removeuser <id>"),
-    BotCommand(command="users", description="Список доверенных"),
-]
+log = logging.getLogger("ucho.main")
 
 
 async def _setup_commands(bot: Bot) -> None:
@@ -50,12 +35,8 @@ async def _setup_commands(bot: Bot) -> None:
     try:
         await bot.delete_my_commands()  # для всех остальных — пусто
         for uid in users.allowed_ids():
-            cmds = BOT_COMMANDS + ADMIN_COMMANDS if users.is_owner(uid) else BOT_COMMANDS
             try:
-                await bot.set_my_commands(
-                    commands=cmds,
-                    scope=BotCommandScopeChat(chat_id=uid),
-                )
+                await set_chat_commands(bot, uid, owner=users.is_owner(uid))
             except Exception:
                 log.exception("failed to set commands for uid=%s", uid)
         log.info("bot commands registered for %d allowed user(s)", len(users.allowed_ids()))
@@ -67,6 +48,20 @@ async def main() -> None:
     # Контекст владельца + структура его данных (на случай свежего вольта).
     userctx.set_user(OWNER_TELEGRAM_ID)
     vault.ensure_layout()
+    users_root = VAULT_PATH / "users"
+    if users_root.is_dir():
+        for user_dir in users_root.iterdir():
+            if user_dir.is_dir() and not user_dir.is_symlink() and user_dir.name.isdigit():
+                userctx.set_user(int(user_dir.name))
+                session_log.rebuild_views()
+    userctx.set_user(OWNER_TELEGRAM_ID)
+    if BACKUP_ENABLED:
+        removed = backup.prune_backups(BACKUP_PATH, keep=BACKUP_KEEP)
+        if removed:
+            log.info("old backups removed: %s", removed)
+        if not backup.has_backup_this_week(BACKUP_PATH, tz_name=DAILY_TZ):
+            result = backup.create_backup(VAULT_PATH, BACKUP_PATH, keep=BACKUP_KEEP)
+            log.info("startup backup complete path=%s files=%s", result.path, result.files)
 
     # Восстановление сессий всех пользователей + список pending для recovery.
     restored = session.restore_all()
@@ -97,14 +92,14 @@ async def main() -> None:
     @dp.errors()
     async def _on_error(event: ErrorEvent) -> bool:
         # Глобальная сеть безопасности: что не поймал локальный try/except в
-        # хэндлере — логируем здесь (трейс в stderr + .psycho/log.md через
+        # хэндлере — логируем здесь (трейс в stderr + .ucho/log.md через
         # logging), наружу пользователю трейс НЕ выпускаем. Возвращаем True —
         # помечаем апдейт обработанным, чтобы aiogram не дублировал трейс.
         log.error("unhandled error on update: %r", event.exception, exc_info=event.exception)
         return True
 
     await _setup_commands(bot)
-    scheduler = start_scheduler(bot) if BACKGROUND_JOBS_ENABLED else None
+    scheduler = start_scheduler(bot) if BACKGROUND_JOBS_ENABLED or BACKUP_ENABLED else None
     if not BACKGROUND_JOBS_ENABLED:
         log.info("background jobs disabled by config")
 

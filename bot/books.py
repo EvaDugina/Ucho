@@ -9,9 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import posixpath
 import random
 import re
+import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -840,7 +843,7 @@ def _build_artifacts(parsed: ParsedBook, source: bytes) -> tuple[str, dict, dict
 
 
 def _extract(data: bytes, filename: str) -> tuple[str, str, str, str]:
-    """Компактный compatibility helper для тестов и миграционных проверок."""
+    """Краткая сводка парсинга для вызывающего кода."""
 
     parsed = parse_book(data, filename)
     return parsed.suffix, parsed.title, parsed.author, _normalized_book_text(parsed)
@@ -868,7 +871,7 @@ def _read_metadata(path: Path) -> dict | None:
 
 
 def scan_books() -> list[dict]:
-    """Вернуть валидные metadata, включая ещё не переиндексированные и TXT."""
+    """Вернуть валидные metadata, включая книги с повреждённым индексом."""
 
     root = vault.books_dir()
     if not root.exists():
@@ -979,8 +982,8 @@ def ingest(data: bytes, filename: str, *, uploader_uid: int, at: datetime | None
         if existing and str(existing.get("sha256") or "") == digest:
             raise BookError("Книга уже есть и ожидает переиндексации.")
         raise BookError("Обнаружен конфликт идентификатора книги.")
-    if directory.exists() and not directory.is_dir():
-        raise BookError("Путь книги занят небезопасным объектом.")
+    if directory.exists():
+        raise BookError("Путь книги уже занят.")
     metadata = {
         "id": book_id,
         "sha256": digest,
@@ -993,12 +996,20 @@ def ingest(data: bytes, filename: str, *, uploader_uid: int, at: datetime | None
         "indexed_at": (at or datetime.now()).isoformat(timespec="seconds"),
         **fields,
     }
-    with vault.books_git_wrap(f"upload {book_id}"):
-        directory.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(directory / f"source{parsed.suffix}", data)
-        atomic_write_text(directory / "text.txt", text + "\n")
-        atomic_write_json(directory / "structure.json", structure)
-        atomic_write_json(metadata_path, metadata)
+    with vault.books_write(f"upload {book_id}"):
+        staging = Path(tempfile.mkdtemp(prefix=f".{book_id}-", dir=vault.books_dir()))
+        try:
+            atomic_write_bytes(staging / f"source{parsed.suffix}", data)
+            atomic_write_text(staging / "text.txt", text + "\n")
+            atomic_write_json(staging / "structure.json", structure)
+            atomic_write_json(staging / "metadata.json", metadata)
+            if directory.exists():
+                raise BookError("Путь книги уже занят.")
+            os.rename(staging, directory)
+        except Exception:
+            if staging.exists() and staging.resolve(strict=False).parent == vault.books_dir().resolve():
+                shutil.rmtree(staging)
+            raise
     return {**metadata, "duplicate": False}
 
 
@@ -1037,8 +1048,7 @@ def _source_path(metadata: dict) -> Path:
 
 
 def inspect_saved_book(book_id: str) -> dict:
-    """Разобрать сохранённый source без записи и вернуть план переиндексации."""
-
+    """Проверить сохранённую книгу и вернуть план ремонта индекса без записи."""
     safe_id = str(book_id)
     if not BOOK_ID_RE.fullmatch(safe_id):
         raise BookError("Некорректный идентификатор книги.")
@@ -1046,8 +1056,7 @@ def inspect_saved_book(book_id: str) -> dict:
     if metadata is None:
         raise BookError("Metadata книги повреждены.")
     source = _source_path(metadata)
-    suffix = source.suffix.casefold()
-    if suffix not in SUPPORTED_EXTENSIONS:
+    if source.suffix.casefold() not in SUPPORTED_EXTENSIONS:
         raise BookError("Формат исходника больше не поддерживается.")
     data = source.read_bytes()
     original_name = str(metadata.get("source_filename") or "")
@@ -1066,18 +1075,13 @@ def inspect_saved_book(book_id: str) -> dict:
     return {
         "id": safe_id,
         "source": source.name,
-        "format": parsed.suffix.lstrip("."),
         "title": parsed.title,
-        "author": parsed.author,
-        "chapters": fields["chapter_count"],
-        "characters": fields["characters"],
-        "status": "current" if current else "reindex",
+        "status": "current" if current else "repair",
     }
 
 
-def reindex_saved_book(book_id: str, *, at: datetime | None = None) -> dict:
-    """Построить structure.json из сохранённого source, не меняя book-id."""
-
+def repair_saved_book(book_id: str, *, at: datetime | None = None) -> dict:
+    """Восстановить structure.json из сохранённого source без смены book ID."""
     preview = inspect_saved_book(book_id)
     if preview["status"] == "current":
         return preview
@@ -1103,10 +1107,21 @@ def reindex_saved_book(book_id: str, *, at: datetime | None = None) -> dict:
         "indexed_at": (at or datetime.now()).isoformat(timespec="seconds"),
         **fields,
     }
-    with vault.books_git_wrap(f"reindex {book_id}"):
-        atomic_write_json(metadata_path.parent / "structure.json", structure)
-        atomic_write_json(metadata_path, updated)
-    return {**preview, "status": "reindexed"}
+    structure_path = metadata_path.parent / "structure.json"
+    if structure_path.is_symlink():
+        raise BookError("Структурный индекс книги является ссылкой.")
+    old_structure = structure_path.read_bytes() if structure_path.exists() else None
+    with vault.books_write(f"repair {book_id}"):
+        try:
+            atomic_write_json(structure_path, structure)
+            atomic_write_json(metadata_path, updated)
+        except Exception:
+            if old_structure is None:
+                structure_path.unlink(missing_ok=True)
+            else:
+                atomic_write_bytes(structure_path, old_structure)
+            raise
+    return {**preview, "status": "repaired"}
 
 
 def _load_structure(book_id: str) -> dict:

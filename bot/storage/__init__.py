@@ -1,2 +1,1 @@
-"""Storage plumbing: git, layout, transaction and global operation log."""
-
+"""Файловое хранилище: структура, границы записи и технический журнал."""

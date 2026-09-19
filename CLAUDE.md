@@ -15,20 +15,21 @@ raw-разговор, производные mood/personality и общую би
 
 ```powershell
 docker compose up -d --build bot
-docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot pytest
+docker compose run --rm -e VAULT_PATH=/tmp/ucho-test bot pytest
 docker compose run --rm bot ruff check bot scripts tests
 ```
 
 ## Архитектура
 
 - `00_raw/sessions` — единственный источник истины.
-- Pipeline: raw commit → mood → process_answer → personality deltas → реакция.
+- Pipeline: raw fsync → mood → process_answer → personality deltas → реакция.
 - Evidence personality-дельты дословно присутствует в raw.
 - `/about` синтезирует pending-дельты, версионирует профиль и отдельно формулирует
   нейтральный ответ.
-- Per-user данные: `users/<uid>/{00_raw,01_mood,01_personality,_session,_state}`.
+- Per-user данные: `users/<uid>/{00_raw,01_mood,02_personality,_session,_state}`.
 - Общая библиотека: `books/<book-id>`.
-- `.psycho/`: whitelist и технический лог.
+- `.ucho/`: whitelist и технический лог.
+- Рабочие данные в `VAULT_HOST_PATH`; снимки в отдельном `BACKUP_HOST_PATH`.
 
 ## Инварианты
 
@@ -36,16 +37,18 @@ docker compose run --rm bot ruff check bot scripts tests
 - Не возвращать graph/concepts/MOC/digest/psychometrics и специальные skills.
 - Список команд изменяется только вместе с каноническим списком в требованиях.
 - Неизвестные slash-команды не анализировать.
-- Пользовательские Git-транзакции не захватывают чужие данные или `books/`.
-- Книжная транзакция ограничена `books/`.
+- Пользовательская запись требует текущий uid.
+- Новая книга становится видна только после полной записи файлов.
 - `/leta` не удаляет общие книги.
 - EPUB не извлекается на диск; traversal/DTD/entity/лимиты обязательны.
 - Stacktrace остаётся в логах, не в Telegram.
 
-## Миграция
+## Резервные копии
 
-`scripts/migrate_simplified_storage.py` по умолчанию делает preview; `--apply`
-включается только вручную и идёт по пользователям с rollback.
+Снимки создаются при старте без копии за текущую неделю и еженедельно;
+хранятся не более четырёх готовых снимков. Проверка —
+`python -m bot.backup verify <путь>`; восстановление только в новый каталог.
+Git для пользовательских данных не используется.
 
 ## Соглашения
 

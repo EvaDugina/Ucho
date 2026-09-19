@@ -10,7 +10,7 @@
 
 - raw-first диалог с recovery после рестарта;
 - десять тем `/ask` как навигация и metadata;
-- свободные заметки `/ucho`;
+- свободные заметки `/ucho`, начинающие новый контекст разговора;
 - mood current и помесячный event-log для каждого доверенного пользователя;
 - pending personality-дельты с дословной evidence и версионируемый `/about`;
 - общая загрузка EPUB/FB2/Markdown и книжные разговоры `/sea`;
@@ -47,12 +47,12 @@
 ```text
 vault/
 ├── users/<uid>/
-│   ├── 00_raw/sessions/*.jsonl
+│   ├── 00_raw/sessions/*.{jsonl,md}
 │   ├── 01_mood/current.md
 │   ├── 01_mood/events/YYYY-MM.jsonl
-│   ├── 01_personality/deltas.json
-│   ├── 01_personality/about/current.md
-│   ├── 01_personality/about/versions/*.md
+│   ├── 02_personality/deltas.json
+│   ├── 02_personality/about/current.md
+│   ├── 02_personality/about/versions/*.md
 │   ├── _session.json
 │   └── _state.json
 ├── books/<book-id>/
@@ -60,14 +60,19 @@ vault/
 │   ├── text.txt
 │   ├── structure.json
 │   └── metadata.json
-└── .psycho/
+└── .ucho/
     ├── users.json
     └── log.md
 ```
 
-`00_raw/sessions` — единственный источник истины переписки. `_session.json` нужен
+`00_raw/sessions/*.jsonl` — единственный источник истины переписки. Рядом с каждым
+JSONL автоматически создаётся читаемая Markdown-страница для Obsidian. Бот
+пересоздаёт её из JSONL после новой записи и при старте, поэтому правки страницы
+будут перезаписаны. `_session.json` нужен
 только для recovery, `_state.json` — для нумерации, расписания и персонального
 книжного состояния. Библиотека `books/` общая.
+Имена пары файлов имеют вид `YYYYMMDDTHHMMSS_<uuid>.jsonl` и
+`YYYYMMDDTHHMMSS_<uuid>.md`, поэтому разговоры сортируются по времени начала.
 
 ## Быстрый старт
 
@@ -83,7 +88,8 @@ Copy-Item .env.example .env
 TELEGRAM_BOT_TOKEN=...
 OWNER_TELEGRAM_ID=...
 AITUNNEL_API_KEY=...
-VAULT_HOST_PATH=C:/path/to/vault
+VAULT_HOST_PATH=C:/path/to/UchoVault
+BACKUP_HOST_PATH=C:/path/to/UchoBackups
 ```
 
 Если задан `OPENROUTER_API_KEY`, он используется вместо AITunnel.
@@ -121,46 +127,43 @@ score(book) - min_score(включённых книг) + 1
 Первый следующий обычный текст без другой reply-цели повышает score выбранной книги
 ровно на один.
 
-## Миграция старого vault
+## Резервные копии
 
-Миграция никогда не запускается автоматически.
+Рабочие файлы постоянно находятся в `VAULT_HOST_PATH` на хосте и доступны
+Obsidian как обычная папка. Git-репозитория данных бот не создаёт.
+Готовые снимки пишутся в отдельный `BACKUP_HOST_PATH`: при старте, если за
+текущую неделю копии нет, и раз в неделю в `BACKUP_WEEKDAY` и `BACKUP_HOUR`
+по `DAILY_TZ`. По умолчанию это понедельник в 03:00. Хранятся не более четырёх
+последних снимков всей папки, то есть не более четырёх копий каждого пользователя;
+после успешной новой копии самая старая удаляется. Без явного пути Compose
+использует `../UchoBackups`.
+В копию не попадают `.git`, `.obsidian`, ключи и временные файлы.
 
-Preview:
-
-```powershell
-docker compose run --rm bot python scripts/migrate_simplified_storage.py
-```
-
-Apply:
-
-```powershell
-docker compose run --rm bot python scripts/migrate_simplified_storage.py --apply
-```
-
-Она импортирует уникальные Q&A/notes в `legacy-import.jsonl`, переносит mood/about
-и старые дельты, удаляет прежние face-данные, проверяет количество событий и
-удаляет legacy-деревья. Каждый
-пользователь обрабатывается в отдельной Git-транзакции. Изменённый вручную
-`.obsidian/graph.json` остаётся с предупреждением; неизменённый старый шаблон
-удаляется. Повторный запуск идемпотентен.
-
-### Переиндексация книг
-
-Остановите бот и сначала выполните preview:
+Создать снимок вручную и проверить его:
 
 ```powershell
-docker compose run --rm bot python scripts/reindex_books.py
+docker compose run --rm bot python -m bot.backup create /vault /backups --keep 4
+docker compose run --rm bot python -m bot.backup verify "/backups/<имя-снимка>"
 ```
 
-Затем примените изменения:
+Восстановление делает копию в новый пустой каталог. Остановите бота, проверьте
+снимок, затем смонтируйте на хосте отдельный каталог назначения как
+`/restore-parent` и выполните команду ниже. После сверки укажите новый
+путь в `VAULT_HOST_PATH` и запустите бота. Ничего не перезаписывается поверх
+текущих данных. Копии находятся на том же хосте; перенос на другой хост пока
+выполняется вручную.
 
 ```powershell
-docker compose run --rm bot python scripts/reindex_books.py --apply
+docker compose run --rm -v "C:/path/to/restore-parent:/restore-parent" bot python -m bot.backup restore "/backups/<имя-снимка>" /restore-parent/ucho-restored
 ```
 
-EPUB, FB2 и Markdown переиндексируются из сохранённых `source.*` с прежними
-book ID — повторная загрузка не нужна. TXT удаляются; их активные scores, toggles
-и pending очищаются, исторические raw-события остаются.
+Если индекс старой EPUB/FB2/Markdown-книги повреждён, при остановленном боте
+сначала проверьте состояние, затем восстановите его из сохранённого исходника:
+
+```powershell
+docker compose run --rm bot python scripts/repair_books.py
+docker compose run --rm bot python scripts/repair_books.py --apply
+```
 
 ## Тесты и проверки
 
@@ -168,8 +171,8 @@ book ID — повторная загрузка не нужна. TXT удаля�
 
 ```powershell
 docker compose build bot
-docker compose run --rm -e VAULT_PATH=/tmp/psycho-test bot pytest
-docker compose run --rm -e VAULT_PATH=/tmp/psycho-smoke bot pytest tests/smoke
+docker compose run --rm -e VAULT_PATH=/tmp/ucho-test bot pytest
+docker compose run --rm -e VAULT_PATH=/tmp/ucho-smoke bot pytest tests/smoke
 docker compose run --rm bot ruff check bot scripts tests
 docker run --rm -v "${PWD}:/repo" zricethezav/gitleaks:latest detect --source=/repo
 ```
@@ -194,9 +197,8 @@ docker run --rm -v "${PWD}:/repo" zricethezav/gitleaks:latest detect --source=/r
 - Удалённые из whitelist пользователи не получают recovery и фоновые сообщения.
 - Бот не использует ролевую персону, лица, маски или настройку собственного тона.
 - `.env`, ключи и runtime-логи не коммитятся.
-- Git-коммиты пользовательских данных ограничены `users/<uid>`, книжные —
-  `books/`.
-- `/leta` удаляет только каталог текущего пользователя и не затрагивает книги.
+- `/leta` очищает только активный каталог текущего пользователя; старые
+  резервные снимки остаются до ротации.
 
 Подробные требования и устройство: [.docs/functionality.md](.docs/functionality.md)
 и [.docs/technical.md](.docs/technical.md).

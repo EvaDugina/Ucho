@@ -3,10 +3,10 @@
 Источники allow-листа:
 1. `OWNER_TELEGRAM_ID` — владелец/админ (всегда разрешён).
 2. `ALLOWED_TELEGRAM_IDS` (env) — начальный список доверенных.
-3. `<vault>/.psycho/users.json` — рантайм-реестр: владелец добавляет/убирает
+3. `<vault>/.ucho/users.json` — рантайм-реестр: владелец добавляет/убирает
    через /adduser /removeuser без правки .env и рестарта.
 
-Файл реестра ГЛОБАЛЬНЫЙ (на корне вольта, в `.psycho/`), не per-user.
+Файл реестра ГЛОБАЛЬНЫЙ (на корне вольта, в `.ucho/`), не per-user.
 Хранит и флаг `consent` (показан ли disclaimer о приватности).
 """
 from __future__ import annotations
@@ -16,11 +16,11 @@ import logging
 from datetime import date
 
 from .atomic import atomic_write_json
-from .config import ALLOWED_TELEGRAM_IDS, OWNER_TELEGRAM_ID, PSYCHO_META_DIR
+from .config import ALLOWED_TELEGRAM_IDS, META_DIR, OWNER_TELEGRAM_ID
 
 log = logging.getLogger(__name__)
 
-USERS_FILE = PSYCHO_META_DIR / "users.json"
+USERS_FILE = META_DIR / "users.json"
 
 
 def _load() -> dict:
@@ -38,7 +38,7 @@ def _load() -> dict:
 
 
 def _save(data: dict) -> None:
-    PSYCHO_META_DIR.mkdir(parents=True, exist_ok=True)
+    META_DIR.mkdir(parents=True, exist_ok=True)
     atomic_write_json(USERS_FILE, data)
 
 

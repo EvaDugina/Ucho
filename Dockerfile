@@ -3,12 +3,6 @@ FROM ${PYTHON_BASE_IMAGE}
 
 WORKDIR /app
 
-# git нужен как safety-net для записи в vault (см. bot/vault.py:git_wrap).
-# openssh-client нужен для push vault-репозитория через SSH deploy key.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git openssh-client \
-    && rm -rf /var/lib/apt/lists/*
-
 RUN pip install --no-cache-dir --upgrade pip
 
 # Базовые тяжёлые зависимости — отдельным слоем РАНЬШЕ requirements.txt: пока

@@ -70,48 +70,13 @@ preflight_env() {
     die "Fill required variables in $(env_file): $joined"
   fi
 
-  local key_path
-  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
-  if [ -n "$key_path" ] && [ ! -f "$key_path" ]; then
-    die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $key_path"
-  fi
-}
-
-host_git_ssh_command() {
-  local key_path
-  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
-  if [ -z "$key_path" ]; then
-    return 1
-  fi
-  printf 'ssh -i %q -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' "$key_path"
-}
-
-host_git() {
-  local ssh_command
-  if ssh_command="$(host_git_ssh_command)"; then
-    GIT_SSH_COMMAND="$ssh_command" git "$@"
-  else
-    git "$@"
-  fi
-}
-
-vault_git() {
-  host_git -C "$VAULT_DIR" "$@"
 }
 
 compose_cmd() {
-  local key_path
   local files=(-f docker-compose.yml)
   if proxy_uses_loopback; then
     [ -f "$APP_DIR/docker-compose.proxy.yml" ] || die "docker-compose.proxy.yml not found at $APP_DIR"
     files+=(-f docker-compose.proxy.yml)
-  fi
-
-  key_path="$(env_value "VAULT_GIT_SSH_KEY_HOST_PATH" || true)"
-  if [ -n "$key_path" ]; then
-    [ -f "$APP_DIR/docker-compose.ssh.yml" ] || die "docker-compose.ssh.yml not found at $APP_DIR"
-    [ -f "$key_path" ] || die "VAULT_GIT_SSH_KEY_HOST_PATH points to missing file: $key_path"
-    files+=(-f docker-compose.ssh.yml)
   fi
 
   docker compose "${files[@]}" "$@"

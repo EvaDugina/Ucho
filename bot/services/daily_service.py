@@ -75,5 +75,4 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
             q_num=q_num,
             session_id=current.id if current is not None else None,
         )
-        vault.commit_all("daily question")
         return True

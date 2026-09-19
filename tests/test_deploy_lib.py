@@ -42,7 +42,7 @@ def _minimal_env(*, llm_key: str = "AITUNNEL_API_KEY=test-llm-key") -> str:
         [
             "TELEGRAM_BOT_TOKEN=test-telegram-token",
             "OWNER_TELEGRAM_ID=123",
-            "VAULT_HOST_PATH=/tmp/psycho-vault",
+            "VAULT_HOST_PATH=/tmp/ucho-vault",
             llm_key,
             "",
         ]
@@ -72,7 +72,6 @@ def test_preflight_accepts_aitunnel_key(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
 
-
 def test_preflight_accepts_openrouter_instead_of_aitunnel(tmp_path: Path) -> None:
     app_dir = tmp_path / "app"
     _write_env(app_dir, _minimal_env(llm_key="OPENROUTER_API_KEY=test-openrouter-key"))
@@ -80,56 +79,3 @@ def test_preflight_accepts_openrouter_instead_of_aitunnel(tmp_path: Path) -> Non
     result = _run_lib(app_dir, "preflight_env")
 
     assert result.returncode == 0, result.stderr
-
-
-def test_preflight_rejects_missing_host_ssh_key_before_compose(tmp_path: Path) -> None:
-    app_dir = tmp_path / "app"
-    missing_key = tmp_path / "missing_deploy_key"
-    _write_env(
-        app_dir,
-        _minimal_env() + f"VAULT_GIT_SSH_KEY_HOST_PATH={missing_key}\n",
-    )
-
-    result = _run_lib(app_dir, "preflight_env")
-
-    assert result.returncode != 0
-    assert "VAULT_GIT_SSH_KEY_HOST_PATH" in result.stderr
-    assert str(missing_key) in result.stderr
-
-
-def test_vault_git_uses_git_ssh_command_without_reading_key(tmp_path: Path) -> None:
-    app_dir = tmp_path / "app"
-    vault_dir = tmp_path / "vault"
-    fake_bin = tmp_path / "bin"
-    fake_git = fake_bin / "git"
-    key_path = tmp_path / "deploy key"
-    secret_marker = "PRIVATE-KEY-CONTENT-SHOULD-NOT-APPEAR"
-    fake_bin.mkdir()
-    vault_dir.mkdir()
-    key_path.write_text(secret_marker, encoding="utf-8")
-    fake_git.write_text(
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$GIT_SSH_COMMAND\"\n"
-        "printf '%s\\n' \"$@\" >&2\n",
-        encoding="utf-8",
-    )
-    fake_git.chmod(0o755)
-    _write_env(
-        app_dir,
-        _minimal_env() + f"VAULT_GIT_SSH_KEY_HOST_PATH={key_path}\n",
-    )
-
-    script = (
-        f"PATH={shlex.quote(str(fake_bin))}:$PATH; "
-        f"VAULT_DIR={shlex.quote(str(vault_dir))}; "
-        "vault_git status"
-    )
-    result = _run_lib(app_dir, script)
-
-    assert result.returncode == 0, result.stderr
-    assert "ssh -i" in result.stdout
-    assert str(key_path).replace(" ", "\\ ") in result.stdout
-    assert "IdentitiesOnly=yes" in result.stdout
-    assert "StrictHostKeyChecking=accept-new" in result.stdout
-    assert secret_marker not in result.stdout
-    assert secret_marker not in result.stderr

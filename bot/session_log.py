@@ -1,21 +1,26 @@
 """Append-only полный лог сообщений активной сессии.
 
-`00_raw/sessions/<session_id>.jsonl` — единственный источник истины: вопросы,
+`00_raw/sessions/<timestamp>_<uuid>.jsonl` — единственный источник истины: вопросы,
 ответы, заметки, реакции и книжные фрагменты.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import userctx
+from .atomic import atomic_write_text
 from .errors import VaultError
 
 log = logging.getLogger(__name__)
 SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,80}")
+UUID_HEX_RE = re.compile(r"[0-9a-f]{32}")
+SESSION_FILE_RE = re.compile(r"\d{8}T\d{6}_([0-9a-f]{32})")
 
 
 def _sessions_dir() -> Path:
@@ -28,6 +33,49 @@ def _ts(value: object | None = None) -> str:
     if isinstance(value, str) and value:
         return value
     return datetime.now().isoformat(timespec="seconds")
+
+
+def filename_uuid(session_id: str) -> str:
+    """Стабильный UUID файла; исторические session_id внутри raw не меняются."""
+    if UUID_HEX_RE.fullmatch(session_id):
+        return session_id
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"ucho-session:{session_id}").hex
+
+
+def filename_timestamp(value: object | None = None) -> str:
+    """Сортируемая метка первого события: aware-время в UTC, naive как записано."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        dt = datetime.fromisoformat(value)
+    else:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y%m%dT%H%M%S")
+
+
+def timestamped_filename(session_id: str, first_at: object | None = None) -> str:
+    return f"{filename_timestamp(first_at)}_{filename_uuid(session_id)}.jsonl"
+
+
+def _session_file(directory: Path, session_id: str, first_at: object | None) -> Path:
+    """Найти существующий raw по UUID, сохранив совместимость до ручной миграции."""
+    suffix = f"_{filename_uuid(session_id)}.jsonl"
+    matches = [
+        path
+        for path in directory.glob(f"*{suffix}")
+        if SESSION_FILE_RE.fullmatch(path.stem)
+    ]
+    legacy = directory / f"{session_id}.jsonl"
+    if legacy.exists() or legacy.is_symlink():
+        matches.append(legacy)
+    if len(matches) > 1:
+        raise ValueError(f"multiple raw files for session_id={session_id!r}")
+    path = matches[0] if matches else directory / timestamped_filename(session_id, first_at)
+    if path.is_symlink():
+        raise ValueError("raw session path is a symlink")
+    return path
 
 
 def append(
@@ -44,7 +92,7 @@ def append(
     metadata: dict | None = None,
     required: bool = False,
 ) -> dict | None:
-    """Дописать событие сообщения в `00_raw/sessions/<session_id>.jsonl`."""
+    """Дописать событие в сортируемый файл сессии."""
     if not session_id or not SESSION_ID_RE.fullmatch(session_id):
         if required:
             raise VaultError("session log append failed: unsafe session_id")
@@ -52,14 +100,15 @@ def append(
     try:
         d = _sessions_dir()
         d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{session_id}.jsonl"
+        timestamp = _ts(at)
+        path = _session_file(d, session_id, timestamp)
         line_no = 0
         if path.exists():
             line_no = sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
         telegram_mid = int(message_id) if message_id is not None else None
         entry = {
             "event_id": f"{session_id}:{line_no + 1:06d}",
-            "ts": _ts(at),
+            "ts": timestamp,
             "session_id": session_id,
             "role": role,
             "kind": kind,
@@ -76,6 +125,12 @@ def append(
             entry["domain"] = domain
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            _write_markdown_view(path)
+        except Exception:
+            log.exception("session Markdown view update failed: %s", path)
         return entry
     except Exception as exc:
         if required:
@@ -97,6 +152,48 @@ def append_required(**kwargs) -> dict:
     return event
 
 
+def _write_markdown_view(raw_path: Path) -> None:
+    """Пересоздать читаемую страницу из канонического JSONL."""
+    rows = []
+    for line in raw_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("invalid session event")
+        rows.append(row)
+    parts = [
+        f"# Разговор {raw_path.stem}",
+        "",
+        "> Автоматическое представление. Источник — одноимённый JSONL; правки этой страницы перезаписываются.",
+        "",
+    ]
+    for row in rows:
+        role = "Пользователь" if row.get("role") == "user" else "Ухо"
+        timestamp = str(row.get("ts") or "")
+        kind = str(row.get("kind") or "")
+        parts.extend([f"## {timestamp} · {role}", "", f"*{kind}*", ""])
+        message = str(row.get("text") or "")
+        parts.extend(f"> {line}" if line else ">" for line in message.splitlines() or [""])
+        parts.append("")
+    atomic_write_text(raw_path.with_suffix(".md"), "\n".join(parts).rstrip() + "\n")
+
+
+def rebuild_views() -> int:
+    """Восстановить Markdown-страницы всех сессий текущего пользователя."""
+    count = 0
+    for raw_path in sorted(_sessions_dir().glob("*.jsonl")):
+        if raw_path.is_symlink():
+            log.error("unsafe session log path: %s", raw_path)
+            continue
+        try:
+            _write_markdown_view(raw_path)
+            count += 1
+        except (OSError, ValueError, TypeError):
+            log.exception("session Markdown view rebuild failed: %s", raw_path)
+    return count
+
+
 def iter_events() -> list[dict]:
     """Все события текущего пользователя по порядку файлов/строк."""
     d = _sessions_dir()
@@ -115,7 +212,8 @@ def iter_events() -> list[dict]:
                     continue
                 if not isinstance(row, dict):
                     continue
-                row.setdefault("session_id", path.stem)
+                file_match = SESSION_FILE_RE.fullmatch(path.stem)
+                row.setdefault("session_id", file_match.group(1) if file_match else path.stem)
                 row.setdefault("event_id", f"{row['session_id']}:{idx:06d}")
                 if "telegram_message_id" not in row:
                     row["telegram_message_id"] = row.get("message_id")
