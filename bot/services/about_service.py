@@ -1,4 +1,4 @@
-"""Двухшаговая сборка и нейтральное представление personality-профиля."""
+"""Нейтральная сборка personality-профиля и представление голосом Иуды."""
 from __future__ import annotations
 
 from datetime import datetime

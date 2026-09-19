@@ -26,6 +26,8 @@ async def test_profile_question_and_answer_are_fenced_user_data(monkeypatch):
 
     system = captured["messages"][0]["content"]
     user = captured["messages"][-1]["content"]
+    assert "Ты — Иуда Искариот" in system
+    assert "Учитель — текущий собеседник Иуды" in system
     assert malicious not in system
     assert "<<<PROFILE_CONTEXT" in user
     assert "<<<QUESTION" in user
@@ -35,14 +37,18 @@ async def test_profile_question_and_answer_are_fenced_user_data(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_generated_question_is_single_line_and_limited(monkeypatch):
+    captured = {}
     monkeypatch.setattr(llm.about, "render_for_prompt", lambda: "")
     monkeypatch.setattr(llm.mood_file, "render_for_prompt", lambda: "")
 
     async def chat(task, messages, temperature=0.6):
+        captured["system"] = messages[0]["content"]
         return {"question": "Что\n" + "важно " * 500, "domain": "ethics"}
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     result = await llm.ask_next(domain="ethics")
+    assert "Ты — Иуда Искариот" in captured["system"]
+    assert "Задай Учителю один конкретный вопрос" in captured["system"]
     assert "\n" not in result["question"]
     assert len(result["question"]) <= 2_001
 
@@ -69,6 +75,7 @@ async def test_book_metadata_and_excerpt_are_fenced_user_data(monkeypatch):
 
     system = captured["messages"][0]["content"]
     user = captured["messages"][-1]["content"]
+    assert "Ты — Иуда Искариот" in system
     assert malicious not in system
     assert "<<<BOOK_METADATA" in user
     assert "<<<BOOK_EXCERPT" in user
@@ -77,7 +84,9 @@ async def test_book_metadata_and_excerpt_are_fenced_user_data(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown(monkeypatch):
+    captured = {}
     async def chat(task, messages, temperature):
+        captured["system"] = messages[0]["content"]
         return {"register": "книжный: образный", "tone": "спокойный", "openness": 4,
                 "provocation_tolerance": None,
                 "thought_flow": "Сопоставляет примеры и формулирует общий вывод.",
@@ -87,6 +96,7 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     profile = await llm.synthesize_about("", [{"quote": "Мой ответ"}])
+    assert "Ты — Иуда Искариот" not in captured["system"]
     assert profile.startswith(
         '---\nРегистр речи: "книжный: образный"\nТон речи: "спокойный"\n'
         'Открытость: "4/5"\nПереносимость провокаций: "..."\n'
@@ -98,6 +108,24 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
     assert 'Переносимость провокаций: "..."\n' in profile
     assert profile.endswith("### Манера речи\nОписание.")
     assert "```" not in profile
+
+
+@pytest.mark.asyncio
+async def test_about_presentation_uses_judas_voice_and_fences_profile(monkeypatch):
+    captured = {}
+
+    async def chat(task, messages, temperature=0.6):
+        captured["messages"] = messages
+        return "Учитель, я вижу, как ты уточняешь свою мысль."
+
+    monkeypatch.setattr(llm, "_chat_text", chat)
+    result = await llm.about_present("Наблюдение из профиля")
+
+    assert "Ты — Иуда Искариот" in captured["messages"][0]["content"]
+    assert "Учитель — текущий собеседник Иуды" in captured["messages"][0]["content"]
+    assert "Наблюдение из профиля" not in captured["messages"][0]["content"]
+    assert "<<<INTERNAL_PROFILE" in captured["messages"][1]["content"]
+    assert result.startswith("Учитель")
 
 
 @pytest.mark.asyncio

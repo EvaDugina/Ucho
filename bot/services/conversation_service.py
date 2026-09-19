@@ -102,7 +102,7 @@ async def process_probe_answer(
     current.pending_answer_event_id = None
     session.persist()
 
-    reaction = str(result.get("reaction") or "").strip() or "Я вижу твоё сообщение."
+    reaction = str(result.get("reaction") or "").strip() or "Учитель, я услышал тебя."
     new_q_num = vault.next_q_num()
     session.set_question(reaction, active_domain, q_num=new_q_num)
     return ReactionPayload(
