@@ -38,6 +38,24 @@ def test_delta_validation_and_ids(as_user):
     assert accepted[0]["status"] == "pending"
 
 
+def test_new_metadata_fields_do_not_rewrite_body_or_evidence(as_user):
+    item = _record()[0]
+    before = about.deltas_path().read_bytes()
+    current = '---\nРегистр речи: "разговорный"\n---\n\n### Манера речи\nПрежний текст.'
+    about.save_synthesis(current, [])
+    updated = about.current_profile()
+    assert updated.startswith(
+        '---\nПредпочтительная подробность ответов: "недостаточно данных"\n'
+        'Отношение к прямым вопросам: "недостаточно данных"\n'
+        'Предпочтительный темп диалога: "недостаточно данных"\n'
+    )
+    assert 'Регистр речи: "разговорный"' in updated
+    assert about.profile_body(updated) == about.profile_body(current)
+    assert about.has_profile_metadata(updated)
+    assert about.deltas_path().read_bytes() == before
+    assert about.pending_deltas()[0]["id"] == item["id"]
+
+
 @pytest.mark.parametrize("counter", ["messages_seen: 1", 'Учтено сообщений: "недостаточно данных"'])
 def test_removed_message_counter_is_not_saved(as_user, counter):
     item = _record()[0]

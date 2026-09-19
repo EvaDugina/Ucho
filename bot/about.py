@@ -33,10 +33,30 @@ ASPECTS = {
 }
 
 PROFILE_LABELS = {
+    "preferred_response_detail": "Предпочтительная подробность ответов",
+    "direct_questions_attitude": "Отношение к прямым вопросам",
+    "preferred_dialogue_pace": "Предпочтительный темп диалога",
     "register": "Регистр речи",
     "tone": "Тон речи",
     "openness": "Открытость",
     "provocation_tolerance": "Переносимость провокаций",
+}
+PROFILE_VALUE_LABELS = {
+    "preferred_response_detail": {
+        "brief": "кратко", "balanced": "умеренно подробно", "detailed": "подробно",
+        "context_dependent": "зависит от ситуации",
+    },
+    "direct_questions_attitude": {
+        "welcomes": "принимает прямые вопросы",
+        "needs_context": "нужен предварительный контекст",
+        "avoids": "предпочитает непрямой заход",
+        "context_dependent": "зависит от темы",
+    },
+    "preferred_dialogue_pace": {
+        "reflective": "вдумчивый", "balanced": "умеренный", "dynamic": "динамичный",
+        "context_dependent": "зависит от ситуации",
+    },
+    "provocation_tolerance": {"low": "низкая", "medium": "средняя", "high": "высокая"},
 }
 PROFILE_FIELDS = tuple(PROFILE_LABELS.values())
 UNKNOWN_VALUE = "недостаточно данных"
@@ -63,7 +83,7 @@ def localize_profile_metadata(profile: str) -> str:
     header, body = _split_profile(profile)
     if not header:
         return normalize_profile(profile)
-    rows = []
+    values = {}
     for line in header.splitlines():
         key, separator, raw = line.partition(":")
         key = key.strip()
@@ -77,9 +97,12 @@ def localize_profile_metadata(profile: str) -> str:
             value = raw[1:-1].replace("''", "'") if raw.startswith("'") and raw.endswith("'") else raw
         if value is None or raw.lower() in {"", "null", "~"}:
             value = UNKNOWN_VALUE
-        if label == PROFILE_LABELS["provocation_tolerance"] and isinstance(value, str):
-            value = {"low": "низкая", "medium": "средняя", "high": "высокая"}.get(value, value)
-        rows.append(f"{label}: {json.dumps(value, ensure_ascii=False)}")
+        if isinstance(value, str):
+            field = next(name for name, title in PROFILE_LABELS.items() if title == label)
+            value = PROFILE_VALUE_LABELS.get(field, {}).get(value, value)
+        values[label] = value
+    rows = [f"{label}: {json.dumps(values[label], ensure_ascii=False)}"
+            for label in PROFILE_FIELDS if label in values]
     translated = "\n".join(rows)
     return f"---\n{translated}\n---\n\n{body}" if rows else body
 
@@ -90,7 +113,7 @@ def _with_profile_metadata(profile: str) -> str:
     keys = set(re.findall(r"^([^:\n]+):", "\n".join(rows), flags=re.MULTILINE))
     rows.extend(f'{key}: "{UNKNOWN_VALUE}"' for key in PROFILE_FIELDS if key not in keys)
     header = "\n".join(rows)
-    return f"---\n{header}\n---\n\n{body}"
+    return localize_profile_metadata(f"---\n{header}\n---\n\n{body}")
 
 
 def _root() -> Path:

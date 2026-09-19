@@ -75,11 +75,18 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
     async def chat(task, messages, temperature):
         return {"register": "книжный: образный", "tone": "спокойный", "openness": 4,
                 "provocation_tolerance": None,
+                "preferred_response_detail": "brief", "direct_questions_attitude": "needs_context",
+                "preferred_dialogue_pace": "reflective",
                 "profile": "```markdown\n### Манера речи\nОписание.\n```"}
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     profile = await llm.synthesize_about("", [{"quote": "Мой ответ"}])
-    assert profile.startswith('---\nРегистр речи: "книжный: образный"\n')
+    assert profile.startswith(
+        '---\nПредпочтительная подробность ответов: "кратко"\n'
+        'Отношение к прямым вопросам: "нужен предварительный контекст"\n'
+        'Предпочтительный темп диалога: "вдумчивый"\n'
+    )
+    assert 'Регистр речи: "книжный: образный"\n' in profile
     assert 'Открытость: "4/5"\n' in profile
     assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
     assert profile.endswith("### Манера речи\nОписание.")
@@ -90,12 +97,34 @@ async def test_about_synthesis_returns_validated_metadata_and_unwrapped_markdown
 @pytest.mark.parametrize("changes", [
     {"openness": 6}, {"openness": True}, {"provocation_tolerance": "unknown"},
     {"profile": ""}, {"register": ["книжный"]},
+    {"preferred_response_detail": "very_long"}, {"direct_questions_attitude": 3},
+    {"preferred_dialogue_pace": "fast_reply"},
 ])
 async def test_about_rejects_invalid_metadata_or_empty_body(monkeypatch, changes):
     async def chat(task, messages, temperature):
         return {"register": None, "tone": None, "openness": None,
+                "preferred_response_detail": None, "direct_questions_attitude": None,
+                "preferred_dialogue_pace": None,
                 "provocation_tolerance": None, "profile": "Описание.", **changes}
 
     monkeypatch.setattr(llm, "_chat_json", chat)
     with pytest.raises(LLMError):
         await llm.synthesize_about("", [{"quote": "Мой ответ"}])
+
+
+@pytest.mark.asyncio
+async def test_unknown_preferences_remain_unknown_and_all_fields_are_required(monkeypatch):
+    response = {"register": None, "tone": None, "openness": None,
+                "preferred_response_detail": None, "direct_questions_attitude": None,
+                "preferred_dialogue_pace": None, "provocation_tolerance": None,
+                "profile": "### Манера речи\nМало наблюдений."}
+
+    async def chat(*args, **kwargs):
+        return response
+
+    monkeypatch.setattr(llm, "_chat_json", chat)
+    profile = await llm.synthesize_about("", [{"quote": "Привет"}])
+    assert profile.count('"недостаточно данных"') == 7
+    del response["preferred_dialogue_pace"]
+    with pytest.raises(LLMError):
+        await llm.synthesize_about("", [{"quote": "Привет"}])

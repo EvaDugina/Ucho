@@ -12,7 +12,9 @@ from bot.services.session_messages import TG_MSG_LIMIT
 
 def test_full_profile_formats_frontmatter_and_headings_safely():
     profile = (
-        "---\nupdated: '2026-09-19'\nmessages_seen: 13\nprovocation_tolerance: high\n---\n\n"
+        "---\nupdated: '2026-09-19'\nmessages_seen: 13\nprovocation_tolerance: high\n"
+        "preferred_response_detail: detailed\ndirect_questions_attitude: welcomes\n"
+        "preferred_dialogue_pace: context_dependent\n---\n\n"
         "### Манера <речи>\nЯ говорю & слушаю.\n\n"
         "### Ценности\n- Бережно отношусь к словам."
     )
@@ -20,7 +22,9 @@ def test_full_profile_formats_frontmatter_and_headings_safely():
     assert len(chunks) == 1
     body = chunks[0]
     assert body.startswith("<b>Полная версия описания</b>")
-    assert "<pre>---\nПереносимость провокаций:" in body
+    assert "<pre>---\nПредпочтительная подробность ответов: &quot;подробно&quot;" in body
+    assert "Отношение к прямым вопросам: &quot;принимает прямые вопросы&quot;" in body
+    assert "Предпочтительный темп диалога: &quot;зависит от ситуации&quot;" in body
     assert "Переносимость провокаций: &quot;высокая&quot;\n---</pre>" in body
     assert "updated:" not in body
     assert "messages_seen:" not in body
