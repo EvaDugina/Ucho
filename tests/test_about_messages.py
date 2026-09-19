@@ -20,10 +20,11 @@ def test_full_profile_formats_frontmatter_and_headings_safely():
     assert len(chunks) == 1
     body = chunks[0]
     assert body.startswith("<b>Полная версия описания</b>")
-    assert "<pre>---\nУчтено сообщений: 13\n" in body
+    assert "<pre>---\nПереносимость провокаций:" in body
     assert "Переносимость провокаций: &quot;высокая&quot;\n---</pre>" in body
     assert "updated:" not in body
     assert "messages_seen:" not in body
+    assert "Учтено сообщений:" not in body
     assert "<b>Манера &lt;речи&gt;</b>" in body
     assert "Я говорю &amp; слушаю." in body
     assert "<b>Ценности</b>" in body

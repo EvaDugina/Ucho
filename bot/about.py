@@ -33,7 +33,6 @@ ASPECTS = {
 }
 
 PROFILE_LABELS = {
-    "messages_seen": "Учтено сообщений",
     "register": "Регистр речи",
     "tone": "Тон речи",
     "openness": "Открытость",
@@ -68,7 +67,7 @@ def localize_profile_metadata(profile: str) -> str:
     for line in header.splitlines():
         key, separator, raw = line.partition(":")
         key = key.strip()
-        if key == "updated":
+        if key in {"updated", "messages_seen", "Учтено сообщений"}:
             continue
         label = PROFILE_LABELS.get(key, key)
         if not separator or label not in PROFILE_FIELDS:
@@ -88,14 +87,12 @@ def localize_profile_metadata(profile: str) -> str:
     return f"---\n{translated}\n---\n\n{body}" if rows else body
 
 
-def _with_system_metadata(profile: str, *, messages_seen: int | None) -> str:
+def _with_profile_metadata(profile: str) -> str:
     header, body = _split_profile(localize_profile_metadata(profile))
-    rows = [line for line in header.splitlines()
-            if not line.startswith(f"{PROFILE_FIELDS[0]}:")]
+    rows = header.splitlines()
     keys = set(re.findall(r"^([^:\n]+):", "\n".join(rows), flags=re.MULTILINE))
-    rows.extend(f'{key}: "{UNKNOWN_VALUE}"' for key in PROFILE_FIELDS[1:] if key not in keys)
-    count = str(messages_seen) if messages_seen is not None else json.dumps(UNKNOWN_VALUE, ensure_ascii=False)
-    header = "\n".join([f"{PROFILE_FIELDS[0]}: {count}", *rows])
+    rows.extend(f'{key}: "{UNKNOWN_VALUE}"' for key in PROFILE_FIELDS if key not in keys)
+    header = "\n".join(rows)
     return f"---\n{header}\n---\n\n{body}"
 
 
@@ -233,14 +230,7 @@ def save_synthesis(
     version_path = versions_dir() / f"{version_id}.md"
     captured = set(delta_ids)
     store = _load_store()
-    # Несколько дельт одного ответа не должны увеличивать счётчик сообщений.
-    source_ids = {
-        item.get("raw_event_id") for item in store["items"]
-        if item.get("status") == "synthesized" or item.get("id") in captured
-    }
-    # Общая ссылка старого импорта не даёт восстановить число исходных ответов.
-    count = None if source_ids & {None, "", "legacy-import"} else len(source_ids)
-    body = _with_system_metadata(body, messages_seen=count)
+    body = _with_profile_metadata(body)
     content = body.rstrip() + "\n"
     for item in store["items"]:
         if item.get("id") in captured and item.get("status") == "pending":

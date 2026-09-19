@@ -38,14 +38,16 @@ def test_delta_validation_and_ids(as_user):
     assert accepted[0]["status"] == "pending"
 
 
-def test_imported_aggregate_is_not_counted_as_one_message(as_user):
+@pytest.mark.parametrize("counter", ["messages_seen: 1", 'Учтено сообщений: "недостаточно данных"'])
+def test_removed_message_counter_is_not_saved(as_user, counter):
     item = _record()[0]
     store = about._load_store()
     store["items"][0]["raw_event_id"] = "legacy-import"
     about.atomic_write_json(about.deltas_path(), store)
-    about.save_synthesis("### Манера речи\nОписание.", [item["id"]])
+    about.save_synthesis(f"---\n{counter}\n---\n\n### Манера речи\nОписание.", [item["id"]])
     profile = about.current_profile()
-    assert 'Учтено сообщений: "недостаточно данных"\n' in profile
+    assert "Учтено сообщений:" not in profile
+    assert "messages_seen:" not in profile
     assert about.profile_body(profile) == "### Манера речи\nОписание."
 
 
@@ -70,7 +72,7 @@ async def test_about_synthesizes_then_presents_and_marks_atomically(as_user, mon
     assert spoken.startswith("Я вижу")
     assert about.profile_body(profile) == "# Внутренний профиль\n\nПоследователен."
     assert about.has_profile_metadata(profile)
-    assert "Учтено сообщений: 1\n" in profile
+    assert "Учтено сообщений:" not in profile
     assert "updated:" not in profile
     assert version == "2026-07-27_12-30-00"
     assert [call[0] for call in calls] == ["synthesize", "present"]
@@ -134,7 +136,7 @@ async def test_missing_metadata_is_repaired_once_preserving_body_and_evidence(as
     assert version == "2026-09-20_01-30-00"
     assert about.profile_body(profile) == "### Манера речи\nПрежний подробный текст."
     assert "updated:" not in profile
-    assert "Учтено сообщений: 1\n" in profile
+    assert "Учтено сообщений:" not in profile
     assert 'Открытость: "4/5"\n' in profile
     assert 'Переносимость провокаций: "недостаточно данных"\n' in profile
     assert about.deltas_path().read_bytes() == before_deltas
