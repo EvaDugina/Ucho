@@ -55,6 +55,7 @@ async def test_raw_before_llm_and_mood_personality_outputs(as_user, monkeypatch)
         events = session_log.session_events(current.id)
         observed["raw_seen"] = events[-1]["kind"] == "answer"
         observed["event_id"] = events[-1]["event_id"]
+        observed["mood"] = kwargs.get("mood")
         return {
             "reaction": "Не прячься за словом.",
             "personality_delta": [
@@ -75,6 +76,7 @@ async def test_raw_before_llm_and_mood_personality_outputs(as_user, monkeypatch)
     )
     assert payload is not None
     assert observed["raw_seen"] is True
+    assert observed["mood"] == _mood()
     assert session.get().pending_answer_event_id is None
     delta = about.pending_deltas()[0]
     assert delta["raw_event_id"] == observed["event_id"]

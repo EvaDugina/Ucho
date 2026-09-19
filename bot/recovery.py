@@ -48,8 +48,12 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
         event.get("q_num") or current.current_q_num or vault.next_q_num()
     )
     transcript = current.render_transcript()
+    classified: dict | None = None
     try:
-        if not moods.event_already_logged(raw_event_id):
+        if moods.event_already_logged(raw_event_id):
+            if current.mood_trajectory:
+                classified = moods.normalize_per_msg(current.mood_trajectory[-1])
+        else:
             classified = await classify_mood(
                 text,
                 about.render_for_prompt(),
@@ -74,6 +78,7 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             domain_hint=domain,
             session_context=transcript,
             metadata=event.get("metadata") if isinstance(event.get("metadata"), dict) else None,
+            mood=classified,
         )
         apply_processed(
             result,

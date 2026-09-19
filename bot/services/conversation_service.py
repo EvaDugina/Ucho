@@ -65,6 +65,7 @@ async def process_probe_answer(
 
     session_context = session_context_snapshot or current.render_transcript()
     mood_vec: dict | None = None
+    per_message: dict | None = None
     try:
         per_message = await classify_mood(
             text,
@@ -90,6 +91,7 @@ async def process_probe_answer(
         domain_hint=active_domain,
         session_context=session_context,
         metadata=metadata or current.question_metadata,
+        mood=per_message,
     )
     apply_processed(
         result,
