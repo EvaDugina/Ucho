@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import BaseMiddleware
+from aiogram.enums import ChatType
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from . import userctx, users
@@ -18,19 +19,31 @@ _CONSENT_TEXT = (
     "Продолжая пользоваться, ты соглашаешься. Команды — /help."
 )
 
+
+def is_private_user_chat(event: Message | CallbackQuery, uid: int) -> bool:
+    """Принимать только личный чат самого отправителя, включая callback кнопки."""
+    if isinstance(event, Message):
+        chat = event.chat
+    elif isinstance(event, CallbackQuery):
+        chat = event.message.chat if event.message is not None else None
+    else:
+        return False
+    return chat is not None and chat.type == ChatType.PRIVATE and chat.id == uid
+
+
 class AccessMiddleware(BaseMiddleware):
     """Гейт доступа + установка request-scoped пользователя.
 
     На КАЖДЫЙ update (message/callback): берёт user_id, проверяет whitelist
-    (не в списке → молча роняем), выставляет userctx (per-user маршрутизация
-    данных), один раз показывает disclaimer о приватности новым гостям.
+    и личный чат отправителя (иначе молча роняем), выставляет userctx
+    (per-user маршрутизация данных), один раз показывает disclaimer гостям.
     """
 
     async def __call__(self, handler, event: TelegramObject, data: dict):
         user = data.get("event_from_user")
         uid = user.id if user is not None else None
-        if uid is None or not users.is_allowed(uid):
-            return  # не в whitelist — тишина
+        if uid is None or not users.is_allowed(uid) or not is_private_user_chat(event, uid):
+            return  # не в whitelist или не личный чат — тишина
         userctx.set_user(uid)
         if isinstance(event, Message):
             if event.text is None and event.document is None:

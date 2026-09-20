@@ -9,6 +9,7 @@ from aiogram.types import Message
 from . import about, mood_file, moods, ratelimit, session, session_log, userctx, users, vault
 from .errors import LLMError
 from .llm import classify_mood, process_answer
+from .middleware import is_private_user_chat
 from .services import conversation_service, note_service, session_messages
 from .services.answer_service import apply_processed
 from .validation import MAX_USER_TEXT, safe_user_text
@@ -200,7 +201,13 @@ async def process_offline_backlog(bot: Bot, dispatcher: Dispatcher) -> None:
         message = getattr(update, "message", None)
         text = (message.text or "").strip() if message is not None and message.text else ""
         uid = message.from_user.id if message is not None and message.from_user else None
-        if text and not text.startswith("/") and uid is not None and users.is_allowed(uid):
+        if (
+            text
+            and not text.startswith("/")
+            and uid is not None
+            and users.is_allowed(uid)
+            and is_private_user_chat(message, uid)
+        ):
             grouped.setdefault(uid, []).append(message.as_(bot))
         else:
             other.append(update)
@@ -217,7 +224,9 @@ async def process_offline_backlog(bot: Bot, dispatcher: Dispatcher) -> None:
 
 
 async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> None:
-    if not users.is_allowed(uid):
+    if not users.is_allowed(uid) or any(
+        not is_private_user_chat(message, uid) for message in messages
+    ):
         return
     userctx.set_user(uid)
     vault.ensure_layout()

@@ -33,7 +33,10 @@
 
 Поток обычного текста:
 
-1. Middleware проверяет whitelist и устанавливает `userctx`.
+1. Middleware проверяет whitelist и что `chat.type=private`, а `chat.id` совпадает
+   с `from_user.id`; только после этого устанавливает `userctx`. Эта проверка
+   действует и для callback-кнопок. Офлайн-бэклог применяет тот же гейт до
+   прямого вызова обработки, минуя middleware; обработка повторно проверяет чат.
 2. Handler разрешает explicit reply, затем pending книжной цитаты, затем активную
    сессию или свободную заметку.
 3. `conversation_service` обязательно дописывает typed user event в
