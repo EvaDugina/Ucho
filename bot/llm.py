@@ -1,11 +1,13 @@
 """Live-LLM слой: голос Иуды в диалоге, нейтральные mood и personality."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
-from openai import AsyncOpenAI
+from openai import APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import about, mood_file, moods, vault
@@ -40,6 +42,52 @@ _client_kwargs = {
 if LLM_DEFAULT_HEADERS:
     _client_kwargs["default_headers"] = LLM_DEFAULT_HEADERS
 _client = AsyncOpenAI(**_client_kwargs)
+
+_billing_notifier: Callable[[], Awaitable[None]] | None = None
+_billing_alert_sent = False
+_billing_alert_lock = asyncio.Lock()
+
+
+def set_billing_notifier(notifier: Callable[[], Awaitable[None]] | None) -> None:
+    """Привязать Telegram-уведомление к текущему экземпляру бота."""
+    global _billing_notifier, _billing_alert_sent
+    _billing_notifier = notifier
+    _billing_alert_sent = False
+
+
+def _is_billing_error(exc: Exception) -> bool:
+    if not isinstance(exc, APIStatusError):
+        return False
+    if exc.status_code == 402:
+        return True
+    if exc.status_code != 429 or not isinstance(exc.body, dict):
+        return False
+    error = exc.body.get("error", exc.body)
+    return isinstance(error, dict) and (
+        error.get("code") == "insufficient_quota"
+        or error.get("type") == "insufficient_quota"
+    )
+
+
+async def _alert_billing_outage() -> None:
+    global _billing_alert_sent
+    async with _billing_alert_lock:
+        if _billing_alert_sent or _billing_notifier is None:
+            return
+        try:
+            await _billing_notifier()
+        except Exception:
+            # Сбой Telegram не должен скрывать исходную ошибку LLM; следующий
+            # отказ оплаты даст возможность повторить уведомление.
+            log.exception("failed to send LLM billing alert")
+            return
+        _billing_alert_sent = True
+
+
+async def _clear_billing_outage() -> None:
+    global _billing_alert_sent
+    async with _billing_alert_lock:
+        _billing_alert_sent = False
 
 _base_prompt = (PROMPTS_DIR / "base.md").read_text(encoding="utf-8")
 _persona_prompt = (PROMPTS_DIR / "judas.md").read_text(encoding="utf-8")
@@ -120,6 +168,7 @@ def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, .
 
 async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) -> dict:
     errors: list[str] = []
+    billing_error = False
     models = _models_for(task)
     for model in models:
         try:
@@ -130,6 +179,7 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
                 temperature=temperature,
             )
         except Exception as exc:
+            billing_error |= _is_billing_error(exc)
             errors.append(f"{model}: request failed: {exc}")
             continue
         try:
@@ -140,11 +190,14 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
+                await _clear_billing_outage()
                 return data
             errors.append(f"{model}: JSON is not object")
         except json.JSONDecodeError:
             errors.append(f"{model}: non-JSON response")
             log.error("LLM %s returned non-JSON from %s (%d chars)", task, model, len(raw))
+    if billing_error:
+        await _alert_billing_outage()
     _raise_models_unavailable(task, errors, models)
 
 
@@ -155,6 +208,7 @@ async def _chat_text_models(
     temperature: float = 0.6,
 ) -> str:
     errors: list[str] = []
+    billing_error = False
     for model in models:
         try:
             response = await _client.chat.completions.create(
@@ -163,6 +217,7 @@ async def _chat_text_models(
                 temperature=temperature,
             )
         except Exception as exc:
+            billing_error |= _is_billing_error(exc)
             errors.append(f"{model}: request failed: {exc}")
             continue
         try:
@@ -171,8 +226,11 @@ async def _chat_text_models(
             errors.append(f"{model}: empty choices")
             continue
         if text.strip():
+            await _clear_billing_outage()
             return text
         errors.append(f"{model}: empty response")
+    if billing_error:
+        await _alert_billing_outage()
     _raise_models_unavailable(task, errors, models)
 
 

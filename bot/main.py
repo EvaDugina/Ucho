@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import ErrorEvent
 
-from . import backup, recovery, session, session_log, userctx, users, vault
+from . import backup, llm, recovery, session, session_log, userctx, users, vault
 from .commands import set_chat_commands
 from .config import (
     BACKGROUND_JOBS_ENABLED,
@@ -42,6 +42,10 @@ async def _setup_commands(bot: Bot) -> None:
         log.info("bot commands registered for %d allowed user(s)", len(users.allowed_ids()))
     except Exception:
         log.exception("failed to set bot commands")
+
+
+async def _send_billing_alert(bot: Bot) -> None:
+    await bot.send_message(OWNER_TELEGRAM_ID, "Я без денег.")
 
 
 async def main() -> None:
@@ -81,6 +85,7 @@ async def main() -> None:
         bot = Bot(token=TELEGRAM_BOT_TOKEN, session=AiohttpSession(proxy=TELEGRAM_PROXY_URL))
     else:
         bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    llm.set_billing_notifier(lambda: _send_billing_alert(bot))
     dp = Dispatcher()
     dp.message.middleware(AccessMiddleware())
     dp.callback_query.middleware(AccessMiddleware())
@@ -149,6 +154,7 @@ async def main() -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        llm.set_billing_notifier(None)
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         await bot.session.close()
