@@ -116,6 +116,38 @@ async def test_failed_llm_keeps_raw_pending_for_recovery(as_user, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_billing_failure_replies_to_requester_and_keeps_raw(as_user, monkeypatch):
+    from bot import handlers
+
+    current = session.start(domain="everyday")
+    session.set_question("Что случилось?", "everyday", q_num=1)
+
+    async def classify(*args, **kwargs):
+        return _mood()
+
+    async def fail(*args, **kwargs):
+        raise LLMError("payment required", billing=True)
+
+    monkeypatch.setattr(conversation_service, "classify_mood", classify)
+    monkeypatch.setattr(conversation_service, "process_answer", fail)
+    replies = []
+
+    async def answer(text):
+        replies.append(text)
+
+    message = SimpleNamespace(
+        answer=answer, bot=SimpleNamespace(), chat=SimpleNamespace(id=as_user),
+        message_id=56, date=None, reply_to_message=None,
+    )
+    await handlers._process_current_text(message, "Я устал.")
+
+    assert replies == ["Я без денег."]
+    assert session.get().pending_answer == "Я устал."
+    assert session_log.find_event(session.get().pending_answer_event_id)["text"] == "Я устал."
+    assert session.get().id == current.id
+
+
+@pytest.mark.asyncio
 async def test_failed_manual_question_preserves_current_session(as_user, monkeypatch):
     from bot import handlers
 

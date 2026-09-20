@@ -20,6 +20,7 @@ from .config import (
     TELEGRAM_PROXY_URL,
     VAULT_PATH,
 )
+from .errors import BILLING_MESSAGE
 from .handlers import admin_router, router
 from .logging_setup import configure_logging
 from .middleware import AccessMiddleware
@@ -45,7 +46,7 @@ async def _setup_commands(bot: Bot) -> None:
 
 
 async def _send_billing_alert(bot: Bot) -> None:
-    await bot.send_message(OWNER_TELEGRAM_ID, "Я без денег.")
+    await bot.send_message(OWNER_TELEGRAM_ID, BILLING_MESSAGE)
 
 
 async def main() -> None:

@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+BILLING_MESSAGE = "Я без денег."
+
 
 class UchoError(Exception):
     """Базовый класс всех доменных ошибок бота."""
@@ -19,9 +21,15 @@ class UchoError(Exception):
 class LLMError(UchoError):
     """Сбой обращения к LLM или некорректный/неразбираемый ответ модели."""
 
-    def __init__(self, message: str, *, user_message: str | None = None):
+    def __init__(
+        self, message: str, *, user_message: str | None = None, billing: bool = False,
+    ):
         super().__init__(message)
-        self.user_message = user_message or "LLM-провайдер сейчас недоступен. Попробуй позже."
+        self.billing = billing
+        self.user_message = (
+            BILLING_MESSAGE if billing
+            else user_message or "LLM-провайдер сейчас недоступен. Попробуй позже."
+        )
 
 
 class VaultError(UchoError):

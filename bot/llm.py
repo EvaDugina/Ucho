@@ -5,12 +5,14 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Literal
 
 from openai import APIStatusError, AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import about, mood_file, moods, vault
+from .atomic import atomic_write_json
 from .config import (
     DOMAINS,
     LLM_API_KEY,
@@ -26,6 +28,7 @@ from .config import (
     LLM_MODEL_PROCESS,
     LLM_PROVIDER_NAME,
     LLM_TIMEOUT,
+    META_DIR,
     PROMPTS_DIR,
 )
 from .errors import LLMError
@@ -45,14 +48,43 @@ _client = AsyncOpenAI(**_client_kwargs)
 
 _billing_notifier: Callable[[], Awaitable[None]] | None = None
 _billing_alert_sent = False
+_billing_blocked_models: set[str] = set()
 _billing_alert_lock = asyncio.Lock()
+_billing_alert_state_path: Path = META_DIR / "llm_billing_alert.json"
+
+
+def _load_billing_alert_state() -> tuple[bool, set[str]]:
+    try:
+        data = json.loads(_billing_alert_state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False, set()
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        log.exception("failed to read LLM billing alert state")
+        return False, set()
+    if not isinstance(data, dict) or data.get("provider") != LLM_PROVIDER_NAME:
+        return False, set()
+    models = data.get("billing_models")
+    if not isinstance(models, list):
+        return False, set()
+    return data.get("notified") is True, {
+        model for model in models if isinstance(model, str) and model
+    }
+
+
+def _save_billing_alert_state() -> None:
+    atomic_write_json(_billing_alert_state_path, {
+        "provider": LLM_PROVIDER_NAME,
+        "notified": _billing_alert_sent,
+        "billing_models": sorted(_billing_blocked_models),
+    })
 
 
 def set_billing_notifier(notifier: Callable[[], Awaitable[None]] | None) -> None:
     """Привязать Telegram-уведомление к текущему экземпляру бота."""
-    global _billing_notifier, _billing_alert_sent
+    global _billing_notifier, _billing_alert_sent, _billing_blocked_models
     _billing_notifier = notifier
-    _billing_alert_sent = False
+    if notifier is not None:
+        _billing_alert_sent, _billing_blocked_models = _load_billing_alert_state()
 
 
 def _is_billing_error(exc: Exception) -> bool:
@@ -69,8 +101,8 @@ def _is_billing_error(exc: Exception) -> bool:
     )
 
 
-async def _alert_billing_outage() -> None:
-    global _billing_alert_sent
+async def _alert_billing_outage(billing_models: set[str]) -> None:
+    global _billing_alert_sent, _billing_blocked_models
     async with _billing_alert_lock:
         if _billing_alert_sent or _billing_notifier is None:
             return
@@ -82,12 +114,24 @@ async def _alert_billing_outage() -> None:
             log.exception("failed to send LLM billing alert")
             return
         _billing_alert_sent = True
+        _billing_blocked_models = set(billing_models)
+        try:
+            _save_billing_alert_state()
+        except OSError:
+            log.exception("failed to persist LLM billing alert state")
 
 
-async def _clear_billing_outage() -> None:
-    global _billing_alert_sent
+async def _clear_billing_outage(model: str) -> None:
+    global _billing_alert_sent, _billing_blocked_models
     async with _billing_alert_lock:
+        if not _billing_alert_sent or model not in _billing_blocked_models:
+            return
         _billing_alert_sent = False
+        _billing_blocked_models = set()
+        try:
+            _save_billing_alert_state()
+        except OSError:
+            log.exception("failed to persist LLM billing recovery")
 
 _base_prompt = (PROMPTS_DIR / "base.md").read_text(encoding="utf-8")
 _persona_prompt = (PROMPTS_DIR / "judas.md").read_text(encoding="utf-8")
@@ -148,7 +192,9 @@ def _models_for(task: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(model for model in (primary, *fallbacks) if model))
 
 
-def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, ...]) -> None:
+def _raise_models_unavailable(
+    task: str, errors: list[str], models: tuple[str, ...], *, billing: bool = False,
+) -> None:
     route = " → ".join(models) if models else "нет настроенных моделей"
     detail = "; ".join(errors)
     log.warning("LLM %s all %s models unavailable: %s", task, LLM_PROVIDER_NAME, detail)
@@ -163,12 +209,13 @@ def _raise_models_unavailable(task: str, errors: list[str], models: tuple[str, .
     raise LLMError(
         "LLM request failed for all models: " + detail,
         user_message=f"Модели {LLM_PROVIDER_NAME} сейчас недоступны: {route}. Попробуй позже.",
+        billing=billing,
     )
 
 
 async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) -> dict:
     errors: list[str] = []
-    billing_error = False
+    billing_models: set[str] = set()
     models = _models_for(task)
     for model in models:
         try:
@@ -179,7 +226,8 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
                 temperature=temperature,
             )
         except Exception as exc:
-            billing_error |= _is_billing_error(exc)
+            if _is_billing_error(exc):
+                billing_models.add(model)
             errors.append(f"{model}: request failed: {exc}")
             continue
         try:
@@ -190,15 +238,15 @@ async def _chat_json(task: str, messages: list[dict], temperature: float = 0.6) 
         try:
             data = json.loads(raw)
             if isinstance(data, dict):
-                await _clear_billing_outage()
+                await _clear_billing_outage(model)
                 return data
             errors.append(f"{model}: JSON is not object")
         except json.JSONDecodeError:
             errors.append(f"{model}: non-JSON response")
             log.error("LLM %s returned non-JSON from %s (%d chars)", task, model, len(raw))
-    if billing_error:
-        await _alert_billing_outage()
-    _raise_models_unavailable(task, errors, models)
+    if billing_models:
+        await _alert_billing_outage(billing_models)
+    _raise_models_unavailable(task, errors, models, billing=bool(billing_models))
 
 
 async def _chat_text_models(
@@ -208,7 +256,7 @@ async def _chat_text_models(
     temperature: float = 0.6,
 ) -> str:
     errors: list[str] = []
-    billing_error = False
+    billing_models: set[str] = set()
     for model in models:
         try:
             response = await _client.chat.completions.create(
@@ -217,7 +265,8 @@ async def _chat_text_models(
                 temperature=temperature,
             )
         except Exception as exc:
-            billing_error |= _is_billing_error(exc)
+            if _is_billing_error(exc):
+                billing_models.add(model)
             errors.append(f"{model}: request failed: {exc}")
             continue
         try:
@@ -226,12 +275,12 @@ async def _chat_text_models(
             errors.append(f"{model}: empty choices")
             continue
         if text.strip():
-            await _clear_billing_outage()
+            await _clear_billing_outage(model)
             return text
         errors.append(f"{model}: empty response")
-    if billing_error:
-        await _alert_billing_outage()
-    _raise_models_unavailable(task, errors, models)
+    if billing_models:
+        await _alert_billing_outage(billing_models)
+    _raise_models_unavailable(task, errors, models, billing=bool(billing_models))
 
 
 async def _chat_text(task: str, messages: list[dict], temperature: float = 0.6) -> str:

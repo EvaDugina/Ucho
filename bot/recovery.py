@@ -16,6 +16,15 @@ from .validation import MAX_USER_TEXT, safe_user_text
 log = logging.getLogger(__name__)
 
 
+async def _reply_billing_failure(bot: Bot, uid: int, exc: LLMError) -> None:
+    if not exc.billing:
+        return
+    try:
+        await bot.send_message(uid, exc.user_message)
+    except Exception:
+        log.exception("failed to send billing failure to uid=%s", uid)
+
+
 async def process_pending_on_startup(bot: Bot, uid: int) -> None:
     """Дожать текст, который уже попал в session-log до сбоя LLM."""
     if not users.is_allowed(uid):
@@ -86,6 +95,10 @@ async def process_pending_on_startup(bot: Bot, uid: int) -> None:
             original_answer=text,
             at=event.get("ts"),
         )
+    except LLMError as exc:
+        log.warning("pending recovery LLM unavailable uid=%s event=%s", uid, raw_event_id)
+        await _reply_billing_failure(bot, uid, exc)
+        return
     except Exception:
         log.exception("pending recovery failed uid=%s event=%s", uid, raw_event_id)
         return
@@ -140,8 +153,9 @@ async def process_queued_on_startup(bot: Bot, uid: int) -> None:
                 session_context_snapshot=str(item.get("session_context") or ""),
                 event_kind=str(item.get("source") or "answer"),
             )
-        except LLMError:
+        except LLMError as exc:
             log.warning("queued recovery LLM unavailable uid=%s", uid)
+            await _reply_billing_failure(bot, uid, exc)
             return
         if payload is not None:
             await _send_payload(bot, uid, payload)
@@ -242,7 +256,8 @@ async def _process_offline_user(bot: Bot, uid: int, messages: list[Message]) -> 
             )
         if payload is not None:
             await _send_payload(bot, uid, payload)
-    except LLMError:
+    except LLMError as exc:
         log.warning("offline analysis unavailable uid=%s", uid)
+        await _reply_billing_failure(bot, uid, exc)
     finally:
         ratelimit.release(uid)

@@ -215,6 +215,27 @@ def test_ask_button_keeps_topic_menu_when_question_fails(as_user, monkeypatch):
     delete_message.assert_not_awaited()
 
 
+def test_ask_button_billing_failure_sends_chat_reply(as_user, monkeypatch):
+    async def fail(*_args, **_kwargs):
+        raise LLMError("payment required", billing=True)
+
+    monkeypatch.setattr(handlers, "_generate_question", fail)
+    monkeypatch.setattr(handlers.ratelimit, "try_acquire", lambda _uid: True)
+    monkeypatch.setattr(handlers.ratelimit, "release", lambda _uid: None)
+    send_message = AsyncMock()
+    callback = SimpleNamespace(
+        data="ask:work",
+        answer=AsyncMock(),
+        from_user=SimpleNamespace(id=as_user),
+        message=SimpleNamespace(chat=SimpleNamespace(id=as_user), message_id=42),
+        bot=SimpleNamespace(send_message=send_message),
+    )
+
+    asyncio.run(handlers.cb_ask_domain(callback))
+
+    send_message.assert_awaited_once_with(as_user, "Я без денег.")
+
+
 def test_empty_library_has_no_inactive_controls(monkeypatch):
     monkeypatch.setattr(handlers.books, "list_books", lambda: [])
 

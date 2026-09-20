@@ -55,6 +55,19 @@ PENDING_ANALYSIS_MESSAGE = (
     "восстановления связи с LLM."
 )
 
+
+async def _answer_llm_failure(message: Message, exc: LLMError) -> None:
+    await message.answer(exc.user_message if exc.billing else PENDING_ANALYSIS_MESSAGE)
+
+
+async def _answer_callback_llm_failure(callback: CallbackQuery, exc: LLMError) -> None:
+    if exc.billing:
+        chat_id = callback.message.chat.id if callback.message else callback.from_user.id
+        await callback.bot.send_message(chat_id, exc.user_message)
+    else:
+        await callback.answer(exc.user_message, show_alert=True)
+
+
 _DOMAIN_LABELS = session_messages.DOMAIN_LABELS
 
 
@@ -142,9 +155,9 @@ async def _process_current_text(
             if payload is not None:
                 await _send_payload(message.bot, message.chat.id, payload)
             await _drain_queued(message)
-    except LLMError:
+    except LLMError as exc:
         log.warning("process_answer unavailable; pending raw answer kept")
-        await message.answer(PENDING_ANALYSIS_MESSAGE)
+        await _answer_llm_failure(message, exc)
     finally:
         ratelimit.release(uid)
 
@@ -189,9 +202,9 @@ async def _ingest_note(message: Message, clean: str, *, source: str = "ucho") ->
             )
             if payload is not None:
                 await _send_payload(message.bot, message.chat.id, payload)
-    except LLMError:
+    except LLMError as exc:
         log.warning("note analysis unavailable; pending raw note kept")
-        await message.answer(PENDING_ANALYSIS_MESSAGE)
+        await _answer_llm_failure(message, exc)
     finally:
         ratelimit.release(uid)
 
@@ -382,7 +395,7 @@ async def cb_ask_domain(callback: CallbackQuery) -> None:
                 log.warning("failed to delete ask topic menu", exc_info=True)
     except LLMError as exc:
         log.warning("ask callback unavailable")
-        await callback.answer(exc.user_message, show_alert=True)
+        await _answer_callback_llm_failure(callback, exc)
     finally:
         ratelimit.release(uid)
 
@@ -568,7 +581,9 @@ async def cb_sea(callback: CallbackQuery) -> None:
         await callback.answer(str(exc), show_alert=True)
     except LLMError as exc:
         log.warning("book question unavailable")
-        await callback.answer(exc.user_message, show_alert=True)
+        if exc.billing:
+            await callback.answer()
+        await _answer_callback_llm_failure(callback, exc)
     finally:
         ratelimit.release(uid)
 
