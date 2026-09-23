@@ -24,6 +24,9 @@ COPY bot/ ./bot/
 COPY prompts/ ./prompts/
 COPY scripts/ ./scripts/
 COPY deploy/ ./deploy/
+# Windows checkout может отдать shell-файлы с CRLF; runtime и deploy-тесты
+# выполняются в Linux-контейнере и должны получать исполняемый LF-текст.
+RUN sed -i 's/\r$//' deploy/*.sh
 COPY tests/ ./tests/
 COPY pytest.ini ruff.toml ./
 

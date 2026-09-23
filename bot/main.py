@@ -136,8 +136,8 @@ async def main() -> None:
     else:
         log.info("startup recovery disabled by config")
 
-    # Догон дневного вопроса: если бот лежал в час рассылки — дослать сегодняшний
-    # (не за прошлые дни). Дедуп по дате внутри send_daily_question.
+    # Догон автоматического вопроса: после часа рассылки проверить, истёк ли
+    # четырёхдневный интервал. Пропущенные даты отдельно не бэкфиллим.
     if BACKGROUND_JOBS_ENABLED:
         try:
             from .scheduler import catch_up_daily

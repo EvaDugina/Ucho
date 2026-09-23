@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import books, session, session_log, users
+from bot import books, session, session_log, users, vault
 from bot.services import daily_service, reminder_service
 
 TEXT = "# Книга\n\n## Глава\n\n" + "Содержательная книжная строка о совести и выборе. " * 30
@@ -93,6 +93,35 @@ def test_daily_targets_only_include_whitelist(as_user, monkeypatch):
     (users.META_DIR.parent / "users" / str(data_only_uid)).mkdir(parents=True)
     monkeypatch.setattr(users, "allowed_ids", lambda: {1, as_user})
     assert daily_service.daily_targets() == [1, as_user]
+
+
+def test_answered_previous_daily_does_not_need_followup(as_user):
+    q_num = vault.next_q_num()
+    current = session.start(domain="ethics")
+    session.set_question("Что ты обещал себе?", "ethics", q_num=q_num)
+    session_log.append_required(
+        session_id=current.id,
+        role="assistant",
+        kind="question",
+        text="Что ты обещал себе?",
+        q_num=q_num,
+        domain="ethics",
+    )
+    session_log.append_required(
+        session_id=current.id,
+        role="user",
+        kind="answer",
+        text="Не торопиться с выводами.",
+        q_num=q_num,
+        domain="ethics",
+    )
+    vault.mark_daily_sent_details(
+        daily_service.DAILY_TZ,
+        q_num=q_num,
+        session_id=current.id,
+    )
+
+    assert daily_service._previous_unanswered_daily() is None
 
 
 @pytest.mark.asyncio

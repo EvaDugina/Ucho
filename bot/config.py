@@ -186,6 +186,8 @@ STARTUP_RECOVERY_ENABLED = _env_bool("STARTUP_RECOVERY_ENABLED", not DEBUG)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
+# Автоматический вопрос отправляется не чаще одного раза за этот интервал.
+DAILY_INTERVAL_DAYS = max(1, int(os.getenv("DAILY_INTERVAL_DAYS", "4")))
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
 DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
 # Окно вечернего напоминания по сегодняшнему daily-вопросу. Если конец меньше

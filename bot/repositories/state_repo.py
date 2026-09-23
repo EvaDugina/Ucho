@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from ..atomic import atomic_write_json
 from ..storage import layout
@@ -53,8 +53,24 @@ def _today_str(tz_name: str) -> str:
         return datetime.now().strftime("%Y-%m-%d")
 
 
-def daily_already_sent(tz_name: str) -> bool:
-    return _load_state().get("last_daily_date") == _today_str(tz_name)
+def daily_question_due(
+    tz_name: str,
+    interval_days: int,
+    *,
+    day: str | None = None,
+) -> bool:
+    """Разрешить первый вопрос и следующий после полного календарного интервала."""
+    state = _load_state()
+    raw_last = state.get("last_daily_date")
+    if not raw_last:
+        return True
+    try:
+        last_day = date.fromisoformat(str(raw_last))
+        target_day = date.fromisoformat(_day_or_today(tz_name, day))
+    except ValueError:
+        log.warning("invalid last_daily_date=%r; allowing scheduled question", raw_last)
+        return True
+    return (target_day - last_day).days >= max(1, int(interval_days))
 
 
 def _day_or_today(tz_name: str, day: str | None = None) -> str:
@@ -69,6 +85,20 @@ def daily_record(tz_name: str, day: str | None = None) -> dict:
         return {}
     return {
         "date": target_day,
+        "q_num": state.get("last_daily_q_num"),
+        "session_id": state.get("last_daily_session_id"),
+        "sent_at": state.get("last_daily_sent_at"),
+    }
+
+
+def last_daily_record() -> dict:
+    """Последний успешно отправленный автоматический вопрос независимо от даты."""
+    state = _load_state()
+    day = str(state.get("last_daily_date") or "")
+    if not day:
+        return {}
+    return {
+        "date": day,
         "q_num": state.get("last_daily_q_num"),
         "session_id": state.get("last_daily_session_id"),
         "sent_at": state.get("last_daily_sent_at"),

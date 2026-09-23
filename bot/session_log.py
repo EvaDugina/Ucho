@@ -258,6 +258,26 @@ def transcript(session_id: str | None, *, max_chars: int = 24_000) -> str:
     return marker + tail
 
 
+def latest_answered_session_transcript(*, max_chars: int = 24_000) -> str:
+    """История сессии с самым поздним непустым пользовательским событием."""
+    candidates: list[tuple[float, int, dict]] = []
+    for index, event in enumerate(iter_events()):
+        if event.get("role") != "user" or not str(event.get("text") or "").strip():
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(event.get("ts")))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            timestamp = parsed.timestamp()
+        except (TypeError, ValueError, OSError):
+            timestamp = float("-inf")
+        candidates.append((timestamp, index, event))
+    if not candidates:
+        return ""
+    latest = max(candidates, key=lambda item: (item[0], item[1]))[2]
+    return transcript(str(latest.get("session_id") or ""), max_chars=max_chars)
+
+
 def message_ids(session_id: str | None = None) -> list[int]:
     ids: list[int] = []
     events = session_events(session_id) if session_id else iter_events()

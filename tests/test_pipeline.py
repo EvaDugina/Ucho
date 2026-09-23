@@ -181,7 +181,7 @@ async def test_failed_daily_question_preserves_current_session(as_user, monkeypa
 
     monkeypatch.setattr(daily_service, "ask_next", fail)
     monkeypatch.setattr(daily_service.users, "is_allowed", lambda _: True)
-    monkeypatch.setattr(daily_service.vault, "daily_already_sent", lambda _: False)
+    monkeypatch.setattr(daily_service.vault, "daily_question_due", lambda *_: True)
 
     class Bot:
         async def send_chat_action(self, *args, **kwargs):
@@ -190,6 +190,83 @@ async def test_failed_daily_question_preserves_current_session(as_user, monkeypa
     assert await daily_service.send_daily_question(Bot(), as_user) is False
     assert session.get().id == current.id
     assert session.get().last_question == "Текущий вопрос"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_question_adds_contextual_followup_for_unanswered_previous(
+    as_user, monkeypatch,
+):
+    from bot.services import daily_service
+
+    answered_q_num = vault.next_q_num()
+    answered = session.start(domain="identity")
+    session.set_question("Что ты защищаешь в себе?", "identity", q_num=answered_q_num)
+    session_log.append_required(
+        session_id=answered.id,
+        role="assistant",
+        kind="question",
+        text="Что ты защищаешь в себе?",
+        q_num=answered_q_num,
+        domain="identity",
+    )
+    session_log.append_required(
+        session_id=answered.id,
+        role="user",
+        kind="answer",
+        text="Я защищаю право менять решение.",
+        q_num=answered_q_num,
+        domain="identity",
+    )
+
+    unanswered_q_num = vault.next_q_num()
+    unanswered = session.start(domain="ethics")
+    session.set_question("Что для тебя дороже обещания?", "ethics", q_num=unanswered_q_num)
+    session_log.append_required(
+        session_id=unanswered.id,
+        role="assistant",
+        kind="question",
+        text="Что для тебя дороже обещания?",
+        q_num=unanswered_q_num,
+        domain="ethics",
+    )
+    vault.mark_daily_sent_details(
+        daily_service.DAILY_TZ,
+        q_num=unanswered_q_num,
+        session_id=unanswered.id,
+    )
+
+    captured = {}
+
+    async def ask(*args, **kwargs):
+        return {"question": "Кого ты прощаешь слишком легко?", "domain": "relationships"}
+
+    async def followup(**kwargs):
+        captured.update(kwargs)
+        return "Я требую ответа: твоё право менять решение не спасёт вчерашнее обещание."
+
+    monkeypatch.setattr(daily_service.users, "is_allowed", lambda _: True)
+    monkeypatch.setattr(daily_service.vault, "daily_question_due", lambda *_: True)
+    monkeypatch.setattr(daily_service, "ask_next", ask)
+    monkeypatch.setattr(daily_service, "generate_unanswered_followup", followup)
+
+    sent_texts = []
+
+    class Bot:
+        async def send_chat_action(self, *args, **kwargs):
+            return None
+
+        async def send_message(self, chat_id, text, **kwargs):
+            sent_texts.append(text)
+            return SimpleNamespace(message_id=100 + len(sent_texts), date=None)
+
+    assert await daily_service.send_daily_question(Bot(), as_user) is True
+    assert len(sent_texts) == 2
+    assert captured["unanswered_question"] == "Что для тебя дороже обещания?"
+    assert "Я защищаю право менять решение." in captured["last_answered_session"]
+    assert captured["motif"] in daily_service.UNANSWERED_MOTIFS
+    events = session_log.session_events(session.get().id)
+    assert [event["kind"] for event in events] == ["question", "unanswered_followup"]
+    assert events[-1]["metadata"]["unanswered_q_num"] == unanswered_q_num
 
 
 @pytest.mark.asyncio

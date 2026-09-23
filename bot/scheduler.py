@@ -15,6 +15,7 @@ from .config import (
     BACKUP_PATH,
     BACKUP_WEEKDAY,
     DAILY_HOUR,
+    DAILY_INTERVAL_DAYS,
     DAILY_TZ,
     VAULT_PATH,
 )
@@ -25,12 +26,12 @@ log = logging.getLogger(__name__)
 
 
 def _daily_targets() -> list[int]:
-    """Кому слать дневной вопрос: владелец + env + рантайм-реестр + у кого есть данные."""
+    """Кому слать автоматический вопрос: только текущий whitelist."""
     return daily_targets()
 
 
 async def _daily_for_all(bot: Bot) -> None:
-    """Дневной вопрос каждому доверенному. Дедуп по дню — внутри send_daily_question."""
+    """Проверить, кому из доверенных пора отправить вопрос по интервалу."""
     for uid in _daily_targets():
         try:
             await send_daily_question(bot, uid)
@@ -82,14 +83,14 @@ def _now_hour_local() -> int:
 
 
 async def catch_up_daily(bot: Bot) -> None:
-    """Догон после простоя: если бот лежал в час рассылки, дослать СЕГОДНЯШНИЙ
-    дневной вопрос (не раньше DAILY_HOUR). За прошлые дни НЕ досылаем — дедуп по
-    дате в send_daily_question отправит максимум один сегодняшний; вчерашний маркер
-    != сегодня, но мы шлём только «сегодня», поэтому бэкфилла нет.
+    """Догон после простоя: после часа рассылки проверить четырёхдневный интервал.
+
+    За пропущенные даты вопросы не бэкфиллим: при наступившем сроке отправляется
+    ровно один текущий вопрос, а новая дата становится началом следующего интервала.
     """
     if _now_hour_local() < DAILY_HOUR:
         return  # время рассылки сегодня ещё не наступило — ждём cron
-    log.info("catch_up_daily: время рассылки прошло, досылаю сегодняшний дневной")
+    log.info("catch_up_daily: время рассылки прошло, проверяю интервал вопроса")
     for uid in _daily_targets():
         try:
             await send_daily_question(bot, uid)
@@ -143,7 +144,8 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
             replace_existing=True,
         )
         log.info(
-            "daily question at %02d:00, reminder plan at %02d:%02d %s",
+            "scheduled question every %s days checked at %02d:00; reminder plan at %02d:%02d %s",
+            DAILY_INTERVAL_DAYS,
             DAILY_HOUR,
             reminder_start.hour,
             reminder_start.minute,
