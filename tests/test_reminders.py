@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot import books, session, session_log, users, vault
+from bot import books, scheduler, session, session_log, users, vault
 from bot.services import daily_service, reminder_service
 
 TEXT = "# Книга\n\n## Глава\n\n" + "Содержательная книжная строка о совести и выборе. " * 30
@@ -93,6 +93,20 @@ def test_daily_targets_only_include_whitelist(as_user, monkeypatch):
     (users.META_DIR.parent / "users" / str(data_only_uid)).mkdir(parents=True)
     monkeypatch.setattr(users, "allowed_ids", lambda: {1, as_user})
     assert daily_service.daily_targets() == [1, as_user]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_omits_book_reminder_job_when_disabled(monkeypatch):
+    monkeypatch.setattr(scheduler, "BACKGROUND_JOBS_ENABLED", True)
+    monkeypatch.setattr(scheduler, "BACKUP_ENABLED", False)
+    monkeypatch.setattr(scheduler, "BOOK_REMINDERS_ENABLED", False)
+
+    planned = scheduler.start_scheduler(SimpleNamespace())
+    try:
+        assert planned.get_job("daily_question") is not None
+        assert planned.get_job("daily_reminder_plan") is None
+    finally:
+        planned.shutdown(wait=False)
 
 
 def test_answered_previous_daily_does_not_need_followup(as_user):

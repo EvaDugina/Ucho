@@ -104,19 +104,19 @@ async def test_unanswered_followup_uses_fenced_question_and_session(monkeypatch)
     monkeypatch.setattr(llm, "_chat_json", chat)
     result = await llm.generate_unanswered_followup(
         unanswered_question=question,
-        last_answered_session=history,
-        motif="hate",
+        last_user_session=history,
+        mood="hate",
     )
 
     assert result.startswith("Я ненавижу")
     assert captured["task"] == "unanswered"
     system = captured["messages"][0]["content"]
     user = captured["messages"][1]["content"]
-    assert "Режим: реплика после вопроса без ответа" in system
+    assert "Режим: реплика перед следующим вопросом" in system
     assert question not in system and history not in system
-    assert "motif: hate" in user
+    assert "mood: hate" in user
     assert "<<<UNANSWERED_QUESTION" in user
-    assert "<<<LAST_ANSWERED_SESSION" in user
+    assert "<<<LAST_USER_SESSION" in user
     assert question in user and history in user
 
 
@@ -129,8 +129,8 @@ async def test_unanswered_followup_rejects_multiple_sentences(monkeypatch):
     with pytest.raises(LLMError, match="malformed unanswered"):
         await llm.generate_unanswered_followup(
             unanswered_question="Что ты выберешь?",
-            last_answered_session="",
-            motif="offended",
+            last_user_session="",
+            mood="offended",
         )
 
 

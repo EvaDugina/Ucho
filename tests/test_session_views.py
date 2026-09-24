@@ -76,7 +76,7 @@ def test_rebuild_skips_broken_jsonl_and_keeps_other_views(as_user):
     assert "Вопрос" in (directory / "valid.md").read_text(encoding="utf-8")
 
 
-def test_latest_answered_session_uses_latest_user_event_time(as_user):
+def test_latest_user_session_uses_latest_message_longer_than_three_chars(as_user):
     older_session = uuid.uuid4().hex
     newer_session = uuid.uuid4().hex
     session_log.append_required(
@@ -107,7 +107,37 @@ def test_latest_answered_session_uses_latest_user_event_time(as_user):
         text="Самый поздний ответ",
         at=datetime(2026, 9, 23, 10, 0, tzinfo=timezone.utc),
     )
+    session_log.append_required(
+        session_id=newer_session,
+        role="user",
+        kind="message",
+        text=" да ",
+        at=datetime(2026, 9, 24, 10, 0, tzinfo=timezone.utc),
+    )
 
-    result = session_log.latest_answered_session_transcript()
+    result = session_log.latest_user_session_transcript()
     assert "Самый поздний ответ" in result
     assert "Более ранний ответ" not in result
+
+
+def test_latest_user_session_truncates_oldest_messages(as_user):
+    session_id = uuid.uuid4().hex
+    session_log.append_required(
+        session_id=session_id,
+        role="assistant",
+        kind="question",
+        text="Очень старое начало " * 100,
+        at=datetime(2026, 9, 23, 10, 0, tzinfo=timezone.utc),
+    )
+    session_log.append_required(
+        session_id=session_id,
+        role="user",
+        kind="answer",
+        text="Последнее содержательное сообщение",
+        at=datetime(2026, 9, 24, 10, 0, tzinfo=timezone.utc),
+    )
+
+    result = session_log.latest_user_session_transcript(max_chars=140)
+    assert result.startswith("[TRUNCATED_OLDER_SESSION_MESSAGES]")
+    assert "Последнее содержательное сообщение" in result
+    assert "Очень старое начало" not in result

@@ -8,10 +8,15 @@ from contextlib import suppress
 from aiogram import Bot
 
 from .. import books, session, session_log, userctx, users, vault
-from ..config import DAILY_INTERVAL_DAYS, DAILY_TZ, DOMAINS
+from ..config import (
+    DAILY_INTERVAL_MAX_DAYS,
+    DAILY_INTERVAL_MIN_DAYS,
+    DAILY_TZ,
+    DOMAINS,
+)
 from ..errors import LLMError
-from ..llm import UNANSWERED_MOTIFS, ask_next, generate_unanswered_followup
-from .session_messages import send_question
+from ..llm import UNANSWERED_MOODS, ask_next, generate_unanswered_followup
+from .session_messages import send_plain_session_message, send_question
 
 log = logging.getLogger(__name__)
 
@@ -36,39 +41,77 @@ async def _send_unanswered_followup(
     bot: Bot,
     chat_id: int,
     *,
-    current_q_num: int,
-    current_domain: str,
     previous: dict,
-    last_answered_session: str,
+    next_question_date: str,
 ) -> bool:
-    motif = random.choice(UNANSWERED_MOTIFS)
+    mood = random.choice(UNANSWERED_MOODS)
+    last_user_session = session_log.latest_user_session_transcript(
+        min_chars=4,
+        max_chars=24_000,
+    )
     try:
         text = await generate_unanswered_followup(
             unanswered_question=str(previous["text"]),
-            last_answered_session=last_answered_session,
-            motif=motif,
+            last_user_session=last_user_session,
+            mood=mood,
         )
-        await send_question(
+        await send_plain_session_message(
             bot,
             chat_id,
-            q_num=current_q_num,
-            domain=current_domain,
+            session_id=str(previous["session_id"]),
+            q_num=int(previous["q_num"]),
+            domain=str(previous.get("domain") or ""),
             text=text,
-            plain=True,
             event_kind="unanswered_followup",
             metadata={
                 "source": "scheduled_unanswered_followup",
-                "motif": motif,
+                "mood": mood,
+                "next_question_date": next_question_date,
                 "unanswered_q_num": previous.get("q_num"),
                 "unanswered_session_id": previous.get("session_id"),
             },
         )
+        if not vault.mark_unanswered_followup_sent(
+            DAILY_TZ,
+            q_num=int(previous["q_num"]),
+        ):
+            log.warning("unanswered followup state changed before mark uid=%s", chat_id)
         return True
     except Exception:
-        # Новый вопрос уже доставлен и записан: сбой дополнительной реплики не
-        # должен дублировать его при следующем тике расписания.
         log.exception("scheduled unanswered followup failed uid=%s", chat_id)
         return False
+
+
+async def send_unanswered_followup_if_due(bot: Bot, uid: int) -> bool:
+    """Отправить одну реплику за день до следующего вопроса, если ответ не пришёл."""
+    if not users.is_allowed(uid):
+        log.warning("unanswered followup skipped: uid=%s is not allowed", uid)
+        return False
+    userctx.set_user(uid)
+    async with session.lock_for(uid):
+        if not vault.unanswered_followup_due(
+            DAILY_TZ,
+            DAILY_INTERVAL_MIN_DAYS,
+            DAILY_INTERVAL_MAX_DAYS,
+        ):
+            return False
+        previous = _previous_unanswered_daily()
+        if previous is None:
+            return False
+        schedule = vault.daily_schedule(
+            DAILY_TZ,
+            DAILY_INTERVAL_MIN_DAYS,
+            DAILY_INTERVAL_MAX_DAYS,
+        )
+        next_question_date = str(schedule.get("next_date") or "")
+        if not next_question_date:
+            return False
+        return await _send_unanswered_followup(
+            bot,
+            uid,
+            previous=previous,
+            next_question_date=next_question_date,
+        )
 
 
 async def _send_next_question(bot: Bot, chat_id: int, domain: str | None = None) -> int | None:
@@ -114,13 +157,13 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
         return False
     userctx.set_user(uid)
     async with session.lock_for(uid):
-        if not vault.daily_question_due(DAILY_TZ, DAILY_INTERVAL_DAYS):
+        if not vault.daily_question_due(
+            DAILY_TZ,
+            DAILY_INTERVAL_MIN_DAYS,
+            DAILY_INTERVAL_MAX_DAYS,
+        ):
             log.info("scheduled question skipped: interval not elapsed uid=%s", uid)
             return False
-        previous = _previous_unanswered_daily()
-        last_answered_session = (
-            session_log.latest_answered_session_transcript() if previous is not None else ""
-        )
         q_num = await _send_next_question(bot, uid)
         if q_num is None:
             return False
@@ -129,14 +172,7 @@ async def send_daily_question(bot: Bot, uid: int) -> bool:
             DAILY_TZ,
             q_num=q_num,
             session_id=current.id if current is not None else None,
+            min_days=DAILY_INTERVAL_MIN_DAYS,
+            max_days=DAILY_INTERVAL_MAX_DAYS,
         )
-        if previous is not None and current is not None:
-            await _send_unanswered_followup(
-                bot,
-                uid,
-                current_q_num=q_num,
-                current_domain=current.last_domain,
-                previous=previous,
-                last_answered_session=last_answered_session,
-            )
         return True

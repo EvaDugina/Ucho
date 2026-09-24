@@ -193,7 +193,7 @@ async def test_failed_daily_question_preserves_current_session(as_user, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_scheduled_question_adds_contextual_followup_for_unanswered_previous(
+async def test_contextual_followup_is_sent_before_next_question_for_unanswered_previous(
     as_user, monkeypatch,
 ):
     from bot.services import daily_service
@@ -237,18 +237,51 @@ async def test_scheduled_question_adds_contextual_followup_for_unanswered_previo
 
     captured = {}
 
-    async def ask(*args, **kwargs):
-        return {"question": "Кого ты прощаешь слишком легко?", "domain": "relationships"}
-
     async def followup(**kwargs):
         captured.update(kwargs)
         return "Я требую ответа: твоё право менять решение не спасёт вчерашнее обещание."
 
     monkeypatch.setattr(daily_service.users, "is_allowed", lambda _: True)
-    monkeypatch.setattr(daily_service.vault, "daily_question_due", lambda *_: True)
-    monkeypatch.setattr(daily_service, "ask_next", ask)
+    monkeypatch.setattr(daily_service.vault, "unanswered_followup_due", lambda *_: True)
+    monkeypatch.setattr(
+        daily_service.vault,
+        "daily_schedule",
+        lambda *_: {"next_date": "2026-09-25"},
+    )
     monkeypatch.setattr(daily_service, "generate_unanswered_followup", followup)
 
+    sent_texts = []
+
+    class Bot:
+        async def send_message(self, chat_id, text, **kwargs):
+            sent_texts.append(text)
+            return SimpleNamespace(message_id=100 + len(sent_texts), date=None)
+
+    assert await daily_service.send_unanswered_followup_if_due(Bot(), as_user) is True
+    assert len(sent_texts) == 1
+    assert captured["unanswered_question"] == "Что для тебя дороже обещания?"
+    assert "Я защищаю право менять решение." in captured["last_user_session"]
+    assert captured["mood"] in daily_service.UNANSWERED_MOODS
+    events = session_log.session_events(unanswered.id)
+    assert [event["kind"] for event in events] == ["question", "unanswered_followup"]
+    assert events[-1]["metadata"]["unanswered_q_num"] == unanswered_q_num
+    assert events[-1]["metadata"]["next_question_date"] == "2026-09-25"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_question_does_not_append_unanswered_followup(as_user, monkeypatch):
+    from bot.services import daily_service
+
+    async def ask(*args, **kwargs):
+        return {"question": "Кого ты прощаешь слишком легко?", "domain": "relationships"}
+
+    async def fail_followup(**kwargs):
+        raise AssertionError("followup must run on the previous day")
+
+    monkeypatch.setattr(daily_service.users, "is_allowed", lambda _: True)
+    monkeypatch.setattr(daily_service.vault, "daily_question_due", lambda *_: True)
+    monkeypatch.setattr(daily_service, "ask_next", ask)
+    monkeypatch.setattr(daily_service, "generate_unanswered_followup", fail_followup)
     sent_texts = []
 
     class Bot:
@@ -257,16 +290,13 @@ async def test_scheduled_question_adds_contextual_followup_for_unanswered_previo
 
         async def send_message(self, chat_id, text, **kwargs):
             sent_texts.append(text)
-            return SimpleNamespace(message_id=100 + len(sent_texts), date=None)
+            return SimpleNamespace(message_id=200 + len(sent_texts), date=None)
 
     assert await daily_service.send_daily_question(Bot(), as_user) is True
-    assert len(sent_texts) == 2
-    assert captured["unanswered_question"] == "Что для тебя дороже обещания?"
-    assert "Я защищаю право менять решение." in captured["last_answered_session"]
-    assert captured["motif"] in daily_service.UNANSWERED_MOTIFS
-    events = session_log.session_events(session.get().id)
-    assert [event["kind"] for event in events] == ["question", "unanswered_followup"]
-    assert events[-1]["metadata"]["unanswered_q_num"] == unanswered_q_num
+    assert len(sent_texts) == 1
+    assert [event["kind"] for event in session_log.session_events(session.get().id)] == [
+        "question"
+    ]
 
 
 @pytest.mark.asyncio

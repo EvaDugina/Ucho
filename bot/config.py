@@ -186,10 +186,16 @@ STARTUP_RECOVERY_ENABLED = _env_bool("STARTUP_RECOVERY_ENABLED", not DEBUG)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 DAILY_HOUR = int(os.getenv("DAILY_HOUR", "19"))
-# Автоматический вопрос отправляется не чаще одного раза за этот интервал.
-DAILY_INTERVAL_DAYS = max(1, int(os.getenv("DAILY_INTERVAL_DAYS", "4")))
+# Для каждого следующего автоматического вопроса один раз выбирается календарный
+# интервал из этого включительного диапазона и сохраняется в пользовательском state.
+DAILY_INTERVAL_MIN_DAYS = 4
+DAILY_INTERVAL_MAX_DAYS = 7
 # Часовой пояс расписания дневного вопроса. По умолчанию МСК (UTC+3, без DST).
 DAILY_TZ = os.getenv("DAILY_TZ", "Europe/Moscow")
+# Книжная автодоставка временно выключена независимо от остальных фоновых задач.
+# Отдельный флаг оставляет ручные книжные сценарии рабочими и позволяет вернуть
+# рассылку без изменения кода.
+BOOK_REMINDERS_ENABLED = _env_bool("BOOK_REMINDERS_ENABLED", False)
 # Окно вечернего напоминания по сегодняшнему daily-вопросу. Если конец меньше
 # старта, окно считается переходящим через полночь (`23:00` → `01:00`).
 DAILY_REMINDER_START = os.getenv("DAILY_REMINDER_START", "23:00")

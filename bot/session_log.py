@@ -258,11 +258,16 @@ def transcript(session_id: str | None, *, max_chars: int = 24_000) -> str:
     return marker + tail
 
 
-def latest_answered_session_transcript(*, max_chars: int = 24_000) -> str:
-    """История сессии с самым поздним непустым пользовательским событием."""
+def latest_user_session_transcript(
+    *,
+    min_chars: int = 4,
+    max_chars: int = 24_000,
+) -> str:
+    """История сессии последнего достаточно длинного сообщения пользователя."""
     candidates: list[tuple[float, int, dict]] = []
     for index, event in enumerate(iter_events()):
-        if event.get("role") != "user" or not str(event.get("text") or "").strip():
+        text = str(event.get("text") or "").strip()
+        if event.get("role") != "user" or len(text) < max(1, int(min_chars)):
             continue
         try:
             parsed = datetime.fromisoformat(str(event.get("ts")))
@@ -276,8 +281,6 @@ def latest_answered_session_transcript(*, max_chars: int = 24_000) -> str:
         return ""
     latest = max(candidates, key=lambda item: (item[0], item[1]))[2]
     return transcript(str(latest.get("session_id") or ""), max_chars=max_chars)
-
-
 def message_ids(session_id: str | None = None) -> list[int]:
     ids: list[int] = []
     events = session_events(session_id) if session_id else iter_events()

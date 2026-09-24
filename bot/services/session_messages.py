@@ -77,3 +77,30 @@ async def send_question(
             metadata=metadata,
         )
     return sent
+
+
+async def send_plain_session_message(
+    bot: Bot,
+    chat_id: int,
+    *,
+    session_id: str,
+    q_num: int,
+    domain: str = "",
+    text: str,
+    event_kind: str,
+    metadata: dict | None = None,
+) -> Message:
+    """Отправить plain-реплику и обязательно записать её в указанную сессию."""
+    sent = await bot.send_message(chat_id, safe_chat_html(text), parse_mode="HTML")
+    session_log.append_required(
+        session_id=session_id,
+        role="assistant",
+        kind=event_kind,
+        text=text,
+        at=getattr(sent, "date", None),
+        message_id=sent.message_id,
+        q_num=q_num,
+        domain=domain,
+        metadata=metadata,
+    )
+    return sent

@@ -14,13 +14,19 @@ from .config import (
     BACKUP_KEEP,
     BACKUP_PATH,
     BACKUP_WEEKDAY,
+    BOOK_REMINDERS_ENABLED,
     DAILY_HOUR,
-    DAILY_INTERVAL_DAYS,
+    DAILY_INTERVAL_MAX_DAYS,
+    DAILY_INTERVAL_MIN_DAYS,
     DAILY_TZ,
     VAULT_PATH,
 )
 from .services import reminder_service
-from .services.daily_service import daily_targets, send_daily_question
+from .services.daily_service import (
+    daily_targets,
+    send_daily_question,
+    send_unanswered_followup_if_due,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +37,12 @@ def _daily_targets() -> list[int]:
 
 
 async def _daily_for_all(bot: Bot) -> None:
-    """Проверить, кому из доверенных пора отправить вопрос по интервалу."""
+    """Проверить предварительную реплику и срок вопроса для всех доверенных."""
     for uid in _daily_targets():
+        try:
+            await send_unanswered_followup_if_due(bot, uid)
+        except Exception:
+            log.exception("unanswered followup failed for uid=%s", uid)
         try:
             await send_daily_question(bot, uid)
         except Exception:
@@ -44,6 +54,8 @@ def _schedule_reminder_dispatch(
     bot: Bot,
     run_at: datetime,
 ) -> None:
+    if not BOOK_REMINDERS_ENABLED:
+        return
     scheduler.add_job(
         _send_due_daily_reminders,
         trigger=DateTrigger(run_date=run_at, timezone=DAILY_TZ),
@@ -55,6 +67,8 @@ def _schedule_reminder_dispatch(
 
 
 async def _plan_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> None:
+    if not BOOK_REMINDERS_ENABLED:
+        return
     run_at, targets = await reminder_service.ensure_daily_reminder_plan()
     if run_at is None:
         log.info("daily reminder planning skipped: no unanswered daily targets")
@@ -64,6 +78,8 @@ async def _plan_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> None:
 
 
 async def _send_due_daily_reminders(bot: Bot) -> None:
+    if not BOOK_REMINDERS_ENABLED:
+        return
     result = await reminder_service.send_due_daily_reminders(bot)
     log.info(
         "daily reminder dispatch done: sent=%s skipped=%s errors=%s",
@@ -83,7 +99,7 @@ def _now_hour_local() -> int:
 
 
 async def catch_up_daily(bot: Bot) -> None:
-    """Догон после простоя: после часа рассылки проверить четырёхдневный интервал.
+    """Догон после простоя: проверить сохранённые даты реплики и вопроса.
 
     За пропущенные даты вопросы не бэкфиллим: при наступившем сроке отправляется
     ровно один текущий вопрос, а новая дата становится началом следующего интервала.
@@ -91,11 +107,7 @@ async def catch_up_daily(bot: Bot) -> None:
     if _now_hour_local() < DAILY_HOUR:
         return  # время рассылки сегодня ещё не наступило — ждём cron
     log.info("catch_up_daily: время рассылки прошло, проверяю интервал вопроса")
-    for uid in _daily_targets():
-        try:
-            await send_daily_question(bot, uid)
-        except Exception:
-            log.exception("catch_up_daily failed for uid=%s", uid)
+    await _daily_for_all(bot)
 
 
 async def catch_up_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> None:
@@ -103,6 +115,9 @@ async def catch_up_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> Non
 
     До 01:00 это ещё окно предыдущего daily-дня; позже не бэкфиллим.
     """
+    if not BOOK_REMINDERS_ENABLED:
+        log.info("book reminders disabled by config")
+        return
     now = reminder_service.local_now()
     planned_at = reminder_service.pending_plan_time(now=now)
     if planned_at is not None:
@@ -124,7 +139,6 @@ async def catch_up_daily_reminders(bot: Bot, scheduler: AsyncIOScheduler) -> Non
 def start_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=DAILY_TZ)
     if BACKGROUND_JOBS_ENABLED:
-        reminder_start = reminder_service.reminder_start_time()
         scheduler.add_job(
             _daily_for_all,
             trigger=CronTrigger(hour=DAILY_HOUR, minute=0, timezone=DAILY_TZ),
@@ -132,23 +146,26 @@ def start_scheduler(bot: Bot) -> AsyncIOScheduler:
             id="daily_question",
             replace_existing=True,
         )
-        scheduler.add_job(
-            _plan_daily_reminders,
-            trigger=CronTrigger(
-                hour=reminder_start.hour,
-                minute=reminder_start.minute,
-                timezone=DAILY_TZ,
-            ),
-            args=[bot, scheduler],
-            id="daily_reminder_plan",
-            replace_existing=True,
-        )
+        if BOOK_REMINDERS_ENABLED:
+            reminder_start = reminder_service.reminder_start_time()
+            scheduler.add_job(
+                _plan_daily_reminders,
+                trigger=CronTrigger(
+                    hour=reminder_start.hour,
+                    minute=reminder_start.minute,
+                    timezone=DAILY_TZ,
+                ),
+                args=[bot, scheduler],
+                id="daily_reminder_plan",
+                replace_existing=True,
+            )
+        else:
+            log.info("book reminders disabled by config")
         log.info(
-            "scheduled question every %s days checked at %02d:00; reminder plan at %02d:%02d %s",
-            DAILY_INTERVAL_DAYS,
+            "scheduled question every %s-%s days checked at %02d:00 %s",
+            DAILY_INTERVAL_MIN_DAYS,
+            DAILY_INTERVAL_MAX_DAYS,
             DAILY_HOUR,
-            reminder_start.hour,
-            reminder_start.minute,
             DAILY_TZ,
         )
     if BACKUP_ENABLED:
